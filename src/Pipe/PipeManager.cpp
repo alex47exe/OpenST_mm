@@ -32,22 +32,29 @@ namespace {
     constexpr int kAppIdResolveRetries = 10;
     constexpr std::chrono::milliseconds kAppIdResolveRetryDelay{20};
 
-    ProcessKey MakeProcessKey(const ProcessInspector::ProcessSnapshot& snapshot) {
+    [[nodiscard]] inline ProcessKey MakeProcessKey(const ProcessInspector::ProcessSnapshot& snapshot) noexcept {
         return ProcessKey{snapshot.pid, snapshot.creationTime};
     }
 
-    std::optional<ProcessInspector::ProcessSnapshot> TryReuseCachedProcess(PID_t pid) {
+    [[nodiscard]] std::optional<ProcessInspector::ProcessSnapshot> TryReuseCachedProcess(PID_t pid) {
         const auto currentCreationTime = ProcessInspector::GetProcessCreationTime(pid);
         if (!currentCreationTime) return std::nullopt;
 
         const ProcessKey currentKey{pid, *currentCreationTime};
-        std::scoped_lock lock(g_processMutex);
-        const auto it = g_processes.find(currentKey);
-        if (it == g_processes.end()) return std::nullopt;
+        std::optional<ProcessInspector::ProcessSnapshot> snapshot;
+        {
+            std::scoped_lock lock(g_processMutex);
+            const auto it = g_processes.find(currentKey);
+            if (it != g_processes.end()) {
+                snapshot = it->second;
+            }
+        }
 
-        LOG_PIPE_DEBUG("PipeManager: reusing cached process snapshot pid={} process={}",
-                       pid, it->second.DebugString());
-        return it->second;
+        if (snapshot) {
+            LOG_PIPE_DEBUG("PipeManager: reusing cached process snapshot pid={} process={}",
+                           pid, snapshot->DebugString());
+        }
+        return snapshot;
     }
 
     ProcessInspector::ProcessSnapshot ResolveProcess(PID_t pid) {
@@ -133,17 +140,16 @@ namespace {
     std::unordered_map<AppId_t, std::chrono::steady_clock::time_point> g_toolRecentApps;
 
     void PruneToolPipesLocked(std::chrono::steady_clock::time_point now) {
-        for (auto it = g_toolPipes.begin(); it != g_toolPipes.end(); ) {
-            auto currentCreation = ProcessInspector::GetProcessCreationTime(it->first.pid);
-            if (!currentCreation || *currentCreation != it->second.process.creationTime) {
-                if (it->second.appId != k_uAppIdInvalid && it->second.appId != 0) {
-                    g_toolRecentApps[it->second.appId] = now;
+        std::erase_if(g_toolPipes, [&](const auto& pair) {
+            auto currentCreation = ProcessInspector::GetProcessCreationTime(pair.first.pid);
+            const bool isDead = !currentCreation || *currentCreation != pair.second.process.creationTime;
+            if (isDead) {
+                if (pair.second.appId != k_uAppIdInvalid && pair.second.appId != 0) {
+                    g_toolRecentApps[pair.second.appId] = now;
                 }
-                it = g_toolPipes.erase(it);
-                continue;
             }
-            ++it;
-        }
+            return isDead;
+        });
 
         std::erase_if(g_toolRecentApps, [&](const auto& pair) {
             return (now - pair.second) > std::chrono::minutes(5);
@@ -216,6 +222,12 @@ void OnHandshake(CPipeClient* pipe) {
     if (isTool) {
         RecordToolSession(pipeKey, processKey, appId);
     } else {
+        // PID reuse defense: if this pipeKey was previously recorded for an old tool process
+        // that exited, proactively purge the stale record now that a non-tool process owns the pipe.
+        {
+            std::scoped_lock lock(g_toolMutex);
+            g_toolPipes.erase(pipeKey);
+        }
         // Feature side effects run only for non-tool processes without holding the registry lock.
         DenuvoAuth::Apply(ctx);
         Injection::Apply(ctx);
@@ -231,15 +243,23 @@ bool IsToolPipe(const CPipeClient* pipe, AppId_t appId) {
         std::scoped_lock lock(g_toolMutex);
         auto it = g_toolPipes.find(pipeKey);
         if (it != g_toolPipes.end()) {
-            const auto now = std::chrono::steady_clock::now();
-            it->second.lastSeen = now;
-            if (appId != k_uAppIdInvalid && appId != 0) {
-                it->second.appId = appId;
-                g_toolRecentApps[appId] = now;
-            } else if (it->second.appId != k_uAppIdInvalid && it->second.appId != 0) {
-                g_toolRecentApps[it->second.appId] = now;
+            const auto currentCreation = ProcessInspector::GetProcessCreationTime(pipeKey.pid);
+            if (currentCreation && *currentCreation == it->second.process.creationTime) {
+                const auto now = std::chrono::steady_clock::now();
+                it->second.lastSeen = now;
+                if (appId != k_uAppIdInvalid && appId != 0) {
+                    it->second.appId = appId;
+                    g_toolRecentApps[appId] = now;
+                } else if (it->second.appId != k_uAppIdInvalid && it->second.appId != 0) {
+                    g_toolRecentApps[it->second.appId] = now;
+                }
+                return true;
             }
-            return true;
+            // Stale tool session: process terminated or PID was reused; prune immediately.
+            if (it->second.appId != k_uAppIdInvalid && it->second.appId != 0) {
+                g_toolRecentApps[it->second.appId] = std::chrono::steady_clock::now();
+            }
+            g_toolPipes.erase(it);
         }
     }
 
@@ -261,10 +281,8 @@ bool WasToolActiveRecently(AppId_t appId, std::chrono::milliseconds window) {
     PruneToolPipesLocked(now);
 
     for (const auto& [key, session] : g_toolPipes) {
-        if (session.appId == appId) {
-            if ((now - session.lastSeen) <= window) {
-                return true;
-            }
+        if (session.appId == appId && (now - session.lastSeen) <= window) {
+            return true;
         }
     }
 
