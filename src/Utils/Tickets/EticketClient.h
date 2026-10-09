@@ -36,7 +36,7 @@ namespace EticketClient {
     // backend down, bad response, or the existing ticket is a foreign
     // account). Callers fall back to the static credential store so titles
     // that don't need this keep working unchanged.
-    std::optional<std::vector<uint8_t>> FetchFreshEticket(AppId_t appId, std::span<const uint8_t> nonce, uint64_t existingSteamId = 0);
+    [[nodiscard]] std::optional<std::vector<uint8_t>> FetchFreshEticket(AppId_t appId, std::span<const uint8_t> nonce, uint64_t existingSteamId = 0);
 
     // Same backend mint, but returns the signed app-OWNERSHIP ticket instead of
     // the eticket. Both come from ONE /eticket call (one pool account) and are
@@ -45,6 +45,6 @@ namespace EticketClient {
     // required by Denuvo titles that verify ownership over the network
     // (k_EMsgClientGetAppOwnershipTicket, e.g. Suicide Squad: KTJL).
     // nonce and existingSteamId are only used on the first fetch for an app.
-    std::optional<std::vector<uint8_t>> FetchOwnershipTicket(AppId_t appId, std::span<const uint8_t> nonce, uint64_t existingSteamId = 0);
+    [[nodiscard]] std::optional<std::vector<uint8_t>> FetchOwnershipTicket(AppId_t appId, std::span<const uint8_t> nonce, uint64_t existingSteamId = 0);
 
 } // namespace EticketClient
