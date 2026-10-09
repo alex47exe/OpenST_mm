@@ -22,7 +22,7 @@ namespace OSTPlatform::Memory {
 
     [[nodiscard]] std::optional<ModuleImage> GetModuleImage(DynamicLibrary::ModuleHandle module);
     [[nodiscard]] std::optional<ModuleSection> GetModuleSection(DynamicLibrary::ModuleHandle module, std::string_view sectionName);
-    [[nodiscard]] bool WriteExecutableByte(void* target, uint8_t value);
+    bool WriteExecutableByte(void* target, uint8_t value);
     [[nodiscard]] bool WriteExecutableBytes(void* target, std::span<const uint8_t> bytes);
 
 } // namespace OSTPlatform::Memory

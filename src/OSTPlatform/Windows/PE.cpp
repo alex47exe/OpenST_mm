@@ -154,7 +154,7 @@ std::string SectionName(const IMAGE_SECTION_HEADER& section) {
 
 } // namespace
 
-bool Section::ContainsRva(uint32_t rva) const {
+bool Section::ContainsRva(uint32_t rva) const noexcept {
     const uint32_t size = (std::max)(virtualSize, rawSize);
     const uint32_t end = virtualAddress + size;
     return end >= virtualAddress && rva >= virtualAddress && rva < end;

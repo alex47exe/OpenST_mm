@@ -56,6 +56,10 @@ Windows::UniqueHandle OpenProcessHandle(uint32_t pid, DWORD access) {
 }
 
 bool TryReadProcessMemory(HANDLE process, const void* address, void* buffer, size_t size, size_t* bytesRead = nullptr) {
+    if (!process || !address || !buffer || size == 0) {
+        if (bytesRead) *bytesRead = 0;
+        return false;
+    }
     SIZE_T read = 0;
     const bool ok = ::ReadProcessMemory(process, address, buffer, size, &read) != FALSE;
     if (!ok) {
@@ -63,7 +67,7 @@ bool TryReadProcessMemory(HANDLE process, const void* address, void* buffer, siz
                        reinterpret_cast<uintptr_t>(address), size, static_cast<size_t>(read), GetLastError());
     }
     if (bytesRead) *bytesRead = static_cast<size_t>(read);
-    return ok;
+    return ok && (read > 0);
 }
 
 template <typename T>
@@ -271,7 +275,11 @@ std::optional<std::string> FindEnvironmentVariable(const std::vector<wchar_t>& e
     size_t offset = 0;
     while (offset < environment.size() && environment[offset] != L'\0') {
         const wchar_t* entry = environment.data() + offset;
-        const size_t entryLength = wcslen(entry);
+        const size_t maxLen = environment.size() - offset;
+        const size_t entryLength = wcsnlen(entry, maxLen);
+        if (entryLength == maxLen) {
+            break;
+        }
         if (entryLength > name.size() &&
             entry[name.size()] == L'=' &&
             _wcsnicmp(entry, name.data(), name.size()) == 0) {

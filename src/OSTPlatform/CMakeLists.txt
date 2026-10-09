@@ -50,5 +50,6 @@ target_compile_definitions(OSTPlatform
     PUBLIC
         NOMINMAX
     PRIVATE
+        WIN32_LEAN_AND_MEAN
         $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
 )

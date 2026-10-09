@@ -77,7 +77,7 @@ bool TryReadStackSlot(uintptr_t address, uint64_t& out) {
 
 } // namespace
 
-uint64_t Context::InstructionPointer() const {
+uint64_t Context::InstructionPointer() const noexcept {
     PCONTEXT context = AsWindowsContext(nativeContext_);
     if (!context) {
         OSTP_LOG_TRACE("Context::InstructionPointer: native context is null");
@@ -86,7 +86,7 @@ uint64_t Context::InstructionPointer() const {
     return context->Rip;
 }
 
-uint64_t Context::Argument(int index) const {
+uint64_t Context::Argument(int index) const noexcept {
     PCONTEXT context = AsWindowsContext(nativeContext_);
     if (!context) {
         OSTP_LOG_TRACE("Context::Argument({}): native context is null", index);
@@ -114,7 +114,7 @@ uint64_t Context::Argument(int index) const {
     }
 }
 
-void Context::EnableSingleStep() {
+void Context::EnableSingleStep() noexcept {
     PCONTEXT context = AsWindowsContext(nativeContext_);
     if (!context) {
         OSTP_LOG_TRACE("Context::EnableSingleStep: native context is null");

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <thread>
@@ -10,8 +11,17 @@ namespace OSTPlatform::Thread {
 
     using NativeThreadHandle = void*;
 
-    NativeThreadHandle CurrentNativeThreadHandle();
+    [[nodiscard]] NativeThreadHandle CurrentNativeThreadHandle() noexcept;
     bool StartDetached(std::function<uint32_t()> entry);
+
+    template <typename Fn>
+        requires std::invocable<Fn> && std::same_as<std::invoke_result_t<Fn>, void>
+    inline bool StartDetached(Fn&& entry) {
+        return StartDetached(std::function<uint32_t()>([fn = std::forward<Fn>(entry)]() mutable -> uint32_t {
+            fn();
+            return 0;
+        }));
+    }
 
     // RAII thread wrapper that detaches on destruction if still joinable.
     // In Windows DLL lifecycles, when ExitProcess is invoked, the OS terminates all
@@ -65,6 +75,10 @@ namespace OSTPlatform::Thread {
 
         void join() {
             if (m_thread.joinable()) {
+                if (m_thread.get_id() == std::this_thread::get_id()) {
+                    m_thread.detach();
+                    return;
+                }
                 m_thread.join();
             }
         }
