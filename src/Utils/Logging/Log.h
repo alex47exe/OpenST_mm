@@ -1,10 +1,11 @@
 #pragma once
 
-// Multi-file logger backed by spdlog (Debug only; Release → no-ops).
+// Multi-file logger backed by spdlog (Debug only; Release -> no-ops).
 //
 // Log::Init()        — creates main.log at trace level (before Config).
 // Log::InitModules()  — creates per-module loggers + applies Config level
 //                       to all loggers. Call after Config::Load().
+// Log::Shutdown()    — flushes and gracefully drops all loggers on unload.
 //
 // General macros  →  <steam>/opensteamtool/main.log
 // Module macros   →  <steam>/opensteamtool/<module>.log
@@ -26,13 +27,16 @@
 #include <memory>
 
 namespace Log {
-    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule);
-    void InitModules();
-    void ApplyConfigLevel();
+    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) noexcept;
+    void InitModules() noexcept;
+    void ApplyConfigLevel() noexcept;
 
     // Route OSTPlatform's logging facade into the host's "platform" logger.
     // Call once after InitModules() (the Platform logger must exist first).
-    void InstallPlatformLogSink();
+    void InstallPlatformLogSink() noexcept;
+
+    // Gracefully flush and teardown all loggers (LIFO lifecycle symmetry).
+    void Shutdown() noexcept;
 
     inline std::shared_ptr<spdlog::logger> Main;
 
@@ -43,21 +47,23 @@ namespace Log {
 }
 
 // ── General-purpose (main.log) ──────────────────────────────────────
-#define LOG_TRACE(...) SPDLOG_LOGGER_TRACE(Log::Main, __VA_ARGS__)
-#define LOG_DEBUG(...) SPDLOG_LOGGER_DEBUG(Log::Main, __VA_ARGS__)
-#define LOG_INFO(...)  SPDLOG_LOGGER_INFO(Log::Main, __VA_ARGS__)
-#define LOG_WARN(...)  SPDLOG_LOGGER_WARN(Log::Main, __VA_ARGS__)
-#define LOG_ERROR(...) SPDLOG_LOGGER_ERROR(Log::Main, __VA_ARGS__)
+// Using short-circuit check avoids parameter evaluation when log level is disabled.
+#define LOG_TRACE(...) do { if (Log::Main && Log::Main->should_log(spdlog::level::trace)) SPDLOG_LOGGER_TRACE(Log::Main, __VA_ARGS__); } while (0)
+#define LOG_DEBUG(...) do { if (Log::Main && Log::Main->should_log(spdlog::level::debug)) SPDLOG_LOGGER_DEBUG(Log::Main, __VA_ARGS__); } while (0)
+#define LOG_INFO(...)  do { if (Log::Main && Log::Main->should_log(spdlog::level::info))  SPDLOG_LOGGER_INFO(Log::Main, __VA_ARGS__); } while (0)
+#define LOG_WARN(...)  do { if (Log::Main && Log::Main->should_log(spdlog::level::warn))  SPDLOG_LOGGER_WARN(Log::Main, __VA_ARGS__); } while (0)
+#define LOG_ERROR(...) do { if (Log::Main && Log::Main->should_log(spdlog::level::err))   SPDLOG_LOGGER_ERROR(Log::Main, __VA_ARGS__); } while (0)
 
 #else  // OPENSTEAMTOOL_LOGGING_ENABLED
 
 #include "OSTPlatform/include/DynamicLibrary.h"
 
 namespace Log {
-    inline void Init(OSTPlatform::DynamicLibrary::ModuleHandle) {}
-    inline void InitModules() {}
-    inline void ApplyConfigLevel() {}
-    inline void InstallPlatformLogSink() {}
+    inline void Init(OSTPlatform::DynamicLibrary::ModuleHandle) noexcept {}
+    inline void InitModules() noexcept {}
+    inline void ApplyConfigLevel() noexcept {}
+    inline void InstallPlatformLogSink() noexcept {}
+    inline void Shutdown() noexcept {}
 }
 
 #define LOG_TRACE(...)  ((void)0)

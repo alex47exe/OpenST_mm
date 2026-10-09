@@ -313,6 +313,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
             CloudRedirectHost::Shutdown();
             HookManager::UninstallUIHooks();
             HookManager::UninstallClientHooks();
+            Log::Shutdown();
         } else {
             // Process termination (ExitProcess): The OS has already terminated all secondary
             // threads. Never join or wait on mutexes held by terminated threads under the loader
