@@ -236,6 +236,13 @@ namespace {
                 active_ = false;
             }
         }
+        void DismissLocked(ProcessAuth& auth) noexcept {
+            if (active_) {
+                auth.scanning = false;
+                g_scanCv.notify_all();
+                active_ = false;
+            }
+        }
         ScanningGuard(const ScanningGuard&) = delete;
         ScanningGuard& operator=(const ScanningGuard&) = delete;
     private:
@@ -309,27 +316,27 @@ void Apply(const PipeContext& ctx) {
     bool denuvo = false;
     bool isDAuth2 = LuaConfig::IsDAuth2(ctx.appId);
 
-    bool cmdLineQueried = false;
-    std::optional<std::string> cmdLine;
-    auto GetCmdLine = [&]() -> const std::string* {
-        if (!cmdLineQueried && ctx.process.pid != 0) {
-            cmdLineQueried = true;
-            cmdLine = OSTPlatform::Process::GetProcessCommandLine(ctx.process.pid);
-        }
-        return cmdLine ? &*cmdLine : nullptr;
-    };
+    if (needsScan) {
+        bool cmdLineQueried = false;
+        std::optional<std::string> cmdLine;
+        auto GetCmdLine = [&]() -> const std::string* {
+            if (!cmdLineQueried && ctx.process.pid != 0) {
+                cmdLineQueried = true;
+                cmdLine = OSTPlatform::Process::GetProcessCommandLine(ctx.process.pid);
+            }
+            return cmdLine ? &*cmdLine : nullptr;
+        };
 
-    if (!isDAuth2) {
-        if (const auto* cmd = GetCmdLine()) {
-            if (HasDAuth2Arg(cmd->c_str())) {
-                isDAuth2 = true;
-                LuaConfig::SetCmdLineDAuth2(ctx.appId, true);
-                LOG_PIPE_INFO("DenuvoAuth: detected -dauth2 in process command line for appid={}", ctx.appId);
+        if (!isDAuth2) {
+            if (const auto* cmd = GetCmdLine()) {
+                if (HasDAuth2Arg(cmd->c_str())) {
+                    isDAuth2 = true;
+                    LuaConfig::SetCmdLineDAuth2(ctx.appId, true);
+                    LOG_PIPE_INFO("DenuvoAuth: detected -dauth2 in process command line for appid={}", ctx.appId);
+                }
             }
         }
-    }
 
-    if (needsScan) {
         bool isNoDenuvo = LuaConfig::IsNoDenuvo(ctx.appId);
         bool isForcedDenuvo = LuaConfig::IsForcedDenuvo(ctx.appId);
 
@@ -391,7 +398,7 @@ void Apply(const PipeContext& ctx) {
     }
 
     if (scanGuard) {
-        scanGuard->Dismiss();
+        scanGuard->DismissLocked(auth);
     }
 
     auth.OnHandshake(ctx);
@@ -437,7 +444,7 @@ namespace {
                 if (creation && *creation == procKey.creationTime) {
                     const auto inspect = ProcessInspector::InspectProcess(procKey.pid);
                     const auto resolved = inspect.ResolveAppId();
-                    if (resolved == k_uAppIdInvalid || resolved == appId) {
+                    if (resolved == appId) {
                         auth.authorizedAppId = appId;
                         fn(auth);
                         return;

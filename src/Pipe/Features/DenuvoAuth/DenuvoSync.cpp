@@ -35,13 +35,13 @@ namespace PipeManager::DenuvoAuth {
 
         for (size_t i = 0; i <= cmdLine.size() - argLen; ++i) {
             // Fast token boundary check: token must begin at string start or after whitespace/quotes
-            if (i == 0 || cmdLine[i - 1] == ' ' || cmdLine[i - 1] == '\t' || cmdLine[i - 1] == '"' || cmdLine[i - 1] == '\'') {
+            if (i == 0 || std::isspace(static_cast<unsigned char>(cmdLine[i - 1])) || cmdLine[i - 1] == '"' || cmdLine[i - 1] == '\'') {
                 if (_strnicmp(cmdLine.data() + i, arg.data(), argLen) == 0) {
                     if (i + argLen == cmdLine.size()) {
                         return true;
                     }
                     const char next = cmdLine[i + argLen];
-                    if (next == ' ' || next == '\t' || next == '"' || next == '\'' || next == '=') {
+                    if (std::isspace(static_cast<unsigned char>(next)) || next == '"' || next == '\'' || next == '=' || next == ':') {
                         return true;
                     }
                 }
@@ -502,7 +502,7 @@ namespace {
                 if (ec) break;
                 if (!entry.is_regular_file(ec)) continue;
 
-                auto fn = entry.path().filename().string();
+                auto fn = OSTPlatform::Encoding::PathToUtf8(entry.path().filename());
                 // Expected format: <depotId>_<gid>.manifest
                 if (!fn.ends_with(".manifest")) continue;
 
@@ -658,6 +658,7 @@ void OnSpawnProcess(AppId_t appId, const char* pExePath, const char* cmdLine) {
     while (!exeSv.empty() && (exeSv.back() == '"' || exeSv.back() == '\'')) {
         exeSv.remove_suffix(1);
     }
+    exeSv = TrimWhitespace(exeSv);
     try {
         SyncOrGenerate(appId, std::string(exeSv), hasLuaArg);
     } catch (const std::exception& ex) {
