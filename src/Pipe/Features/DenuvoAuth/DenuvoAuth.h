@@ -10,13 +10,13 @@ namespace PipeManager::DenuvoAuth {
 
     // True only while the pipe belongs to a Denuvo process and is currently
     // within the active authorization window (startup grace period or ticket lease).
-    bool IsAuthorizedPipe(const CPipeClient* pipe);
+    [[nodiscard]] bool IsAuthorizedPipe(const CPipeClient* pipe);
 
     // True if the pipe belongs to a process detected or forced as Denuvo.
-    bool IsDenuvoPipe(const CPipeClient* pipe);
+    [[nodiscard]] bool IsDenuvoPipe(const CPipeClient* pipe);
 
     // Returns the AppId tracked for this pipe, or k_uAppIdInvalid if unknown.
-    AppId_t GetAuthorizedAppId(const CPipeClient* pipe);
+    [[nodiscard]] AppId_t GetAuthorizedAppId(const CPipeClient* pipe);
 
     // Legacy/fallback: refreshes the authorization window for ownership tickets.
     void OnTicketRequested(const CPipeClient* pipe, AppId_t appId = k_uAppIdInvalid);
