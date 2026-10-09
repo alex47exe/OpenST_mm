@@ -12,6 +12,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace OSTPlatform::Http {
 namespace {
@@ -28,30 +29,29 @@ struct ParsedUrl {
     bool valid = false;
 };
 
-ParsedUrl ParseUrl(const char* rawUrl) {
+ParsedUrl ParseUrl(std::string_view url) {
     ParsedUrl out;
-    if (!rawUrl) return out;
+    if (url.empty()) return out;
 
-    std::string url(rawUrl);
     if (url.starts_with("https://")) {
         out.tls = true;
         out.port = INTERNET_DEFAULT_HTTPS_PORT;
-        url = url.substr(8);
+        url.remove_prefix(8);
     } else if (url.starts_with("http://")) {
-        url = url.substr(7);
+        url.remove_prefix(7);
     } else {
         return out;
     }
 
     const size_t slash = url.find('/');
-    const std::string hostPart = url.substr(0, slash);
-    const std::string pathPart = (slash != std::string::npos) ? url.substr(slash) : "/";
+    const std::string_view hostPart = url.substr(0, slash);
+    const std::string_view pathPart = (slash != std::string_view::npos) ? url.substr(slash) : std::string_view("/");
     out.path = Encoding::Utf8ToWide(pathPart);
 
     const size_t colon = hostPart.find(':');
-    if (colon != std::string::npos) {
+    if (colon != std::string_view::npos) {
         out.host = Encoding::Utf8ToWide(hostPart.substr(0, colon));
-        const auto port = Numbers::ParseUInt32(hostPart, {colon + 1});
+        const auto port = Numbers::ParseUInt32(hostPart.substr(colon + 1));
         if (!port || *port == 0 || *port > 65535) return out;
         out.port = static_cast<INTERNET_PORT>(*port);
     } else {
@@ -76,7 +76,7 @@ Result Execute(const wchar_t* method,
                size_t maxResponseBytes) {
     Result r;
 
-    ParsedUrl pu = ParseUrl(url);
+    ParsedUrl pu = ParseUrl(url ? std::string_view(url) : std::string_view{});
     if (!pu.valid) {
         OSTP_LOG_WARN("Invalid URL: {}", url ? url : "");
         return r;
@@ -188,6 +188,7 @@ Result Execute(const wchar_t* method,
             if (r.body.size() > maxResponseBytes) {
                 OSTP_LOG_WARN("{} - response body exceeded cap of {} bytes, truncating",
                               url ? url : "", maxResponseBytes);
+                r.body.resize(maxResponseBytes);
                 break;
             }
         }

@@ -6,10 +6,10 @@
 
 namespace OSTPlatform::Encoding {
 
-    std::string WideToUtf8(std::wstring_view value);
-    std::wstring Utf8ToWide(std::string_view value);
+    [[nodiscard]] std::string WideToUtf8(std::wstring_view value);
+    [[nodiscard]] std::wstring Utf8ToWide(std::string_view value);
 
-    inline std::filesystem::path PathFromUtf8(std::string_view u8str) {
+    [[nodiscard]] inline std::filesystem::path PathFromUtf8(std::string_view u8str) {
 #if defined(_WIN32)
         return std::filesystem::path(Utf8ToWide(u8str));
 #else
@@ -17,9 +17,9 @@ namespace OSTPlatform::Encoding {
 #endif
     }
 
-    inline std::string PathToUtf8(const std::filesystem::path& p) {
+    [[nodiscard]] inline std::string PathToUtf8(const std::filesystem::path& p) {
 #if defined(_WIN32)
-        return WideToUtf8(p.wstring());
+        return WideToUtf8(p.native());
 #else
         return p.string();
 #endif
