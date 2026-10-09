@@ -8,8 +8,10 @@
 #include "Utils/Logging/Log.h"
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace CloudRedirectHost {
@@ -35,10 +37,31 @@ namespace {
     using CR_GetAchievements_t    = uint32_t (*)(uint32_t, CloudRedirectHost::AchievementBlock*, uint32_t);
     using CR_InstallVtableHooks_t = bool (*)();
 
-    std::mutex        g_mutex;
-    std::atomic<bool> g_active{false};
+    std::mutex            g_mutex;
+    std::atomic<bool>     g_active{false};
     std::atomic<uint32_t> g_cachedAccountId{0};
+    std::atomic<uint32_t> g_inFlightCalls{0};
     OSTPlatform::DynamicLibrary::ModuleHandle g_module = nullptr;
+
+    struct InFlightGuard {
+        bool active = false;
+        InFlightGuard() noexcept {
+            if (g_active.load(std::memory_order_acquire)) {
+                g_inFlightCalls.fetch_add(1, std::memory_order_acquire);
+                if (g_active.load(std::memory_order_acquire)) {
+                    active = true;
+                } else {
+                    g_inFlightCalls.fetch_sub(1, std::memory_order_release);
+                }
+            }
+        }
+        ~InFlightGuard() noexcept {
+            if (active) {
+                g_inFlightCalls.fetch_sub(1, std::memory_order_release);
+            }
+        }
+        [[nodiscard]] explicit operator bool() const noexcept { return active; }
+    };
 
     CR_InitCloudSave_t     g_initCloudSave     = nullptr;
     CR_HandleCloudRpc_t    g_handleCloudRpc    = nullptr;
@@ -274,7 +297,7 @@ void SetLicenseChecker(LicenseChecker checker) {
     g_licenseChecker.store(checker, std::memory_order_release);
 }
 
-bool IsActive() {
+bool IsActive() noexcept {
     return g_active.load(std::memory_order_acquire);
 }
 
@@ -313,17 +336,44 @@ bool HandleCloudRpc(const char* method, uint32_t appId, uint32_t accountId,
                     const uint8* reqBody, uint32_t reqLen,
                     uint8* respBuf, uint32_t respMaxLen,
                     uint32_t* respLen, int32_t* eresult) {
-    if (!g_active.load(std::memory_order_acquire) || !g_handleCloudRpc) return false;
+    if (!method || method[0] == '\0' || appId == 0 || !respLen || !eresult) return false;
+    if (IsAppLicensed(appId)) return false;
+
+    InFlightGuard guard;
+    if (!guard || !g_handleCloudRpc) return false;
+
+    if (reqLen > 0 && !reqBody) return false;
+    if (respMaxLen > 0 && !respBuf) return false;
+
     try {
-        return g_handleCloudRpc(method, appId, accountId, reqBody, reqLen,
-                                respBuf, respMaxLen, respLen, eresult);
+        const bool handled = g_handleCloudRpc(method, appId, accountId, reqBody, reqLen,
+                                              respBuf, respMaxLen, respLen, eresult);
+        if (handled) {
+            if (*respLen > respMaxLen) {
+                LOG_ERROR("CloudRedirect: CR_HandleCloudRpc buffer overrun detected (got {}, max {})",
+                          *respLen, respMaxLen);
+                *respLen = respMaxLen;
+                return false;
+            }
+        }
+        return handled;
     } catch (const std::exception& e) {
-        LOG_ERROR("CloudRedirect: CR_HandleCloudRpc({}, {}) failed: {}", method ? method : "null", appId, e.what());
+        LOG_ERROR("CloudRedirect: CR_HandleCloudRpc({}, {}) failed: {}", method, appId, e.what());
         return false;
     } catch (...) {
-        LOG_ERROR("CloudRedirect: CR_HandleCloudRpc({}, {}) failed with unknown exception", method ? method : "null", appId);
+        LOG_ERROR("CloudRedirect: CR_HandleCloudRpc({}, {}) failed with unknown exception", method, appId);
         return false;
     }
+}
+
+bool HandleCloudRpc(const char* method, uint32_t appId, uint32_t accountId,
+                    std::span<const uint8_t> reqBody,
+                    std::span<uint8_t> respBuf,
+                    uint32_t* respLen, int32_t* eresult) {
+    return HandleCloudRpc(method, appId, accountId,
+                          reqBody.data(), static_cast<uint32_t>(reqBody.size()),
+                          respBuf.data(), static_cast<uint32_t>(respBuf.size()),
+                          respLen, eresult);
 }
 
 void SetAccountId(uint32_t accountId) {
@@ -366,10 +416,15 @@ void NotifyStatsStored(uint32_t appId) {
 }
 
 uint32_t GetAchievements(uint32_t appId, AchievementBlock* out, uint32_t maxBlocks) {
+    if (appId == 0 || !out || maxBlocks == 0) return 0;
     if (IsAppLicensed(appId)) return 0;
-    if (!g_active.load(std::memory_order_acquire) || !g_getAchievements) return 0;
+
+    InFlightGuard guard;
+    if (!guard || !g_getAchievements) return 0;
+
     try {
-        return g_getAchievements(appId, out, maxBlocks);
+        const uint32_t count = g_getAchievements(appId, out, maxBlocks);
+        return std::min(count, maxBlocks);
     } catch (const std::exception& e) {
         LOG_ERROR("CloudRedirect: CR_GetAchievements({}) failed: {}", appId, e.what());
         return 0;
@@ -379,9 +434,19 @@ uint32_t GetAchievements(uint32_t appId, AchievementBlock* out, uint32_t maxBloc
     }
 }
 
+uint32_t GetAchievements(uint32_t appId, std::span<AchievementBlock> outBlocks) {
+    return GetAchievements(appId, outBlocks.data(), static_cast<uint32_t>(outBlocks.size()));
+}
+
 void Shutdown() {
     std::lock_guard lock(g_mutex);
-    if (!g_active.exchange(false)) return;
+    if (!g_active.exchange(false, std::memory_order_acq_rel)) return;
+
+    // Bounded wait (up to 50ms) for in-flight calls to exit, preventing Loader Lock deadlock.
+    for (int i = 0; i < 50 && g_inFlightCalls.load(std::memory_order_acquire) > 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     g_cachedAccountId.store(0, std::memory_order_release);
     g_onlineFixResolver.store(nullptr, std::memory_order_release);
     g_licenseChecker.store(nullptr, std::memory_order_release);
