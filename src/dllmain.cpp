@@ -6,6 +6,7 @@
 #include "Hook/Hooks_SteamUI.h"
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Config/ConfigFileWatcher.h"
+#include "Utils/Config/LuaConfig.h"
 #include "Utils/Config/LuaFileWatcher.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
@@ -313,6 +314,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
             CloudRedirectHost::Shutdown();
             HookManager::UninstallUIHooks();
             HookManager::UninstallClientHooks();
+            LuaConfig::Shutdown();
             Log::Shutdown();
         } else {
             // Process termination (ExitProcess): The OS has already terminated all secondary

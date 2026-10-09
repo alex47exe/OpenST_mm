@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace ConfigFileWatcher {
@@ -41,7 +42,12 @@ bool ContainsConfigChange(
     const std::vector<OSTPlatform::DirectoryWatch::Change>& changes,
     std::string_view targetFileName) {
     for (const auto& change : changes) {
-        if (SameFileName(change.relativePath, targetFileName)) {
+        std::string_view changeName = change.relativePath;
+        const size_t slash = changeName.find_last_of("\\/");
+        if (slash != std::string_view::npos) {
+            changeName = changeName.substr(slash + 1);
+        }
+        if (SameFileName(changeName, targetFileName)) {
             return true;
         }
     }
@@ -49,14 +55,27 @@ bool ContainsConfigChange(
 }
 
 std::vector<std::string> BuildLuaWatchDirs() {
-    std::vector<std::string> watchDirs = Config::GetLuaPaths();
-    watchDirs.push_back(g_defaultLuaDir);
+    std::vector<std::string> watchDirs;
+    std::unordered_set<std::string> seen;
+    auto addDir = [&](const std::string& d) {
+        if (d.empty()) return;
+        std::string norm = OSTPlatform::Encoding::PathToUtf8(
+            OSTPlatform::Encoding::PathFromUtf8(d).lexically_normal());
+        if (seen.insert(norm).second) {
+            watchDirs.push_back(std::move(norm));
+        }
+    };
+
+    for (const auto& p : Config::GetLuaPaths()) {
+        addDir(p);
+    }
+    addDir(g_defaultLuaDir);
     if (IsPortableMode()) {
         std::string steamLua = OSTPlatform::Encoding::PathToUtf8(
             OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / "config" / "lua");
         std::error_code ec;
-        if (std::filesystem::exists(OSTPlatform::Encoding::PathFromUtf8(steamLua), ec) && !ec && steamLua != g_defaultLuaDir) {
-            watchDirs.push_back(steamLua);
+        if (std::filesystem::exists(OSTPlatform::Encoding::PathFromUtf8(steamLua), ec) && !ec) {
+            addDir(steamLua);
         }
     }
     return watchDirs;
@@ -98,7 +117,10 @@ void WatcherThread() {
     } runningGuard{g_running};
 
     const std::filesystem::path configPath = OSTPlatform::Encoding::PathFromUtf8(g_configPath);
-    const std::filesystem::path dirPath = configPath.parent_path();
+    std::filesystem::path dirPath = configPath.parent_path();
+    if (dirPath.empty()) {
+        dirPath = std::filesystem::current_path();
+    }
     const std::string dirPathUtf8 = OSTPlatform::Encoding::PathToUtf8(dirPath);
     const std::string targetFileName = OSTPlatform::Encoding::PathToUtf8(configPath.filename());
 

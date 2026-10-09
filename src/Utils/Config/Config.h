@@ -39,14 +39,14 @@ namespace Config {
 
     LoadResult Load(const std::string& configPath);
 
-    ManifestTimeouts GetManifestTimeouts();
-    LogLevel GetLogLevel();
-    std::string GetLogDir();
-    std::vector<std::string> GetLuaPaths();
-    std::string GetRemoteUrlTemplate();
-    CloudSettings GetCloudSettings();
-    bool GetStatsEnableApi();
-    std::vector<InjectDll> GetInjectDlls();
-    bool GetManifestLockOwnedGames();
-    bool GetManifestAutoSyncOnUpdate();
+    [[nodiscard]] ManifestTimeouts GetManifestTimeouts();
+    [[nodiscard]] LogLevel GetLogLevel();
+    [[nodiscard]] std::string GetLogDir();
+    [[nodiscard]] std::vector<std::string> GetLuaPaths();
+    [[nodiscard]] std::string GetRemoteUrlTemplate();
+    [[nodiscard]] CloudSettings GetCloudSettings();
+    [[nodiscard]] bool GetStatsEnableApi();
+    [[nodiscard]] std::vector<InjectDll> GetInjectDlls();
+    [[nodiscard]] bool GetManifestLockOwnedGames();
+    [[nodiscard]] bool GetManifestAutoSyncOnUpdate();
 }
