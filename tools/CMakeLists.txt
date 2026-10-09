@@ -9,6 +9,14 @@ add_executable(ipc_codegen
     ipc_codegen/ipc_codegen.cpp
 )
 target_compile_features(ipc_codegen PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(ipc_codegen PRIVATE /utf-8 /W4 /permissive-)
+else()
+    target_compile_options(ipc_codegen PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+set_target_properties(ipc_codegen PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
 
 
 add_executable(extract_tickets
