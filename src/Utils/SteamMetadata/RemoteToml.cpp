@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 #include <windows.h>
+#include <toml++/toml.hpp>
 
 namespace RemoteToml {
 
@@ -22,6 +23,12 @@ namespace {
     constexpr const char* kJsdelivrTemplate =
         "https://cdn.jsdelivr.net/gh/mmxlyo/steam-monitor@"
         "{channel}/{component}/{sha256}.toml";
+
+    // Strictly bounded network timeouts for small metadata TOML files.
+    constexpr uint32_t kRemoteResolveTimeoutMs = 1500;
+    constexpr uint32_t kRemoteConnectTimeoutMs = 2000;
+    constexpr uint32_t kRemoteSendTimeoutMs    = 2000;
+    constexpr uint32_t kRemoteRecvTimeoutMs    = 3000;
 
     static bool HasPlaceholder(std::string_view text, std::string_view placeholder)
     {
@@ -70,6 +77,18 @@ namespace {
 
         return { remoteUrlTemplate };
     }
+
+    static bool ValidateTomlContent(std::string_view body, std::string* outError = nullptr)
+    {
+        try {
+            const auto tbl = toml::parse(body);
+            return !tbl.empty();
+        } catch (const toml::parse_error& e) {
+            if (outError) *outError = e.description();
+            return false;
+        }
+    }
+
 } // namespace
 
 Result Fetch(const Request& request, FetchMode mode)
@@ -86,7 +105,7 @@ Result Fetch(const Request& request, FetchMode mode)
         std::chrono::steady_clock::now() - hashStart).count();
 
     if (out.sha256.empty()) {
-        LOG_WARN("RemoteToml({}/{}): Sha256OfFile failed for {} ({} ms)",
+        LOG_WARN("RemoteToml({}/{}): Sha256Of failed for {} ({} ms)",
                  request.channel, request.component, request.dllPath, hashMs);
         return out;
     }
@@ -123,16 +142,26 @@ Result Fetch(const Request& request, FetchMode mode)
             if (ifs) {
                 std::string buf(static_cast<size_t>(sz), '\0');
                 if (ifs.read(buf.data(), static_cast<std::streamsize>(sz))) {
-                    LOG_INFO("RemoteToml({}/{}): loaded from cache {}",
-                             request.channel, request.component, PathToUtf8(localPath));
-                    out.body = std::move(buf);
-                    out.ok = true;
-                    out.fromCache = true;
-                    return out;
+                    std::string parseErr;
+                    if (ValidateTomlContent(buf, &parseErr)) {
+                        LOG_INFO("RemoteToml({}/{}): loaded from cache {}",
+                                 request.channel, request.component, PathToUtf8(localPath));
+                        out.body = std::move(buf);
+                        out.ok = true;
+                        out.fromCache = true;
+                        return out;
+                    }
+                    // Self-healing: if local file exists but is corrupted (e.g. truncated/bad HTML),
+                    // purge it and fall back to remote mirror fetch instead of permanently bricking startup.
+                    LOG_WARN("RemoteToml({}/{}): cache file exists but corrupted ({}). Purging bad cache: {}",
+                             request.channel, request.component, parseErr, PathToUtf8(localPath));
+                    std::error_code rmEc;
+                    fs::remove(localPath, rmEc);
                 }
+            } else {
+                LOG_WARN("RemoteToml({}/{}): cache file exists but failed to read: {}",
+                         request.channel, request.component, PathToUtf8(localPath));
             }
-            LOG_WARN("RemoteToml({}/{}): cache file exists but failed to read or empty: {}",
-                     request.channel, request.component, PathToUtf8(localPath));
         }
     }
 
@@ -146,10 +175,23 @@ Result Fetch(const Request& request, FetchMode mode)
         LOG_INFO("RemoteToml({}/{}): downloading {}",
                  request.channel, request.component, lastUrl);
 
-        http = OSTPlatform::Http::Execute(L"GET", lastUrl.c_str(),
-                                          nullptr, 0, nullptr);
+        http = OSTPlatform::Http::Execute(
+            L"GET", lastUrl.c_str(),
+            nullptr, 0, nullptr,
+            kRemoteResolveTimeoutMs,
+            kRemoteConnectTimeoutMs,
+            kRemoteSendTimeoutMs,
+            kRemoteRecvTimeoutMs);
 
-        if (http.ok && http.status == 200) break;
+        if (http.ok && http.status == 200) {
+            std::string parseErr;
+            if (ValidateTomlContent(http.body, &parseErr)) {
+                break; // Valid TOML content received
+            }
+            LOG_WARN("RemoteToml({}/{}): mirror returned HTTP 200 but payload is not valid TOML ({}) from {}",
+                     request.channel, request.component, parseErr, lastUrl);
+            http.ok = false;
+        }
 
         if (http.ok && http.status == 404) {
             LOG_WARN("RemoteToml({}/{}): mirror has no such file (HTTP 404): {}",
@@ -163,7 +205,7 @@ Result Fetch(const Request& request, FetchMode mode)
         }
     }
 
-    // 4. Remote OK → write cache atomically, return body.
+    // 4. Remote OK and validated -> write cache atomically, return body.
     if (http.ok && http.status == 200 && !http.body.empty()) {
         std::error_code mkdirEc;
         fs::create_directories(cacheDir, mkdirEc);

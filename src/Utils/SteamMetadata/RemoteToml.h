@@ -23,6 +23,6 @@ namespace RemoteToml {
 
     // Prefer the exact local cache during normal startup. RemoteOnly bypasses
     // that cache and is reserved for an explicit lazy refresh.
-    Result Fetch(const Request& request, FetchMode mode = FetchMode::PreferCache);
+    [[nodiscard]] Result Fetch(const Request& request, FetchMode mode = FetchMode::PreferCache);
 
 } // namespace RemoteToml

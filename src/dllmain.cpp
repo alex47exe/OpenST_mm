@@ -10,7 +10,9 @@
 #include "Utils/Config/LuaFileWatcher.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
+#include "Utils/SteamMetadata/ManifestClient.h"
 #include "Utils/SteamMetadata/PatternLoader.h"
+#include "Utils/SteamMetadata/StatsClient.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Encoding.h"
@@ -314,6 +316,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
             CloudRedirectHost::Shutdown();
             HookManager::UninstallUIHooks();
             HookManager::UninstallClientHooks();
+            ManifestClient::Shutdown();
+            StatsClient::Shutdown();
             LuaConfig::Shutdown();
             Log::Shutdown();
         } else {
@@ -324,6 +328,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
             ConfigFileWatcher::Detach();
             LuaFileWatcher::Detach();
             HookManager::DetachWorkerThreads();
+            ManifestClient::Shutdown();
+            StatsClient::Shutdown();
         }
     }
 

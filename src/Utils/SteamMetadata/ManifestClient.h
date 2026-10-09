@@ -16,7 +16,7 @@ namespace ManifestClient {
     bool SetProvider(std::string_view name);
 
     // Name of the currently active provider (for logging / diagnostics).
-    std::string_view ActiveProviderName();
+    [[nodiscard]] std::string_view ActiveProviderName() noexcept;
 
     // Resolve a manifest GID to its request code. Tries Lua first
     // (fetch_manifest_code_ex, then fetch_manifest_code), then the
@@ -25,5 +25,5 @@ namespace ManifestClient {
                                   AppId_t appId = 0, AppId_t depotId = 0);
 
     // Tear down the cached WinHTTP connection (call at unload).
-    void Shutdown();
+    void Shutdown() noexcept;
 }
