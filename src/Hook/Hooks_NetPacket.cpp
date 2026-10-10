@@ -789,10 +789,11 @@ namespace Hooks_NetPacket_Manifest {
         // Bounded pruning of stale in-flight futures
         if (g_InFlightFutures.size() >= 64) {
             std::erase_if(g_InFlightFutures, [](const auto& item) {
-                return item.second.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                return !item.second.valid() ||
+                       item.second.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
             });
-            if (g_InFlightFutures.size() >= 64) {
-                g_InFlightFutures.clear();
+            while (g_InFlightFutures.size() >= 64) {
+                g_InFlightFutures.erase(g_InFlightFutures.begin());
             }
         }
 
@@ -873,13 +874,21 @@ namespace Hooks_NetPacket_Manifest {
             }
         }
         if (code == 0 && job.future.valid()) {
-            auto status = job.future.wait_for(std::chrono::milliseconds(kMaxWaitMilliseconds));
-            if (status != std::future_status::ready) {
-                LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out ({}ms) for jobid={}, gid={}, passing through",
-                                  kMaxWaitMilliseconds, jobId, job.manifestGid);
-                return;
+            try {
+                auto status = job.future.wait_for(std::chrono::milliseconds(kMaxWaitMilliseconds));
+                if (status != std::future_status::ready) {
+                    LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out ({}ms) for jobid={}, gid={}, passing through",
+                                      kMaxWaitMilliseconds, jobId, job.manifestGid);
+                    return;
+                }
+                code = job.future.get();
+            } catch (const std::exception& e) {
+                LOG_MANIFEST_ERROR("GetManifestRequestCode recv: future wait/get failed: {}", e.what());
+                code = 0;
+            } catch (...) {
+                LOG_MANIFEST_ERROR("GetManifestRequestCode recv: future wait/get failed with unknown exception");
+                code = 0;
             }
-            code = job.future.get();
         }
 
         if (!code) {
@@ -1102,11 +1111,12 @@ namespace Hooks_NetPacket_RichPresence {
         uint64 localSteamId = 0;
         {
             std::lock_guard lock(g_RPMutex);
-            if (g_LocalSteamId == 0) {
+            if (g_LocalSteamId.load(std::memory_order_relaxed) == 0) {
                 CMsgProtoBufHeader hdr;
                 if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_steamid() && hdr.steamid()) {
-                    g_LocalSteamId = hdr.steamid();
-                    localSteamId = g_LocalSteamId;
+                    const uint64 id = hdr.steamid();
+                    g_LocalSteamId.store(id, std::memory_order_relaxed);
+                    localSteamId = id;
                     LOG_RICHPRESENCE_DEBUG("Captured local SteamID 0x{:X}", localSteamId);
                 }
             }
@@ -1480,8 +1490,11 @@ namespace Hooks_NetPacket_Cloud {
 
         {
             std::lock_guard lk(g_queueMutex);
-            if (g_pending.size() < 64)
-                g_pending.push_back(std::move(pkt));
+            if (g_pending.size() >= 128) {
+                LOG_NETPACKET_WARN("Cloud: queue capacity reached (128), dropping oldest pending response to prevent hang");
+                g_pending.pop_front();
+            }
+            g_pending.push_back(std::move(pkt));
         }
         LOG_NETPACKET_DEBUG("Cloud: handled {} app={} -> queued {}-byte response (eresult={})",
                             jobName, appId, total, eresult);
