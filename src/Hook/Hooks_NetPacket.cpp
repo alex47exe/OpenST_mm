@@ -1405,16 +1405,14 @@ namespace Hooks_NetPacket_RichPresence {
     // m_mapRichPresence, which is rebuilt from rich_presence() whenever
     // that bit is set.
     // Pure leaf-lock helper: caller resolves gameName before acquiring g_RPMutex.
-    // Returns true if msg.status_flags() could not be adjusted in-place because
-    // the packet co-batches multiple friends (caller should stage a single-entry inject).
-    static bool ApplyGameFields(CMsgClientPersonaState& msg,
+    static void ApplyGameFields(CMsgClientPersonaState& msg,
                                 CMsgClientPersonaState::Friend* entry,
                                 AppId_t appid,
-                                std::string_view gameName)
+                                std::string_view gameName,
+                                bool updateStatusFlags = true)
     {
         // EClientPersonaStateFlag::k_EClientPersonaStateFlagRichPresence
         constexpr uint32 kStatusFlagRichPresence = 0x1000;
-        const bool isSingleEntry = (msg.friends_size() <= 1);
         bool desiredRpFlag = false;
 
         if (appid) {
@@ -1442,16 +1440,13 @@ namespace Hooks_NetPacket_RichPresence {
             desiredRpFlag = true;
         }
 
-        const uint32 curFlags = msg.status_flags();
-        const uint32 desiredFlags = desiredRpFlag
-            ? (curFlags | kStatusFlagRichPresence)
-            : (curFlags & ~kStatusFlagRichPresence);
-
-        if (isSingleEntry) {
+        if (updateStatusFlags) {
+            const uint32 curFlags = msg.status_flags();
+            const uint32 desiredFlags = desiredRpFlag
+                ? (curFlags | kStatusFlagRichPresence)
+                : (curFlags & ~kStatusFlagRichPresence);
             msg.set_status_flags(desiredFlags);
-            return false;
         }
-        return (curFlags != desiredFlags);
     }
 
     static bool BuildInject(AppId_t appid, std::string_view gameName)
@@ -1484,7 +1479,7 @@ namespace Hooks_NetPacket_RichPresence {
             *entry = std::move(selfCopy);
         }
 
-        (void)ApplyGameFields(msg, entry, appid, gameName);
+        ApplyGameFields(msg, entry, appid, gameName);
 
         const uint32 hdrSize  = g_cbSelfHdr;
         const size_t bodyLong = msg.ByteSizeLong();
@@ -1702,21 +1697,18 @@ namespace Hooks_NetPacket_RichPresence {
             ? Hooks_Misc::GetGameNameByAppID(playingAppId)
             : std::string{};
 
-        bool shouldPatch = false;
-        bool needDedicatedInject = false;
+        bool patched = false;
         {
             std::lock_guard lock(g_RPMutex);
-            bool selfTemplateCached = false;
             if (pkt.hdr.size() <= sizeof(g_SelfHdr)) {
                 if (msg.friends_size() == 1 && pkt.body.size() <= sizeof(g_SelfBody)) {
                     if (!pkt.hdr.empty()) {
                         std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
                     }
                     std::memcpy(g_SelfBody, pkt.body.data(), pkt.body.size());
-                    g_cbSelfHdr        = static_cast<uint32>(pkt.hdr.size());
-                    g_cbSelfBody       = static_cast<uint32>(pkt.body.size());
-                    g_HaveSelfCached   = true;
-                    selfTemplateCached = true;
+                    g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
+                    g_cbSelfBody     = static_cast<uint32>(pkt.body.size());
+                    g_HaveSelfCached = true;
                 } else if (msg.friends_size() > 1) {
                     // Isolate only selfEntry into g_SelfBody so co-batched friend lists
                     // (even > 64KB on large accounts) never fail caching or bloat BuildInject.
@@ -1732,47 +1724,45 @@ namespace Hooks_NetPacket_RichPresence {
                         if (!pkt.hdr.empty()) {
                             std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
                         }
-                        g_cbSelfHdr        = static_cast<uint32>(pkt.hdr.size());
-                        g_cbSelfBody       = static_cast<uint32>(tplSize);
-                        g_HaveSelfCached   = true;
-                        selfTemplateCached = true;
+                        g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
+                        g_cbSelfBody     = static_cast<uint32>(tplSize);
+                        g_HaveSelfCached = true;
                     }
                 }
             }
 
             if (playingAppId != 0 && g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
-                needDedicatedInject = ApplyGameFields(msg, selfEntry, playingAppId, gameName);
-                shouldPatch = true;
-                if (needDedicatedInject && BuildInject(playingAppId, gameName)) {
-                    g_InjectPending.store(true, std::memory_order_release);
-                    // Strip selfEntry from co-batched packet so its un-elevated status_flags
-                    // do not pollute other friends; self is delivered via dedicated TryInject.
-                    if (selfTemplateCached && selfIndex >= 0 && selfIndex < msg.friends_size() && msg.friends_size() > 1) {
-                        msg.mutable_friends()->DeleteSubrange(selfIndex, 1);
+                bool needDedicatedInject = false;
+                if (msg.friends_size() == 1) {
+                    ApplyGameFields(msg, selfEntry, playingAppId, gameName, true);
+                } else if (BuildInject(playingAppId, gameName) &&
+                           selfIndex >= 0 && selfIndex < msg.friends_size())
+                {
+                    // Co-batched packet: strip selfEntry so its status_flags and payload
+                    // are isolated from other friends; deliver self via dedicated TryInject.
+                    msg.mutable_friends()->DeleteSubrange(selfIndex, 1);
+                    needDedicatedInject = true;
+                } else {
+                    ApplyGameFields(msg, selfEntry, playingAppId, gameName, false);
+                }
+
+                if (CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
+                    if (needDedicatedInject) {
+                        g_InjectPending.store(true, std::memory_order_release);
+                    } else {
+                        g_InjectPending.store(false, std::memory_order_release);
+                        g_cbInjectPkt = 0;
                     }
+                    patched = true;
+                } else {
+                    g_InjectPending.store(false, std::memory_order_release);
+                    g_cbInjectPkt = 0;
                 }
             }
         }
 
-        if (shouldPatch) {
-            if (CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
-                if (!needDedicatedInject) {
-                    std::lock_guard lock(g_RPMutex);
-                    if (g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
-                        g_InjectPending.store(false, std::memory_order_release);
-                        g_cbInjectPkt = 0;
-                    }
-                }
-                LOG_RICHPRESENCE_INFO("Patched live self push with appid {}", playingAppId);
-            } else if (!needDedicatedInject) {
-                // Fallback for oversized (>64KB) co-batched packets that could not be patched in-place
-                std::lock_guard lock(g_RPMutex);
-                if (g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId &&
-                    BuildInject(playingAppId, gameName))
-                {
-                    g_InjectPending.store(true, std::memory_order_release);
-                }
-            }
+        if (patched) {
+            LOG_RICHPRESENCE_INFO("Patched live self push with appid {}", playingAppId);
         }
     }
 
