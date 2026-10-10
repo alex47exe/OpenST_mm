@@ -340,9 +340,12 @@ namespace Hooks_NetPacket_AccessToken {
         int injected = 0, noToken = 0, notAddAppId = 0;
         for (auto& app : *req.mutable_apps()) {
             const AppId_t appId = app.appid();
-            if (LuaConfig::HasDepot(appId)) {
+            if (LuaConfig::HasDepot(appId) && !Hooks_Package::HasValidLicense(appId)) {
                 const uint64_t token = LuaConfig::GetAccessToken(appId);
                 if (token != 0) {
+                    if (app.has_access_token() && app.access_token() == token) {
+                        continue;
+                    }
                     LOG_PICS_DEBUG("CMsgClientPICSProductInfoRequest: inject appid={}: {} -> {}", appId,
                                app.has_access_token() ? std::to_string(app.access_token()) : "absent",
                                token);
@@ -471,6 +474,8 @@ namespace Hooks_NetPacket_UserStats {
         const uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         if (newSteamId != 0) {
             req.set_steamid(newSteamId);
+        } else if (!isOnlineFix) {
+            return false;
         }
 
         if (!CommitSendPacket(pkt, req, outFrame)) {
@@ -769,10 +774,9 @@ namespace Hooks_NetPacket_OwnershipTicket {
 
         const AppId_t appId = resp.app_id();
 
-        // Steam already returned a valid ticket (account owns it) — sync to Lua if present
-        // unless DAuth2 override is active for this app.
+        // Steam already returned a valid ticket (account owns it) — sync to Lua if present.
         if (resp.eresult() == k_EResultOK) {
-            if (!LuaConfig::IsDAuth2(appId) && resp.has_ticket() && !resp.ticket().empty()) {
+            if (resp.has_ticket() && !resp.ticket().empty()) {
                 const auto& t = resp.ticket();
                 const auto span = std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(t.data()), t.size());
                 if (PipeManager::IsToolActiveForApp(appId)) {
@@ -785,11 +789,8 @@ namespace Hooks_NetPacket_OwnershipTicket {
             return;
         }
 
-        // INV-01 & INV-02: Pass through owned / family-shared games (unless DAuth2) and unmanaged games
-        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) {
-            return;
-        }
-        if (!LuaConfig::HasDepot(appId, false)) {
+        // INV-01 & INV-02: Pass through owned / family-shared games and unmanaged games
+        if (!LuaConfig::HasDepot(appId) || Hooks_Package::HasValidLicense(appId)) {
             return;
         }
 
@@ -1012,7 +1013,7 @@ namespace Hooks_NetPacket_Manifest {
         const uint32 depotId     = req.depot_id();
         const uint64 manifestGid = req.manifest_id();
         if (depotId == 0 || manifestGid == 0) return false;
-        if (!LuaConfig::HasDepot(depotId)) return false;
+        if (!LuaConfig::HasDepot(depotId) || Hooks_Package::HasValidLicense(depotId)) return false;
 
         if (!hdr.has_jobid_source()) {
             LOG_MANIFEST_WARN("GetManifestRequestCode: missing jobid_source in header");
@@ -1573,22 +1574,19 @@ namespace Hooks_NetPacket_RichPresence {
         // can track and sync cloud saves for the real game.
         const AppId_t effectiveTopmost = ResolveOnlineFixAppId(topmost);
 
-        // Distinguish an active -onlinefix session (topmost was 480 and mapped to real AppId)
-        // from an unowned managed game (INV-01 & INV-02: owned / family-shared games let the
-        // server's natural PersonaState broadcast paint the UI).
+        // INV-01 & INV-02: Owned / family-shared games let the server's natural
+        // PersonaState broadcast paint the UI and use official Steam Cloud.
         const bool isOnlineFixApp = (topmost == kOnlineFixAppId &&
                                      effectiveTopmost != 0 &&
                                      effectiveTopmost != kOnlineFixAppId);
-        const bool isManagedUnowned = (effectiveTopmost != 0 &&
-                                       effectiveTopmost != kOnlineFixAppId &&
-                                       !Hooks_Package::HasValidLicense(effectiveTopmost) &&
-                                       (LuaConfig::HasDepot(effectiveTopmost, false) ||
-                                        CloudRedirectHost::IsApp(effectiveTopmost)));
+        const bool shouldTrack = (effectiveTopmost != 0 &&
+                                  effectiveTopmost != kOnlineFixAppId &&
+                                  !Hooks_Package::HasValidLicense(effectiveTopmost) &&
+                                  (isOnlineFixApp ||
+                                   LuaConfig::HasDepot(effectiveTopmost) ||
+                                   CloudRedirectHost::IsApp(effectiveTopmost)));
 
-        AppId_t newTracked = 0;
-        if (isOnlineFixApp || isManagedUnowned) {
-            newTracked = effectiveTopmost;
-        }
+        const AppId_t newTracked = shouldTrack ? effectiveTopmost : 0;
 
         const AppId_t oldTracked = g_PlayingAppId.exchange(newTracked);
         if (oldTracked == newTracked) return;
@@ -1624,6 +1622,8 @@ namespace Hooks_NetPacket_RichPresence {
         if (g_PlayingAppId.load(std::memory_order_relaxed) != newTracked) {
             return;
         }
+        g_InjectPending.store(false, std::memory_order_release);
+        g_cbInjectPkt = 0;
         if (newTracked != 0) {
             LOG_RICHPRESENCE_INFO("Tracking topmost appid {}", newTracked);
             if (BuildInject(newTracked, newTrackedName)) {
@@ -1655,11 +1655,13 @@ namespace Hooks_NetPacket_RichPresence {
 
         uint64 localSteamId = g_LocalSteamId.load(std::memory_order_relaxed);
         CMsgClientPersonaState::Friend* selfEntry = nullptr;
+        int selfIndex = -1;
         if (localSteamId != 0) {
             for (int i = 0; i < msg.friends_size(); ++i) {
                 auto* f = msg.mutable_friends(i);
                 if (f->has_friendid() && f->friendid() == localSteamId) {
                     selfEntry = f;
+                    selfIndex = i;
                     break;
                 }
             }
@@ -1680,6 +1682,7 @@ namespace Hooks_NetPacket_RichPresence {
                         auto* f = msg.mutable_friends(i);
                         if (f->has_friendid() && f->friendid() == localSteamId) {
                             selfEntry = f;
+                            selfIndex = i;
                             break;
                         }
                     }
@@ -1700,17 +1703,20 @@ namespace Hooks_NetPacket_RichPresence {
             : std::string{};
 
         bool shouldPatch = false;
+        bool needDedicatedInject = false;
         {
             std::lock_guard lock(g_RPMutex);
+            bool selfTemplateCached = false;
             if (pkt.hdr.size() <= sizeof(g_SelfHdr)) {
                 if (msg.friends_size() == 1 && pkt.body.size() <= sizeof(g_SelfBody)) {
                     if (!pkt.hdr.empty()) {
                         std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
                     }
                     std::memcpy(g_SelfBody, pkt.body.data(), pkt.body.size());
-                    g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
-                    g_cbSelfBody     = static_cast<uint32>(pkt.body.size());
-                    g_HaveSelfCached = true;
+                    g_cbSelfHdr        = static_cast<uint32>(pkt.hdr.size());
+                    g_cbSelfBody       = static_cast<uint32>(pkt.body.size());
+                    g_HaveSelfCached   = true;
+                    selfTemplateCached = true;
                 } else if (msg.friends_size() > 1) {
                     // Isolate only selfEntry into g_SelfBody so co-batched friend lists
                     // (even > 64KB on large accounts) never fail caching or bloat BuildInject.
@@ -1726,24 +1732,47 @@ namespace Hooks_NetPacket_RichPresence {
                         if (!pkt.hdr.empty()) {
                             std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
                         }
-                        g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
-                        g_cbSelfBody     = static_cast<uint32>(tplSize);
-                        g_HaveSelfCached = true;
+                        g_cbSelfHdr        = static_cast<uint32>(pkt.hdr.size());
+                        g_cbSelfBody       = static_cast<uint32>(tplSize);
+                        g_HaveSelfCached   = true;
+                        selfTemplateCached = true;
                     }
                 }
             }
 
             if (playingAppId != 0 && g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
-                const bool needDedicatedInject = ApplyGameFields(msg, selfEntry, playingAppId, gameName);
+                needDedicatedInject = ApplyGameFields(msg, selfEntry, playingAppId, gameName);
                 shouldPatch = true;
                 if (needDedicatedInject && BuildInject(playingAppId, gameName)) {
                     g_InjectPending.store(true, std::memory_order_release);
+                    // Strip selfEntry from co-batched packet so its un-elevated status_flags
+                    // do not pollute other friends; self is delivered via dedicated TryInject.
+                    if (selfTemplateCached && selfIndex >= 0 && selfIndex < msg.friends_size() && msg.friends_size() > 1) {
+                        msg.mutable_friends()->DeleteSubrange(selfIndex, 1);
+                    }
                 }
             }
         }
 
-        if (shouldPatch && CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
-            LOG_RICHPRESENCE_INFO("Patched live self push with appid {}", playingAppId);
+        if (shouldPatch) {
+            if (CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
+                if (!needDedicatedInject) {
+                    std::lock_guard lock(g_RPMutex);
+                    if (g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
+                        g_InjectPending.store(false, std::memory_order_release);
+                        g_cbInjectPkt = 0;
+                    }
+                }
+                LOG_RICHPRESENCE_INFO("Patched live self push with appid {}", playingAppId);
+            } else if (!needDedicatedInject) {
+                // Fallback for oversized (>64KB) co-batched packets that could not be patched in-place
+                std::lock_guard lock(g_RPMutex);
+                if (g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId &&
+                    BuildInject(playingAppId, gameName))
+                {
+                    g_InjectPending.store(true, std::memory_order_release);
+                }
+            }
         }
     }
 
@@ -2212,6 +2241,22 @@ namespace {
             LOG_NETPACKET_TRACE("Received k_EMsgMulti, skipping dispatch");
             return;
         }
+
+        if (!pkt.hdr.empty() &&
+            pkt.eMsg != k_EMsgServiceMethod &&
+            pkt.eMsg != k_EMsgServiceMethodResponse &&
+            pkt.eMsg != k_EMsgServiceMethodSendToClient &&
+            pkt.eMsg != k_EMsgClientPersonaState &&
+            Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed) == 0)
+        {
+            CMsgProtoBufHeader hdr;
+            if (hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
+                hdr.has_steamid() && hdr.steamid() != 0)
+            {
+                Hooks_NetPacket_RichPresence::TryCaptureLocalSteamId(hdr.steamid());
+            }
+        }
+
         LOG_NETPACKET_DEBUG("Recv eMsg {}({}) (cbBody={}, cbHdr={})",
                         MsgName(pkt.eMsg), static_cast<uint32>(pkt.eMsg), pkt.body.size(), pkt.hdr.size());
 
@@ -2222,10 +2267,14 @@ namespace {
         case k_EMsgServiceMethodSendToClient: {        // 152
             CMsgProtoBufHeader hdr;
             if (!pkt.hdr.empty() &&
-                hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
-                hdr.has_target_job_name())
+                hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())))
             {
-                RecvServiceJob(pPacket, pkt, hdr);
+                if (hdr.has_steamid() && hdr.steamid() != 0) {
+                    Hooks_NetPacket_RichPresence::TryCaptureLocalSteamId(hdr.steamid());
+                }
+                if (hdr.has_target_job_name()) {
+                    RecvServiceJob(pPacket, pkt, hdr);
+                }
             }
             return;
         }
@@ -2305,6 +2354,10 @@ namespace {
             return oRecvPkt(pThis, pPacket);
         }
 
+        if (const auto pkt = UnpackRaw(pPacket->m_pubData, pPacket->m_cubData)) {
+            RecvJob(pPacket, *pkt);
+        }
+
         // Deliver manufactured/queued responses in lockless mode with RAII restoration
         Hooks_NetPacket_RichPresence::TryInject(
             pThis, pPacket,
@@ -2313,10 +2366,6 @@ namespace {
         Hooks_NetPacket_Cloud::Drain(
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
-
-        if (const auto pkt = UnpackRaw(pPacket->m_pubData, pPacket->m_cubData)) {
-            RecvJob(pPacket, *pkt);
-        }
 
         return oRecvPkt(pThis, pPacket);
     }
@@ -2354,12 +2403,14 @@ namespace Hooks_NetPacket {
         {
             std::lock_guard lock(Hooks_NetPacket_UserStats::g_JobMutex);
             Hooks_NetPacket_UserStats::g_JobIdToPendingStats->clear();
+            Hooks_NetPacket_UserStats::g_JobSeq = 0;
         }
         {
             std::lock_guard lock(Hooks_NetPacket_Manifest::g_CodeMutex);
             Hooks_NetPacket_Manifest::g_PendingJobs->clear();
             Hooks_NetPacket_Manifest::g_InFlightFutures->clear();
             Hooks_NetPacket_Manifest::g_ManifestCodeCache->clear();
+            Hooks_NetPacket_Manifest::g_ManifestSeq = 0;
         }
         {
             std::lock_guard lock(Hooks_NetPacket_RichPresence::g_RPMutex);
