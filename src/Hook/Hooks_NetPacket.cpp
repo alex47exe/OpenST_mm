@@ -133,6 +133,40 @@ namespace {
         CarrierScopeGuard& operator=(CarrierScopeGuard&&) = delete;
     };
 
+    // ── Shutdown & Active Hook Call Drain Tracking ──────────────────
+    std::atomic<bool>   g_ShuttingDown{false};
+    std::atomic<uint32> g_ActiveHookCalls{0};
+
+    class [[nodiscard]] HookScopeGuard final {
+        bool m_entered = false;
+
+    public:
+        HookScopeGuard() noexcept {
+            if (g_ShuttingDown.load(std::memory_order_acquire)) {
+                return;
+            }
+            g_ActiveHookCalls.fetch_add(1, std::memory_order_acq_rel);
+            if (g_ShuttingDown.load(std::memory_order_acquire)) {
+                g_ActiveHookCalls.fetch_sub(1, std::memory_order_acq_rel);
+                return;
+            }
+            m_entered = true;
+        }
+
+        ~HookScopeGuard() noexcept {
+            if (m_entered) {
+                g_ActiveHookCalls.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+
+        [[nodiscard]] bool Entered() const noexcept { return m_entered; }
+
+        HookScopeGuard(const HookScopeGuard&) = delete;
+        HookScopeGuard& operator=(const HookScopeGuard&) = delete;
+        HookScopeGuard(HookScopeGuard&&) = delete;
+        HookScopeGuard& operator=(HookScopeGuard&&) = delete;
+    };
+
     // ── EMsg -> name lookup ──────────────────────────────────────────
     RESOLVE_FUNC(PchMsgNameFromEMsg, char*, EMsg eMsg);
     [[nodiscard]] inline const char* MsgName(EMsg eMsg) noexcept {
@@ -407,17 +441,19 @@ namespace Hooks_NetPacket_UserStats {
         // Save jobid_source -> PendingStatsJob for the response handler
         if (hdr.has_jobid_source()) {
             const uint64 jobId = hdr.jobid_source();
-            std::lock_guard<std::mutex> lock(g_JobMutex);
-            if (!g_JobIdToPendingStats->contains(jobId) && g_JobIdToPendingStats->size() >= 256) {
-                EvictOldestBySeq(*g_JobIdToPendingStats);
+            if (jobId != 0 && jobId != kInvalidJobId) {
+                std::lock_guard<std::mutex> lock(g_JobMutex);
+                if (!g_JobIdToPendingStats->contains(jobId) && g_JobIdToPendingStats->size() >= 256) {
+                    EvictOldestBySeq(*g_JobIdToPendingStats);
+                }
+                (*g_JobIdToPendingStats)[jobId] = PendingStatsJob{
+                    .appId     = appId,
+                    .shaSchema = shaSchema,
+                    .seq       = ++g_JobSeq
+                };
+                LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: stored jobid={} -> appid={}, sha_len={}",
+                    jobId, appId, shaSchema.size());
             }
-            (*g_JobIdToPendingStats)[jobId] = PendingStatsJob{
-                .appId     = appId,
-                .shaSchema = shaSchema,
-                .seq       = ++g_JobSeq
-            };
-            LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: stored jobid={} -> appid={}, sha_len={}",
-                jobId, appId, shaSchema.size());
         }
 
         // When sha_schema is present, the client already has the schema definitions cached locally.
@@ -459,13 +495,15 @@ namespace Hooks_NetPacket_UserStats {
         bool hasPending = false;
         if (inHdr.has_jobid_target()) {
             const uint64 jobId = inHdr.jobid_target();
-            std::lock_guard<std::mutex> lock(g_JobMutex);
-            auto it = g_JobIdToPendingStats->find(jobId);
-            if (it != g_JobIdToPendingStats->end()) {
-                pending = std::move(it->second);
-                hasPending = true;
-                LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: matched jobid={} -> appid={}", jobId, pending.appId);
-                g_JobIdToPendingStats->erase(it);
+            if (jobId != 0 && jobId != kInvalidJobId) {
+                std::lock_guard<std::mutex> lock(g_JobMutex);
+                auto it = g_JobIdToPendingStats->find(jobId);
+                if (it != g_JobIdToPendingStats->end()) {
+                    pending = std::move(it->second);
+                    hasPending = true;
+                    LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: matched jobid={} -> appid={}", jobId, pending.appId);
+                    g_JobIdToPendingStats->erase(it);
+                }
             }
         }
 
@@ -499,7 +537,7 @@ namespace Hooks_NetPacket_UserStats {
 
         // Inject CloudRedirect achievements
         CloudRedirectHost::AchievementBlock blocks[64]{};
-        const uint32_t n = CloudRedirectHost::GetAchievements(appId, std::span(blocks));
+        const uint32_t n = (std::min)(CloudRedirectHost::GetAchievements(appId, std::span(blocks)), 64u);
         if (n > 0) {
             uint32_t crc = 0;
             for (uint32_t i = 0; i < n; i++) {
@@ -552,7 +590,10 @@ namespace Hooks_NetPacket_UserStats {
         const AppId_t origAppId = ExtractSteamAppId(req.game_id());
         const AppId_t appId     = ResolveOnlineFixAppId(origAppId);
         if (appId != origAppId) {
-            req.set_game_id(appId);
+            CGameID gid{};
+            gid.m_ulGameID = req.game_id();
+            gid.SetAppID(appId);
+            req.set_game_id(gid.m_ulGameID);
         }
         if (Hooks_Package::HasValidLicense(appId)) {
             return false;
@@ -610,7 +651,7 @@ namespace Hooks_NetPacket_UserStats {
 
         // Overlay CR's cloud-synced achievement state
         CloudRedirectHost::AchievementBlock blocks[64]{};
-        const uint32_t n = CloudRedirectHost::GetAchievements(appId, std::span(blocks));
+        const uint32_t n = (std::min)(CloudRedirectHost::GetAchievements(appId, std::span(blocks)), 64u);
         if (n > 0) {
             uint32_t crc = 0;
             for (uint32_t i = 0; i < n; i++) {
@@ -629,7 +670,20 @@ namespace Hooks_NetPacket_UserStats {
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats response: cleared stats/achievements (no CR data for app {})", appId);
         }
 
-        if (CommitRecvPacket(pPacket, pkt, nullptr, &resp)) {
+        CMsgProtoBufHeader hdrMsg;
+        bool hdrChanged = false;
+        if (!pkt.hdr.empty() &&
+            hdrMsg.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
+            hdrMsg.has_eresult() && hdrMsg.eresult() != k_EResultOK)
+        {
+            hdrMsg.set_eresult(k_EResultOK);
+            if (hdrMsg.has_error_message()) {
+                hdrMsg.clear_error_message();
+            }
+            hdrChanged = true;
+        }
+
+        if (CommitRecvPacket(pPacket, pkt, hdrChanged ? &hdrMsg : nullptr, &resp)) {
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats response: modified body:\n{}", resp.DebugString());
         }
     }
@@ -706,39 +760,57 @@ namespace Hooks_NetPacket_OwnershipTicket {
             LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: failed to ParseFromArray (cbBody={})", pkt.body.size());
             return;
         }
+        if (!resp.has_app_id() || resp.app_id() == 0) {
+            return;
+        }
 
-        // Steam already returned a valid ticket (account owns it) — sync to Lua if present.
+        const AppId_t appId = resp.app_id();
+
+        // Steam already returned a valid ticket (account owns it) — sync to Lua if present
+        // unless DAuth2 override is active for this app.
         if (resp.eresult() == k_EResultOK) {
-            if (resp.has_ticket() && !resp.ticket().empty()) {
+            if (!LuaConfig::IsDAuth2(appId) && resp.has_ticket() && !resp.ticket().empty()) {
                 const auto& t = resp.ticket();
                 const auto span = std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(t.data()), t.size());
-                if (PipeManager::IsToolActiveForApp(resp.app_id())) {
-                    LOG_NETPACKET_INFO("OwnershipTicketResponse[858]: appId={} requested by active tool — skipping Lua disk sync", resp.app_id());
-                    AppTicket::WriteAppOwnershipTicket(resp.app_id(), span);
+                if (PipeManager::IsToolActiveForApp(appId)) {
+                    LOG_NETPACKET_INFO("OwnershipTicketResponse[858]: appId={} requested by active tool — skipping Lua disk sync", appId);
+                    AppTicket::WriteAppOwnershipTicket(appId, span);
                 } else {
-                    PipeManager::DenuvoAuth::SyncAppTicketToLua(resp.app_id(), span.data(), span.size());
+                    PipeManager::DenuvoAuth::SyncAppTicketToLua(appId, span.data(), span.size());
                 }
             }
             return;
         }
-        if (!LuaConfig::HasDepot(resp.app_id())) return;
+
+        // INV-01 & INV-02: Pass through owned / family-shared games (unless DAuth2) and unmanaged games
+        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) {
+            return;
+        }
+        if (!LuaConfig::HasDepot(appId, false)) {
+            return;
+        }
 
         const int32 origEresult = resp.eresult();
 
-        auto stored = AppTicket::GetCachedAppOwnershipTicket(resp.app_id());
+        // Prefer the cached ticket when it is already valid: that
+        // ensures GetAppOwnershipTicketExtendedData and the 858 response hand
+        // Denuvo the identical bytes.
+        auto stored = AppTicket::GetCachedAppOwnershipTicket(appId);
         const uint64_t existingSteamId = AppTicket::ExtractSteamIdFromTicketBytes(stored);
 
         std::vector<uint8_t> ticketBytes;
         if (existingSteamId != 0) {
             ticketBytes = std::move(stored);
         } else {
-            auto minted = EticketClient::FetchOwnershipTicket(resp.app_id(), {}, 0);
-            if (!minted) {
-                LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: appid={} eresult={} but no owner ticket available",
-                                   resp.app_id(), origEresult);
+            auto minted = EticketClient::FetchOwnershipTicket(appId, {}, 0);
+            if (!minted || AppTicket::ExtractSteamIdFromTicketBytes(*minted) == 0) {
+                LOG_NETPACKET_WARN("OwnershipTicketResponse[858]: appid={} eresult={} but no valid owner ticket available",
+                                   appId, origEresult);
                 return;
             }
             ticketBytes = std::move(*minted);
+            // Write newly minted ticket back to single-source in-memory cache so IPC hooks see identical bytes
+            AppTicket::WriteAppOwnershipTicket(appId, ticketBytes);
         }
 
         resp.set_ticket(ticketBytes.data(), ticketBytes.size());
@@ -746,7 +818,7 @@ namespace Hooks_NetPacket_OwnershipTicket {
 
         if (CommitRecvPacket(pPacket, pkt, nullptr, &resp)) {
             LOG_NETPACKET_INFO("OwnershipTicketResponse[858]: spoofed appid={} ticket_bytes={} (orig eresult={} -> OK)",
-                               resp.app_id(), ticketBytes.size(), origEresult);
+                               appId, ticketBytes.size(), origEresult);
         }
     }
 
@@ -802,32 +874,94 @@ namespace Hooks_NetPacket_FamilySharing {
 //
 //  Outgoing: ContentServerDirectory.GetManifestRequestCode#1  (eMsg 151)
 //  Incoming: ContentServerDirectory.GetManifestRequestCode#1  (eMsg 147)
+//
+//  Launches a detached worker thread via OSTPlatform::Thread::StartDetached
+//  on send; the recv handler waits up to 12s (in 50ms interruptible slices)
+//  and patches both header (eresult=OK) and body (manifest_request_code).
+//  Valid codes are cached with a 90-second TTL (Valve request codes rotate
+//  every 5 minutes).
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Manifest {
 
+    struct FetchResult {
+        uint64                                code = 0;
+        std::chrono::steady_clock::time_point fetchedAt{};
+    };
+
     struct CacheEntry {
-        uint64 code = 0;
-        uint64 seq  = 0;
+        uint64                                code = 0;
+        std::chrono::steady_clock::time_point cachedAt{};
+        uint64                                seq  = 0;
     };
 
     struct InFlightEntry {
-        std::shared_future<uint64> future;
-        uint64                     seq = 0;
+        std::shared_future<FetchResult> future;
+        uint64                          seq = 0;
     };
 
     struct PendingManifestJob {
-        uint64                     manifestGid = 0;
-        uint64                     cachedCode  = 0;
-        std::shared_future<uint64> future;
-        uint64                     seq         = 0;
+        uint64                          manifestGid = 0;
+        uint64                          cachedCode  = 0;
+        std::shared_future<FetchResult> future;
+        uint64                          seq         = 0;
     };
 
-    std::mutex g_CodeMutex;
-    uint64     g_ManifestSeq = 0;
+    std::mutex                        g_CodeMutex;
+    uint64                            g_ManifestSeq = 0;
+    std::atomic<uint32>               g_ActiveFetchThreads{0};
     NoDestructor<std::unordered_map<uint64, CacheEntry>>         g_ManifestCodeCache; // manifestGid -> CacheEntry
     NoDestructor<std::unordered_map<uint64, InFlightEntry>>      g_InFlightFutures;   // manifestGid -> InFlightEntry
     NoDestructor<std::unordered_map<uint64, PendingManifestJob>> g_PendingJobs;       // jobId -> PendingManifestJob
-    constexpr uint32 kMaxWaitMilliseconds = 400;
+
+    constexpr uint32 kMaxActiveFetchThreads = 32;
+    constexpr uint32 kMaxWaitMilliseconds   = 12000;
+    constexpr uint32 kWaitSliceMilliseconds = 50;
+    constexpr auto   kCacheTtl              = std::chrono::seconds(90);
+
+    void CacheValidCodeLocked(uint64 manifestGid, uint64 code,
+                              std::chrono::steady_clock::time_point timestamp)
+    {
+        if (code == 0) return;
+        if (!g_ManifestCodeCache->contains(manifestGid) && g_ManifestCodeCache->size() >= 512) {
+            EvictOldestBySeq(*g_ManifestCodeCache);
+        }
+        (*g_ManifestCodeCache)[manifestGid] = CacheEntry{
+            .code     = code,
+            .cachedAt = timestamp,
+            .seq      = ++g_ManifestSeq
+        };
+    }
+
+    // Harvests a ready in-flight future into g_ManifestCodeCache (if valid and non-expired)
+    // and erases it from g_InFlightFutures so completed/failed entries never linger.
+    [[nodiscard]] uint64 TryHarvestReadyFutureLocked(
+        std::unordered_map<uint64, InFlightEntry>::iterator& itFlight,
+        std::chrono::steady_clock::time_point now)
+    {
+        if (itFlight == g_InFlightFutures->end()) return 0;
+        if (!itFlight->second.future.valid()) {
+            itFlight = g_InFlightFutures->erase(itFlight);
+            return 0;
+        }
+        if (itFlight->second.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return 0;
+        }
+
+        const uint64 gid = itFlight->first;
+        FetchResult res{};
+        try {
+            res = itFlight->second.future.get();
+        } catch (...) {
+            res = {};
+        }
+        itFlight = g_InFlightFutures->erase(itFlight);
+
+        if (res.code != 0 && (now - res.fetchedAt) <= kCacheTtl) {
+            CacheValidCodeLocked(gid, res.code, res.fetchedAt);
+            return res.code;
+        }
+        return 0;
+    }
 
     bool HandleSend(std::span<const uint8> body, const CMsgProtoBufHeader& hdr)
     {
@@ -839,98 +973,147 @@ namespace Hooks_NetPacket_Manifest {
             return false;
         }
         if (!req.has_depot_id() || !req.has_manifest_id()) return false;
-        if (!LuaConfig::HasDepot(req.depot_id())) return false;
+
+        const uint32 depotId     = req.depot_id();
+        const uint64 manifestGid = req.manifest_id();
+        if (depotId == 0 || manifestGid == 0) return false;
+        if (!LuaConfig::HasDepot(depotId)) return false;
 
         if (!hdr.has_jobid_source()) {
             LOG_MANIFEST_WARN("GetManifestRequestCode: missing jobid_source in header");
             return false;
         }
 
-        const uint64 jobId       = hdr.jobid_source();
-        const uint64 manifestGid = req.manifest_id();
-        const uint32 depotId     = req.depot_id();
-        const uint32 appId       = req.has_app_id() ? req.app_id() : 0;
+        const uint64 jobId = hdr.jobid_source();
+        if (jobId == 0 || jobId == kInvalidJobId) return false;
+
+        const uint32 appId = req.has_app_id() ? req.app_id() : 0;
 
         LOG_MANIFEST_DEBUG("GetManifestRequestCode send: depot={} gid={} jobid={} app_id={}",
                            depotId, manifestGid, jobId, appId);
 
-        std::lock_guard<std::mutex> lock(g_CodeMutex);
+        std::shared_ptr<std::promise<FetchResult>> prom;
+        {
+            std::lock_guard<std::mutex> lock(g_CodeMutex);
+            const auto now = std::chrono::steady_clock::now();
 
-        if (!g_PendingJobs->contains(jobId) && g_PendingJobs->size() >= 256) {
-            EvictOldestBySeq(*g_PendingJobs);
-        }
-
-        // Bounded pruning of stale in-flight futures
-        if (g_InFlightFutures->size() >= 64) {
-            std::erase_if(*g_InFlightFutures, [](const auto& item) {
-                return !item.second.future.valid() ||
-                       item.second.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-            });
-            while (g_InFlightFutures->size() >= 64) {
-                EvictOldestBySeq(*g_InFlightFutures);
+            if (!g_PendingJobs->contains(jobId) && g_PendingJobs->size() >= 256) {
+                EvictOldestBySeq(*g_PendingJobs);
             }
-        }
 
-        // 1. Check if already cached
-        auto itCache = g_ManifestCodeCache->find(manifestGid);
-        if (itCache != g_ManifestCodeCache->end() && itCache->second.code != 0) {
-            (*g_PendingJobs)[jobId] = PendingManifestJob{
-                .manifestGid = manifestGid,
-                .cachedCode  = itCache->second.code,
-                .future      = {},
-                .seq         = ++g_ManifestSeq
+            // Bounded pruning & harvesting of completed in-flight futures
+            if (g_InFlightFutures->size() >= 64) {
+                for (auto it = g_InFlightFutures->begin(); it != g_InFlightFutures->end(); ) {
+                    if (!it->second.future.valid() ||
+                        it->second.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                    {
+                        (void)TryHarvestReadyFutureLocked(it, now);
+                    } else {
+                        ++it;
+                    }
+                }
+                while (g_InFlightFutures->size() >= 64) {
+                    EvictOldestBySeq(*g_InFlightFutures);
+                }
+            }
+
+            // 1. Check if already cached and within 90s TTL
+            auto itCache = g_ManifestCodeCache->find(manifestGid);
+            if (itCache != g_ManifestCodeCache->end()) {
+                if (itCache->second.code != 0 && (now - itCache->second.cachedAt) <= kCacheTtl) {
+                    (*g_PendingJobs)[jobId] = PendingManifestJob{
+                        .manifestGid = manifestGid,
+                        .cachedCode  = itCache->second.code,
+                        .future      = {},
+                        .seq         = ++g_ManifestSeq
+                    };
+                    LOG_MANIFEST_DEBUG("GetManifestRequestCode send: cache hit for gid={} (code={})",
+                                       manifestGid, itCache->second.code);
+                    return false;
+                }
+                g_ManifestCodeCache->erase(itCache);
+            }
+
+            // 2. Check if an async fetch for this manifest is already in flight (or just finished)
+            auto itFlight = g_InFlightFutures->find(manifestGid);
+            if (itFlight != g_InFlightFutures->end()) {
+                if (const uint64 harvestedCode = TryHarvestReadyFutureLocked(itFlight, now); harvestedCode != 0) {
+                    (*g_PendingJobs)[jobId] = PendingManifestJob{
+                        .manifestGid = manifestGid,
+                        .cachedCode  = harvestedCode,
+                        .future      = {},
+                        .seq         = ++g_ManifestSeq
+                    };
+                    LOG_MANIFEST_DEBUG("GetManifestRequestCode send: harvested completed fetch for gid={} (code={})",
+                                       manifestGid, harvestedCode);
+                    return false;
+                }
+                if (itFlight != g_InFlightFutures->end()) {
+                    (*g_PendingJobs)[jobId] = PendingManifestJob{
+                        .manifestGid = manifestGid,
+                        .cachedCode  = 0,
+                        .future      = itFlight->second.future,
+                        .seq         = ++g_ManifestSeq
+                    };
+                    LOG_MANIFEST_DEBUG("GetManifestRequestCode send: attaching to in-flight fetch for gid={}", manifestGid);
+                    return false;
+                }
+            }
+
+            // 3. Prepare detached async fetch with bounded concurrency
+            if (g_ShuttingDown.load(std::memory_order_acquire) ||
+                g_ActiveFetchThreads.load(std::memory_order_relaxed) >= kMaxActiveFetchThreads)
+            {
+                LOG_MANIFEST_WARN("GetManifestRequestCode send: skipping fetch (shuttingDown={} activeThreads={})",
+                                  g_ShuttingDown.load(std::memory_order_relaxed),
+                                  g_ActiveFetchThreads.load(std::memory_order_relaxed));
+                return false;
+            }
+
+            prom = std::make_shared<std::promise<FetchResult>>();
+            auto sharedFuture = prom->get_future().share();
+            g_ActiveFetchThreads.fetch_add(1, std::memory_order_acq_rel);
+
+            (*g_InFlightFutures)[manifestGid] = InFlightEntry{
+                .future = sharedFuture,
+                .seq    = ++g_ManifestSeq
             };
-            LOG_MANIFEST_DEBUG("GetManifestRequestCode send: cache hit for gid={} (code={})",
-                               manifestGid, itCache->second.code);
-            return false;
-        }
 
-        // 2. Check if an async fetch for this manifest is already in flight
-        auto itFlight = g_InFlightFutures->find(manifestGid);
-        if (itFlight != g_InFlightFutures->end()) {
             (*g_PendingJobs)[jobId] = PendingManifestJob{
                 .manifestGid = manifestGid,
                 .cachedCode  = 0,
-                .future      = itFlight->second.future,
+                .future      = sharedFuture,
                 .seq         = ++g_ManifestSeq
             };
-            LOG_MANIFEST_DEBUG("GetManifestRequestCode send: attaching to in-flight fetch for gid={}", manifestGid);
-            return false;
         }
 
-        // 3. Launch async fetch
-        auto task = std::async(std::launch::async,
-            [manifestGid, depotId, appId]() -> uint64 {
-                uint64 code = 0;
-                ManifestClient::FetchManifestRequestCode(manifestGid, &code, appId, depotId);
-                {
-                    std::lock_guard<std::mutex> lk(g_CodeMutex);
-                    if (code != 0) {
-                        if (!g_ManifestCodeCache->contains(manifestGid) && g_ManifestCodeCache->size() >= 512) {
-                            EvictOldestBySeq(*g_ManifestCodeCache);
-                        }
-                        (*g_ManifestCodeCache)[manifestGid] = CacheEntry{
-                            .code = code,
-                            .seq  = ++g_ManifestSeq
-                        };
-                    }
-                    g_InFlightFutures->erase(manifestGid);
-                }
-                return code;
-            });
+        // Launch detached thread outside g_CodeMutex; the worker thread never touches
+        // g_CodeMutex or any global container, eliminating static destruction races.
+        const bool started = OSTPlatform::Thread::StartDetached([prom, manifestGid, depotId, appId]() noexcept {
+            FetchResult res{};
+            try {
+                ManifestClient::FetchManifestRequestCode(manifestGid, &res.code, appId, depotId);
+                res.fetchedAt = std::chrono::steady_clock::now();
+            } catch (...) {
+                res = {};
+            }
+            try {
+                prom->set_value(res);
+            } catch (...) {}
+            g_ActiveFetchThreads.fetch_sub(1, std::memory_order_acq_rel);
+        });
 
-        auto sharedFuture = task.share();
-        (*g_InFlightFutures)[manifestGid] = InFlightEntry{
-            .future = sharedFuture,
-            .seq    = ++g_ManifestSeq
-        };
+        if (!started) {
+            try {
+                prom->set_value(FetchResult{});
+            } catch (...) {}
+            g_ActiveFetchThreads.fetch_sub(1, std::memory_order_acq_rel);
 
-        (*g_PendingJobs)[jobId] = PendingManifestJob{
-            .manifestGid = manifestGid,
-            .cachedCode  = 0,
-            .future      = sharedFuture,
-            .seq         = ++g_ManifestSeq
-        };
+            std::lock_guard<std::mutex> lock(g_CodeMutex);
+            g_InFlightFutures->erase(manifestGid);
+            g_PendingJobs->erase(jobId);
+            LOG_MANIFEST_ERROR("GetManifestRequestCode send: StartDetached failed for gid={}", manifestGid);
+        }
 
         return false; // Don't modify the outgoing request body
     }
@@ -941,6 +1124,7 @@ namespace Hooks_NetPacket_Manifest {
     {
         if (!inHdr.has_jobid_target()) return;
         const uint64 jobId = inHdr.jobid_target();
+        if (jobId == 0 || jobId == kInvalidJobId) return;
 
         PendingManifestJob job;
         {
@@ -951,23 +1135,77 @@ namespace Hooks_NetPacket_Manifest {
             g_PendingJobs->erase(it); // Always clean up immediately
         }
 
+        // Fast-path: if official Steam server already returned k_EResultOK with a valid
+        // non-zero manifest_request_code (e.g., owned base depot or free weekend),
+        // cache the official code and pass through in 0ms without waiting on backend HTTP!
+        if (inHdr.has_eresult() && inHdr.eresult() == static_cast<int32_t>(k_EResultOK) && !pkt.body.empty()) {
+            CContentServerDirectory_GetManifestRequestCode_Response origResp;
+            if (origResp.ParseFromArray(pkt.body.data(), static_cast<int>(pkt.body.size())) &&
+                origResp.has_manifest_request_code() && origResp.manifest_request_code() != 0)
+            {
+                const uint64 officialCode = origResp.manifest_request_code();
+                {
+                    std::lock_guard<std::mutex> lock(g_CodeMutex);
+                    CacheValidCodeLocked(job.manifestGid, officialCode, std::chrono::steady_clock::now());
+                }
+                LOG_MANIFEST_DEBUG("GetManifestRequestCode recv: official server returned valid code={} for gid={}, passing through",
+                                   officialCode, job.manifestGid);
+                return;
+            }
+        }
+
         uint64 code = job.cachedCode;
         if (code == 0) {
             std::lock_guard<std::mutex> lock(g_CodeMutex);
+            const auto now = std::chrono::steady_clock::now();
             auto it = g_ManifestCodeCache->find(job.manifestGid);
             if (it != g_ManifestCodeCache->end()) {
-                code = it->second.code;
+                if (it->second.code != 0 && (now - it->second.cachedAt) <= kCacheTtl) {
+                    code = it->second.code;
+                } else {
+                    g_ManifestCodeCache->erase(it);
+                }
             }
         }
+
         if (code == 0 && job.future.valid()) {
             try {
-                auto status = job.future.wait_for(std::chrono::milliseconds(kMaxWaitMilliseconds));
+                constexpr uint32 kMaxSlices = kMaxWaitMilliseconds / kWaitSliceMilliseconds;
+                std::future_status status = std::future_status::timeout;
+                for (uint32 slice = 0; slice < kMaxSlices; ++slice) {
+                    if (g_ShuttingDown.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    status = job.future.wait_for(std::chrono::milliseconds(kWaitSliceMilliseconds));
+                    if (status == std::future_status::ready) {
+                        break;
+                    }
+                }
+
                 if (status != std::future_status::ready) {
                     LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out ({}ms) for jobid={}, gid={}, passing through",
                                       kMaxWaitMilliseconds, jobId, job.manifestGid);
                     return;
                 }
-                code = job.future.get();
+
+                const FetchResult res = job.future.get();
+                code = res.code;
+                {
+                    std::lock_guard<std::mutex> lock(g_CodeMutex);
+                    if (code != 0) {
+                        CacheValidCodeLocked(job.manifestGid, code,
+                                             res.fetchedAt.time_since_epoch().count() != 0
+                                                 ? res.fetchedAt
+                                                 : std::chrono::steady_clock::now());
+                    }
+                    auto itFlight = g_InFlightFutures->find(job.manifestGid);
+                    if (itFlight != g_InFlightFutures->end() &&
+                        (!itFlight->second.future.valid() ||
+                         itFlight->second.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
+                    {
+                        g_InFlightFutures->erase(itFlight);
+                    }
+                }
             } catch (const std::exception& e) {
                 LOG_MANIFEST_ERROR("GetManifestRequestCode recv: future wait/get failed: {}", e.what());
                 code = 0;
@@ -1031,14 +1269,55 @@ namespace Hooks_NetPacket_RichPresence {
     bool    g_HaveSelfCached = false;
 
     // Manufactured PersonaState packet (eMsg 766) ready to inject.
-    uint8   g_InjectPkt[kMaxPacketSize];
-    uint32  g_cbInjectPkt   = 0;
-    bool    g_InjectPending = false;
+    uint8             g_InjectPkt[kMaxPacketSize];
+    uint32            g_cbInjectPkt = 0;
+    std::atomic<bool> g_InjectPending{false};
 
     // Rich presence KVs per AppId, captured from outbound
     // CMsgClientRichPresenceUpload.  Per-AppId so a multi-game stack
     // does not conflate KV state.
     NoDestructor<std::unordered_map<AppId_t, std::vector<std::pair<std::string, std::string>>>> g_RPKvsByAppId;
+
+    // Validates and captures the local individual SteamID, supporting account switching
+    // and rejecting pre-login anonymous individual placeholders (AccountID == 0).
+    void TryCaptureLocalSteamId(uint64 rawSteamId)
+    {
+        if (rawSteamId == 0 || g_LocalSteamId.load(std::memory_order_relaxed) == rawSteamId) {
+            return;
+        }
+
+        const CSteamID candidate(rawSteamId);
+        if (!candidate.IsValid() ||
+            candidate.GetEAccountType() != k_EAccountTypeIndividual ||
+            candidate.GetAccountID() == 0)
+        {
+            return;
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard lock(g_RPMutex);
+            const uint64 prev = g_LocalSteamId.load(std::memory_order_relaxed);
+            if (prev != rawSteamId) {
+                g_LocalSteamId.store(rawSteamId, std::memory_order_release);
+                g_HaveSelfCached = false;
+                g_cbSelfHdr      = 0;
+                g_cbSelfBody     = 0;
+                g_InjectPending.store(false, std::memory_order_release);
+                g_cbInjectPkt    = 0;
+                if (prev != 0) {
+                    g_RPKvsByAppId->clear();
+                }
+                changed = true;
+                LOG_RICHPRESENCE_INFO("Captured valid local SteamID 0x{:X} (accountId={})",
+                                      rawSteamId, candidate.GetAccountID());
+            }
+        }
+
+        if (changed) {
+            CloudRedirectHost::SetAccountId(candidate.GetAccountID());
+        }
+    }
 
     // Walk Steam's binary KV1 stream (a top-level "RP" struct around
     // string KVs) and collect every string KV at any depth.  Type 0x00
@@ -1064,13 +1343,16 @@ namespace Hooks_NetPacket_RichPresence {
                 break;
             }
             if (type == 0x00) {
+                if (depth >= 32) return;
                 std::string name;
                 if (!readCStr(name)) return;
                 ++depth;
             } else if (type == 0x01) {
                 std::string key, value;
                 if (!readCStr(key) || !readCStr(value)) return;
-                out.emplace_back(std::move(key), std::move(value));
+                if (out.size() < 64) {
+                    out.emplace_back(std::move(key), std::move(value));
+                }
             } else {
                 return;
             }
@@ -1082,9 +1364,11 @@ namespace Hooks_NetPacket_RichPresence {
     // KVs so a freshly launched game's first inject does not wipe the UI's
     // m_mapRichPresence, which is rebuilt from rich_presence() whenever
     // that bit is set.
+    // Pure leaf-lock helper: caller resolves gameName before acquiring g_RPMutex.
     static void ApplyGameFields(CMsgClientPersonaState& msg,
                                 CMsgClientPersonaState::Friend* entry,
-                                AppId_t appid)
+                                AppId_t appid,
+                                std::string_view gameName)
     {
         // EClientPersonaStateFlag::k_EClientPersonaStateFlagRichPresence
         constexpr uint32 kStatusFlagRichPresence = 0x1000;
@@ -1092,8 +1376,9 @@ namespace Hooks_NetPacket_RichPresence {
         if (appid) {
             entry->set_game_played_app_id(appid);
             entry->set_gameid(static_cast<uint64>(appid));
-            std::string name = Hooks_Misc::GetGameNameByAppID(appid);
-            if (!name.empty()) entry->set_game_name(name);
+            if (!gameName.empty()) {
+                entry->set_game_name(gameName.data(), gameName.size());
+            }
             entry->clear_rich_presence();
             auto it = g_RPKvsByAppId->find(appid);
             const bool hasKvs = (it != g_RPKvsByAppId->end()) && !it->second.empty();
@@ -1116,25 +1401,37 @@ namespace Hooks_NetPacket_RichPresence {
         }
     }
 
-    static bool BuildInject(AppId_t appid)
+    static bool BuildInject(AppId_t appid, std::string_view gameName)
     {
         if (!g_HaveSelfCached) return false;
 
         CMsgClientPersonaState msg;
         if (!msg.ParseFromArray(g_SelfBody, static_cast<int>(g_cbSelfBody))) return false;
 
+        const uint64 localSteamId = g_LocalSteamId.load(std::memory_order_relaxed);
+        if (localSteamId == 0) return false;
+
         // Find our entry (a self-push always contains it).
         CMsgClientPersonaState::Friend* entry = nullptr;
         for (int i = 0; i < msg.friends_size(); ++i) {
             auto* f = msg.mutable_friends(i);
-            if (f->has_friendid() && f->friendid() == g_LocalSteamId) {
+            if (f->has_friendid() && f->friendid() == localSteamId) {
                 entry = f;
                 break;
             }
         }
         if (!entry) return false;
 
-        ApplyGameFields(msg, entry, appid);
+        // Strip any co-batched friend entries from the template so re-injecting
+        // never replays stale friend state into the Steam client.
+        if (msg.friends_size() > 1) {
+            CMsgClientPersonaState::Friend selfCopy = *entry;
+            msg.clear_friends();
+            entry = msg.add_friends();
+            *entry = std::move(selfCopy);
+        }
+
+        ApplyGameFields(msg, entry, appid, gameName);
 
         const uint32 hdrSize  = g_cbSelfHdr;
         const size_t bodyLong = msg.ByteSizeLong();
@@ -1153,7 +1450,9 @@ namespace Hooks_NetPacket_RichPresence {
         mhdr->eMsg = static_cast<EMsg>(
             static_cast<uint32>(k_EMsgClientPersonaState) | kMsgHdrProtoFlag);
         mhdr->headerLength = hdrSize;
-        std::memcpy(g_InjectPkt + sizeof(MsgHdr), g_SelfHdr, hdrSize);
+        if (hdrSize > 0) {
+            std::memcpy(g_InjectPkt + sizeof(MsgHdr), g_SelfHdr, hdrSize);
+        }
         if (!msg.SerializeToArray(g_InjectPkt + sizeof(MsgHdr) + hdrSize, static_cast<int>(bodySize)))
             return false;
 
@@ -1183,31 +1482,30 @@ namespace Hooks_NetPacket_RichPresence {
         LOG_RICHPRESENCE_DEBUG("RP upload appid={}: kv_bytes={} extracted={} pairs",
             playingAppId, kv.size(), kvs.size());
 
+        // Resolve game name outside g_RPMutex to keep g_RPMutex a pure leaf lock
+        const std::string gameName = Hooks_Misc::GetGameNameByAppID(playingAppId);
+
         std::lock_guard lock(g_RPMutex);
+        if (!g_RPKvsByAppId->contains(playingAppId) && g_RPKvsByAppId->size() >= 64) {
+            g_RPKvsByAppId->erase(g_RPKvsByAppId->begin());
+        }
         (*g_RPKvsByAppId)[playingAppId] = std::move(kvs);
-        if (BuildInject(playingAppId)) g_InjectPending = true;
+        if (g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
+            if (BuildInject(playingAppId, gameName)) {
+                g_InjectPending.store(true, std::memory_order_release);
+            }
+        }
     }
 
     void TrackSend(const CMsgClientGamesPlayed& msg, std::span<const uint8> hdr)
     {
-        uint64 localSteamId = 0;
-        {
-            std::lock_guard lock(g_RPMutex);
-            if (g_LocalSteamId.load(std::memory_order_relaxed) == 0 && !hdr.empty()) {
-                CMsgProtoBufHeader hdrMsg;
-                if (hdrMsg.ParseFromArray(hdr.data(), static_cast<int>(hdr.size())) &&
-                    hdrMsg.has_steamid() && hdrMsg.steamid())
-                {
-                    const uint64 id = hdrMsg.steamid();
-                    g_LocalSteamId.store(id, std::memory_order_relaxed);
-                    localSteamId = id;
-                    LOG_RICHPRESENCE_DEBUG("Captured local SteamID 0x{:X}", localSteamId);
-                }
+        if (!hdr.empty()) {
+            CMsgProtoBufHeader hdrMsg;
+            if (hdrMsg.ParseFromArray(hdr.data(), static_cast<int>(hdr.size())) &&
+                hdrMsg.has_steamid() && hdrMsg.steamid() != 0)
+            {
+                TryCaptureLocalSteamId(hdrMsg.steamid());
             }
-        }
-        if (localSteamId != 0) {
-            CloudRedirectHost::SetAccountId(
-                static_cast<uint32_t>(localSteamId & 0xFFFFFFFF));
         }
 
         // Steam stacks running games in games_played; the banner follows
@@ -1223,13 +1521,20 @@ namespace Hooks_NetPacket_RichPresence {
         // can track and sync cloud saves for the real game.
         const AppId_t effectiveTopmost = ResolveOnlineFixAppId(topmost);
 
-        // Only track when the topmost is an app configured in Lua config or active -onlinefix.
-        // Owned games on top without Lua config let the server's natural broadcast paint the cache.
-        const bool isOnlineFixApp = Hooks_Misc::IsOnlineFixActive() && (effectiveTopmost == Hooks_Misc::ResolveAppId());
+        // Distinguish an active -onlinefix session (topmost was 480 and mapped to real AppId)
+        // from an unowned managed game (INV-01 & INV-02: owned / family-shared games let the
+        // server's natural PersonaState broadcast paint the UI).
+        const bool isOnlineFixApp = (topmost == kOnlineFixAppId &&
+                                     effectiveTopmost != 0 &&
+                                     effectiveTopmost != kOnlineFixAppId);
+        const bool isManagedUnowned = (effectiveTopmost != 0 &&
+                                       effectiveTopmost != kOnlineFixAppId &&
+                                       !Hooks_Package::HasValidLicense(effectiveTopmost) &&
+                                       (LuaConfig::HasDepot(effectiveTopmost, false) ||
+                                        CloudRedirectHost::IsApp(effectiveTopmost)));
+
         AppId_t newTracked = 0;
-        if (effectiveTopmost != 0 && effectiveTopmost != kOnlineFixAppId &&
-            (LuaConfig::HasDepot(effectiveTopmost, false) || isOnlineFixApp))
-        {
+        if (isOnlineFixApp || isManagedUnowned) {
             newTracked = effectiveTopmost;
         }
 
@@ -1253,22 +1558,36 @@ namespace Hooks_NetPacket_RichPresence {
             } catch (...) {
                 LOG_RICHPRESENCE_ERROR("NotifyAppRunning({}, true) failed with unknown exception", newTracked);
             }
-            LuaConfig::PrewarmStatSteamId(newTracked);
+            if (!Hooks_Package::HasValidLicense(newTracked)) {
+                LuaConfig::PrewarmStatSteamId(newTracked);
+            }
         }
 
+        // Resolve game name outside g_RPMutex to enforce leaf-lock discipline
+        const std::string newTrackedName = (newTracked != 0)
+            ? Hooks_Misc::GetGameNameByAppID(newTracked)
+            : std::string{};
+
         std::lock_guard lock(g_RPMutex);
+        if (g_PlayingAppId.load(std::memory_order_relaxed) != newTracked) {
+            return;
+        }
         if (newTracked != 0) {
             LOG_RICHPRESENCE_INFO("Tracking topmost appid {}", newTracked);
-            if (BuildInject(newTracked)) g_InjectPending = true;
-        } else if (topmost == 0) {
+            if (BuildInject(newTracked, newTrackedName)) {
+                g_InjectPending.store(true, std::memory_order_release);
+            }
+        } else if (msg.games_played_size() == 0) {
             // Stack went empty — inject a clear so the cache reverts.
             LOG_RICHPRESENCE_DEBUG("GamesPlayed empty, scheduling cache clear");
-            if (BuildInject(0)) g_InjectPending = true;
+            if (BuildInject(0, {})) {
+                g_InjectPending.store(true, std::memory_order_release);
+            }
         } else {
-            // Topmost is owned (or -onlinefix); let the server's broadcast
-            // paint it.  Skipping the clear-inject here avoids a brief
-            // "Online" flicker between our drop and the server's push.
-            LOG_RICHPRESENCE_DEBUG("Topmost is appid {} (owned or onlinefix); deferring to server", topmost);
+            // Topmost is owned; let the server's broadcast paint it.
+            // Skipping the clear-inject here avoids a brief "Online"
+            // flicker between our drop and the server's push.
+            LOG_RICHPRESENCE_DEBUG("Topmost is appid {} (owned); deferring to server", topmost);
         }
     }
 
@@ -1282,36 +1601,72 @@ namespace Hooks_NetPacket_RichPresence {
         CMsgClientPersonaState msg;
         if (!msg.ParseFromArray(pkt.body.data(), static_cast<int>(pkt.body.size()))) return;
 
-        std::lock_guard lock(g_RPMutex);
+        uint64 localSteamId = g_LocalSteamId.load(std::memory_order_relaxed);
         CMsgClientPersonaState::Friend* selfEntry = nullptr;
-        for (int i = 0; i < msg.friends_size(); ++i) {
-            auto* f = msg.mutable_friends(i);
-            if (f->has_friendid() && f->friendid() == g_LocalSteamId) {
-                selfEntry = f;
-                break;
+        if (localSteamId != 0) {
+            for (int i = 0; i < msg.friends_size(); ++i) {
+                auto* f = msg.mutable_friends(i);
+                if (f->has_friendid() && f->friendid() == localSteamId) {
+                    selfEntry = f;
+                    break;
+                }
             }
         }
+
+        // If selfEntry wasn't matched (e.g., first login push before any outbound packet
+        // or account switch), inspect the header's steamid and rescan if updated.
+        if (!selfEntry && !pkt.hdr.empty()) {
+            CMsgProtoBufHeader hdrMsg;
+            if (hdrMsg.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
+                hdrMsg.has_steamid() && hdrMsg.steamid() != 0)
+            {
+                TryCaptureLocalSteamId(hdrMsg.steamid());
+                const uint64 updatedId = g_LocalSteamId.load(std::memory_order_relaxed);
+                if (updatedId != 0 && updatedId != localSteamId) {
+                    localSteamId = updatedId;
+                    for (int i = 0; i < msg.friends_size(); ++i) {
+                        auto* f = msg.mutable_friends(i);
+                        if (f->has_friendid() && f->friendid() == localSteamId) {
+                            selfEntry = f;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 99% of PersonaState packets are friend broadcasts — exit without locking g_RPMutex!
         if (!selfEntry) return;
 
         LOG_RICHPRESENCE_DEBUG(
             "Recv self PersonaState: status_flags=0x{:X} friends_size={}",
             msg.status_flags(), msg.friends_size());
 
-        if (pkt.hdr.size() <= sizeof(g_SelfHdr) && pkt.body.size() <= sizeof(g_SelfBody)) {
-            if (!pkt.hdr.empty()) {
-                std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
+        const AppId_t playingAppId = g_PlayingAppId.load(std::memory_order_relaxed);
+        const std::string gameName = (playingAppId != 0)
+            ? Hooks_Misc::GetGameNameByAppID(playingAppId)
+            : std::string{};
+
+        bool shouldPatch = false;
+        {
+            std::lock_guard lock(g_RPMutex);
+            if (pkt.hdr.size() <= sizeof(g_SelfHdr) && pkt.body.size() <= sizeof(g_SelfBody)) {
+                if (!pkt.hdr.empty()) {
+                    std::memcpy(g_SelfHdr, pkt.hdr.data(), pkt.hdr.size());
+                }
+                std::memcpy(g_SelfBody, pkt.body.data(), pkt.body.size());
+                g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
+                g_cbSelfBody     = static_cast<uint32>(pkt.body.size());
+                g_HaveSelfCached = true;
             }
-            std::memcpy(g_SelfBody, pkt.body.data(), pkt.body.size());
-            g_cbSelfHdr      = static_cast<uint32>(pkt.hdr.size());
-            g_cbSelfBody     = static_cast<uint32>(pkt.body.size());
-            g_HaveSelfCached = true;
+
+            if (playingAppId != 0 && g_PlayingAppId.load(std::memory_order_relaxed) == playingAppId) {
+                ApplyGameFields(msg, selfEntry, playingAppId, gameName);
+                shouldPatch = true;
+            }
         }
 
-        const AppId_t playingAppId = g_PlayingAppId.load(std::memory_order_relaxed);
-        if (playingAppId == 0) return;
-
-        ApplyGameFields(msg, selfEntry, playingAppId);
-        if (CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
+        if (shouldPatch && CommitRecvPacket(pPacket, pkt, nullptr, &msg)) {
             LOG_RICHPRESENCE_INFO("Patched live self push with appid {}", playingAppId);
         }
     }
@@ -1321,12 +1676,14 @@ namespace Hooks_NetPacket_RichPresence {
     void TryInject(void* pThis, CNetPacket* pCarrier,
                    bool (*invokeOriginal)(void*, CNetPacket*))
     {
+        if (!g_InjectPending.load(std::memory_order_acquire)) return;
+
         uint32 injectSize = 0;
         std::span<uint8> slot;
         {
             std::lock_guard lock(g_RPMutex);
-            if (!g_InjectPending || g_cbInjectPkt == 0) return;
-            g_InjectPending = false;
+            if (!g_InjectPending.load(std::memory_order_relaxed) || g_cbInjectPkt == 0) return;
+            g_InjectPending.store(false, std::memory_order_release);
             injectSize = g_cbInjectPkt;
             slot = g_RecvPool.AcquireSlot();
             std::memcpy(slot.data(), g_InjectPkt, injectSize);
@@ -1367,17 +1724,8 @@ namespace Hooks_NetPacket_OnlineFix {
 
         Hooks_NetPacket_RichPresence::TrackSend(msg, pkt.hdr);
 
-        uint32 localAccountId = static_cast<uint32>(
-            Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed) & 0xFFFFFFFF);
-        if (localAccountId == 0 && !pkt.hdr.empty()) {
-            CMsgProtoBufHeader hdr;
-            if (hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
-                hdr.has_steamid() && hdr.steamid() != 0)
-            {
-                Hooks_NetPacket_RichPresence::g_LocalSteamId.store(hdr.steamid(), std::memory_order_relaxed);
-                localAccountId = static_cast<uint32>(hdr.steamid() & 0xFFFFFFFF);
-            }
-        }
+        const uint64 localSteamId = Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed);
+        const uint32 localAccountId = (localSteamId != 0) ? CSteamID(localSteamId).GetAccountID() : 0u;
 
         bool patched = false;
         for (int i = 0; i < msg.games_played_size(); ++i) {
@@ -1385,8 +1733,8 @@ namespace Hooks_NetPacket_OnlineFix {
             const AppId_t appid = ExtractSteamAppId(game->game_id());
 
             // SpawnProcess rewrites pGameID to 480, so game_id is already 480.
-            // Fill game_extra_info with the real game name.
-            if (appid == kOnlineFixAppId) {
+            // Fill game_extra_info with the real game name when OnlineFix is active.
+            if (appid == kOnlineFixAppId && Hooks_Misc::IsOnlineFixActive()) {
                 const AppId_t realAppId = Hooks_Misc::ResolveAppId();
                 if (realAppId && realAppId != kOnlineFixAppId) {
                     std::string name = Hooks_Misc::GetGameNameByAppID(realAppId);
@@ -1438,9 +1786,9 @@ namespace Hooks_NetPacket_OnlineFix {
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Cloud {
 
-    std::mutex                                  g_queueMutex;
+    std::mutex                                   g_queueMutex;
     NoDestructor<std::deque<std::vector<uint8>>> g_pending; // ready-to-inject 147 packets
-    std::atomic<uint64>                         g_localSteamId{0};
+    std::atomic<bool>                            g_hasPending{false};
 
     // ── minimal top-level protobuf varint field reader ──────────
     // Avoids pulling the Cloud.* request message definitions into the
@@ -1488,10 +1836,10 @@ namespace Hooks_NetPacket_Cloud {
     // appid lives in field 1 of every Cloud.* request except
     // ClientCommitFileUpload, where it is field 2 (mirrors CloudRedirect's
     // CloudRpcUtils::ExtractAppId).
-    [[nodiscard]] static uint32 ExtractAppId(std::string_view jobName, std::span<const uint8> body) noexcept {
+    [[nodiscard]] uint32 ExtractAppId(std::string_view jobName, std::span<const uint8> body) noexcept {
         const uint32 fieldNum = (jobName == "Cloud.ClientCommitFileUpload#1") ? 2u : 1u;
         uint64 v = 0;
-        if (FindVarintField(body, fieldNum, v))
+        if (FindVarintField(body, fieldNum, v) && v <= (std::numeric_limits<uint32>::max)())
             return static_cast<uint32>(v);
         return 0;
     }
@@ -1504,17 +1852,24 @@ namespace Hooks_NetPacket_Cloud {
     {
         if (!CloudRedirectHost::IsActive()) return false;
 
-        if (reqHdr.has_steamid() && reqHdr.steamid())
-            g_localSteamId.store(reqHdr.steamid(), std::memory_order_relaxed);
+        if (reqHdr.has_steamid() && reqHdr.steamid() != 0) {
+            Hooks_NetPacket_RichPresence::TryCaptureLocalSteamId(reqHdr.steamid());
+        }
 
         const uint32 rawAppId = ExtractAppId(jobName, body);
         const uint32 appId    = ResolveOnlineFixAppId(rawAppId);
         if (appId != rawAppId) {
             LOG_NETPACKET_INFO("Cloud RPC {}: mapped OnlineFix AppID {} -> {}", jobName, rawAppId, appId);
         }
-        if (appId == 0 || !CloudRedirectHost::IsApp(appId)) return false;
+        if (appId == 0) return false;
 
-        const uint32 accountId = static_cast<uint32>(g_localSteamId.load(std::memory_order_relaxed) & 0xFFFFFFFFull);
+        // INV-01: Truly owned and family-shared games must use official Steam Cloud untouched
+        if (Hooks_Package::HasValidLicense(appId)) return false;
+        if (!CloudRedirectHost::IsApp(appId)) return false;
+
+        const uint64 localSteamId = Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed);
+        const uint32 accountId    = (localSteamId != 0) ? CSteamID(localSteamId).GetAccountID() : 0u;
+        if (accountId == 0) return false;
 
         std::span<uint8> scratchSlot = g_SendPool.AcquireSlot().subspan(0, kMaxBodySize);
         uint32  respLen  = 0;
@@ -1563,6 +1918,7 @@ namespace Hooks_NetPacket_Cloud {
                 g_pending->pop_front();
             }
             g_pending->push_back(std::move(pkt));
+            g_hasPending.store(true, std::memory_order_release);
         }
         LOG_NETPACKET_DEBUG("Cloud: handled {} app={} -> queued {}-byte response (eresult={})",
                             jobName, appId, total, eresult);
@@ -1575,18 +1931,31 @@ namespace Hooks_NetPacket_Cloud {
     void Drain(void* pThis, CNetPacket* pCarrier,
                bool (*invokeOriginal)(void*, CNetPacket*))
     {
+        if (!g_hasPending.load(std::memory_order_acquire)) return;
+
         constexpr size_t kMaxBurstDrain = 8;
         for (size_t i = 0; i < kMaxBurstDrain; ++i) {
             std::vector<uint8> pkt;
             {
                 std::lock_guard lk(g_queueMutex);
-                if (g_pending->empty()) return;
+                if (g_pending->empty()) {
+                    g_hasPending.store(false, std::memory_order_release);
+                    return;
+                }
                 pkt = std::move(g_pending->front());
                 g_pending->pop_front();
+                if (g_pending->empty()) {
+                    g_hasPending.store(false, std::memory_order_release);
+                }
             }
 
+            if (pkt.empty() || pkt.size() > kMaxPacketSize) continue;
+
+            std::span<uint8> slot = g_RecvPool.AcquireSlot();
+            std::memcpy(slot.data(), pkt.data(), pkt.size());
+
             {
-                CarrierScopeGuard guard(pCarrier, pkt.data(), static_cast<uint32>(pkt.size()));
+                CarrierScopeGuard guard(pCarrier, slot.data(), static_cast<uint32>(pkt.size()));
                 invokeOriginal(pThis, pCarrier);
             }
             LOG_NETPACKET_DEBUG("Cloud: delivered {}-byte response", pkt.size());
@@ -1616,7 +1985,10 @@ namespace {
         // Steam's internal cloud state machine untouched.
         if (jobView.starts_with("Cloud.")) {
             if (jobView == "Cloud.SignalAppExitSyncDone#1") {
-                Hooks_Misc::ResetOnlineFixState();
+                const uint32 exitAppId = Hooks_NetPacket_Cloud::ExtractAppId(jobView, pkt.body);
+                if (exitAppId == 0 || exitAppId == kOnlineFixAppId || exitAppId == Hooks_Misc::ResolveAppId()) {
+                    Hooks_Misc::ResetOnlineFixState();
+                }
                 return false;
             }
             if (jobView == "Cloud.ClientConflictResolution#1")
@@ -1651,14 +2023,9 @@ namespace {
         if (!pkt.hdr.empty() && Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed) == 0) {
             CMsgProtoBufHeader hdr;
             if (hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
-                hdr.has_steamid() && hdr.steamid())
+                hdr.has_steamid() && hdr.steamid() != 0)
             {
-                std::lock_guard lock(Hooks_NetPacket_RichPresence::g_RPMutex);
-                if (Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed) == 0) {
-                    Hooks_NetPacket_RichPresence::g_LocalSteamId.store(hdr.steamid(), std::memory_order_relaxed);
-                    CloudRedirectHost::SetAccountId(static_cast<uint32_t>(hdr.steamid() & 0xFFFFFFFF));
-                    LOG_ACHIEVEMENT_DEBUG("Captured local SteamID 0x{:X} from outbound packet", hdr.steamid());
-                }
+                Hooks_NetPacket_RichPresence::TryCaptureLocalSteamId(hdr.steamid());
             }
         }
 
@@ -1670,10 +2037,14 @@ namespace {
         case k_EMsgServiceMethodCallFromClient: {   // 151
             CMsgProtoBufHeader hdr;
             if (!pkt.hdr.empty() &&
-                hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
-                hdr.has_target_job_name())
+                hdr.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())))
             {
-                outReplaced = SendServiceJob(pkt, hdr, outFrame, outSuppress);
+                if (hdr.has_steamid() && hdr.steamid() != 0) {
+                    Hooks_NetPacket_RichPresence::TryCaptureLocalSteamId(hdr.steamid());
+                }
+                if (hdr.has_target_job_name()) {
+                    outReplaced = SendServiceJob(pkt, hdr, outFrame, outSuppress);
+                }
             }
             return;
         }
@@ -1811,8 +2182,12 @@ namespace {
               void* pObject, EWebSocketOpCode eWebSocketOpCode,
               uint8* pubData, uint32 cubData)
     {
-        if (eWebSocketOpCode != k_eWebSocketOpCode_Binary || !pubData || cubData < sizeof(MsgHdr))
+        if (!oBBuildAndAsyncSendFrame) return false;
+
+        HookScopeGuard hookGuard;
+        if (!hookGuard.Entered() || eWebSocketOpCode != k_eWebSocketOpCode_Binary || !pubData || cubData < sizeof(MsgHdr)) {
             return oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
+        }
 
         const auto pkt = UnpackRaw(pubData, cubData);
         if (!pkt) {
@@ -1841,7 +2216,10 @@ namespace {
 
     HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
     {
-        if (!pPacket || !pPacket->m_pubData) {
+        if (!oRecvPkt) return nullptr;
+
+        HookScopeGuard hookGuard;
+        if (!hookGuard.Entered() || !pPacket || !pPacket->m_pubData) {
             return oRecvPkt(pThis, pPacket);
         }
 
@@ -1866,6 +2244,7 @@ namespace {
 
 namespace Hooks_NetPacket {
     void Install() {
+        g_ShuttingDown.store(false, std::memory_order_release);
         RESOLVE_C(PchMsgNameFromEMsg);
         HOOK_BEGIN();
         INSTALL_HOOK_C(BBuildAndAsyncSendFrame);
@@ -1874,9 +2253,47 @@ namespace Hooks_NetPacket {
     }
 
     void Uninstall() {
+        g_ShuttingDown.store(true, std::memory_order_seq_cst);
+
+        // Wait up to 200ms for active hook callbacks (including any interrupted Manifest wait) to exit
+        for (int i = 0; i < 200 && g_ActiveHookCalls.load(std::memory_order_acquire) != 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
         UNHOOK_BEGIN();
         UNINSTALL_HOOK(BBuildAndAsyncSendFrame);
         UNINSTALL_HOOK(RecvPkt);
         UNHOOK_END();
+
+        oBBuildAndAsyncSendFrame = nullptr;
+        oRecvPkt                 = nullptr;
+        oPchMsgNameFromEMsg      = nullptr;
+
+        {
+            std::lock_guard lock(Hooks_NetPacket_UserStats::g_JobMutex);
+            Hooks_NetPacket_UserStats::g_JobIdToPendingStats->clear();
+        }
+        {
+            std::lock_guard lock(Hooks_NetPacket_Manifest::g_CodeMutex);
+            Hooks_NetPacket_Manifest::g_PendingJobs->clear();
+            Hooks_NetPacket_Manifest::g_InFlightFutures->clear();
+            Hooks_NetPacket_Manifest::g_ManifestCodeCache->clear();
+        }
+        {
+            std::lock_guard lock(Hooks_NetPacket_RichPresence::g_RPMutex);
+            Hooks_NetPacket_RichPresence::g_RPKvsByAppId->clear();
+            Hooks_NetPacket_RichPresence::g_InjectPending.store(false, std::memory_order_release);
+            Hooks_NetPacket_RichPresence::g_cbInjectPkt    = 0;
+            Hooks_NetPacket_RichPresence::g_HaveSelfCached = false;
+        }
+        {
+            std::lock_guard lock(Hooks_NetPacket_Cloud::g_queueMutex);
+            Hooks_NetPacket_Cloud::g_pending->clear();
+            Hooks_NetPacket_Cloud::g_hasPending.store(false, std::memory_order_release);
+        }
+
+        for (int i = 0; i < 50 && Hooks_NetPacket_Manifest::g_ActiveFetchThreads.load(std::memory_order_acquire) != 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 }
