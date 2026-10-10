@@ -59,16 +59,20 @@ namespace {
     public:
         CarrierScopeGuard(CNetPacket* carrier, uint8* borrowedData, uint32 borrowedSize) noexcept
             : m_carrier(carrier),
-              m_origPubData(carrier->m_pubData),
-              m_origCubData(carrier->m_cubData)
+              m_origPubData(carrier ? carrier->m_pubData : nullptr),
+              m_origCubData(carrier ? carrier->m_cubData : 0)
         {
-            carrier->m_pubData = borrowedData;
-            carrier->m_cubData = borrowedSize;
+            if (carrier) {
+                carrier->m_pubData = borrowedData;
+                carrier->m_cubData = borrowedSize;
+            }
         }
 
         ~CarrierScopeGuard() noexcept {
-            m_carrier->m_pubData = m_origPubData;
-            m_carrier->m_cubData = m_origCubData;
+            if (m_carrier) {
+                m_carrier->m_pubData = m_origPubData;
+                m_carrier->m_cubData = m_origCubData;
+            }
         }
 
         CarrierScopeGuard(const CarrierScopeGuard&) = delete;
@@ -782,6 +786,16 @@ namespace Hooks_NetPacket_Manifest {
             g_PendingJobs.erase(g_PendingJobs.begin());
         }
 
+        // Bounded pruning of stale in-flight futures
+        if (g_InFlightFutures.size() >= 64) {
+            std::erase_if(g_InFlightFutures, [](const auto& item) {
+                return item.second.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            });
+            if (g_InFlightFutures.size() >= 64) {
+                g_InFlightFutures.clear();
+            }
+        }
+
         // 1. Check if already cached
         auto itCache = g_ManifestCodeCache.find(manifestGid);
         if (itCache != g_ManifestCodeCache.end() && itCache->second != 0) {
@@ -851,6 +865,13 @@ namespace Hooks_NetPacket_Manifest {
         }
 
         uint64 code = job.cachedCode;
+        if (code == 0) {
+            std::lock_guard<std::mutex> lock(g_CodeMutex);
+            auto it = g_ManifestCodeCache.find(job.manifestGid);
+            if (it != g_ManifestCodeCache.end()) {
+                code = it->second;
+            }
+        }
         if (code == 0 && job.future.valid()) {
             auto status = job.future.wait_for(std::chrono::milliseconds(kMaxWaitMilliseconds));
             if (status != std::future_status::ready) {
@@ -869,9 +890,12 @@ namespace Hooks_NetPacket_Manifest {
         LOG_MANIFEST_DEBUG("GetManifestRequestCode recv: injecting code={} for jobid={}, gid={}",
                            code, jobId, job.manifestGid);
 
-        // Header: set eresult=OK
+        // Header: set eresult=OK and purge any error_message from official rejection
         CMsgProtoBufHeader hdr = inHdr;
         hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
+        if (hdr.has_error_message()) {
+            hdr.clear_error_message();
+        }
         uint32 cbHdrNew = static_cast<uint32>(hdr.ByteSizeLong());
         if (cbHdrNew > maxHdr || !hdr.SerializeToArray(outHdr, static_cast<int>(maxHdr))) {
             LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to SerializeToArray modified header, cbHdrNew: {}, maxHdr: {}",
@@ -1211,21 +1235,19 @@ namespace Hooks_NetPacket_RichPresence {
     void TryInject(void* pThis, CNetPacket* pCarrier,
                    bool (*invokeOriginal)(void*, CNetPacket*))
     {
-        alignas(64) static uint8 s_injectCopy[kMaxPacketSize];
-        static std::mutex s_injectMutex;
         uint32 injectSize = 0;
+        std::span<uint8> slot;
         {
             std::lock_guard lock(g_RPMutex);
             if (!g_InjectPending || g_cbInjectPkt == 0) return;
             g_InjectPending = false;
             injectSize = g_cbInjectPkt;
-            std::lock_guard copyLock(s_injectMutex);
-            std::memcpy(s_injectCopy, g_InjectPkt, injectSize);
+            slot = g_RecvPool.AcquireSlot();
+            std::memcpy(slot.data(), g_InjectPkt, injectSize);
         }
 
         {
-            std::lock_guard copyLock(s_injectMutex);
-            CarrierScopeGuard guard(pCarrier, s_injectCopy, injectSize);
+            CarrierScopeGuard guard(pCarrier, slot.data(), injectSize);
             invokeOriginal(pThis, pCarrier);
         }
         LOG_RICHPRESENCE_INFO("Delivered manufactured self-PersonaState ({} bytes)", injectSize);
@@ -1341,7 +1363,7 @@ namespace Hooks_NetPacket_Cloud {
 
     std::mutex                     g_queueMutex;
     std::deque<std::vector<uint8>> g_pending;        // ready-to-inject 147 packets
-    uint64                         g_localSteamId = 0;
+    std::atomic<uint64>            g_localSteamId{0};
 
     // ── minimal top-level protobuf varint field reader ──────────
     // Avoids pulling the Cloud.* request message definitions into the
@@ -1408,7 +1430,7 @@ namespace Hooks_NetPacket_Cloud {
         if (!CloudRedirectHost::IsActive()) return false;
 
         if (reqHdr.has_steamid() && reqHdr.steamid())
-            g_localSteamId = reqHdr.steamid();
+            g_localSteamId.store(reqHdr.steamid(), std::memory_order_relaxed);
 
         const uint32 rawAppId = ExtractAppId(jobName, pBody, cbBody);
         uint32 appId = rawAppId;
@@ -1418,7 +1440,7 @@ namespace Hooks_NetPacket_Cloud {
         }
         if (appId == 0 || !CloudRedirectHost::IsApp(appId)) return false;
 
-        const uint32 accountId = static_cast<uint32>(g_localSteamId & 0xFFFFFFFFull);
+        const uint32 accountId = static_cast<uint32>(g_localSteamId.load(std::memory_order_relaxed) & 0xFFFFFFFFull);
 
         static thread_local uint8 respBuf[kMaxBodySize];
         uint32  respLen  = 0;
