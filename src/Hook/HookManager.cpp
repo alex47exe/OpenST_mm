@@ -44,12 +44,13 @@ void InstallUIHooks() noexcept {
 
 void UninstallUIHooks() noexcept {
     std::scoped_lock lock(s_lifecycleMutex);
-    if (!s_uiHooksInstalled.load(std::memory_order_relaxed)) {
+    if (!s_uiHooksInstalled.load(std::memory_order_relaxed) &&
+        !s_earlyUiHooksInstalled.load(std::memory_order_relaxed)) {
         return;
     }
-    s_earlyUiHooksInstalled.store(false, std::memory_order_release);
     LOG_INFO("HookManager: Uninstalling UI hooks...");
     Hooks_SteamUI::Uninstall();
+    s_earlyUiHooksInstalled.store(false, std::memory_order_release);
     s_uiHooksInstalled.store(false, std::memory_order_release);
     LOG_INFO("HookManager: UI hooks uninstalled cleanly");
 }
