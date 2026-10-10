@@ -221,7 +221,7 @@ namespace Hooks_NetPacket_UserStats {
 
     // ── Send: CPlayer_GetUserStats_Request (eMsg 151) ──────────
     bool HandleSend_GetUserStats(const uint8* pBody, uint32 cbBody,
-                                 const uint8* pHdr, uint32 cbHdr,
+                                 const CMsgProtoBufHeader& hdr,
                                  uint8* outBody, uint32 maxBody, uint32& outCbBody)
     {
         CPlayer_GetUserStats_Request req;
@@ -261,18 +261,15 @@ namespace Hooks_NetPacket_UserStats {
         const std::string shaSchema = hasShaSchema ? req.sha_schema() : "";
 
         // Save jobid_source -> PendingStatsJob for the response handler
-        if (pHdr && cbHdr > 0) {
-            CMsgProtoBufHeader hdr;
-            if (hdr.ParseFromArray(pHdr, static_cast<int>(cbHdr)) && hdr.has_jobid_source()) {
-                uint64 jobId = hdr.jobid_source();
-                std::lock_guard<std::mutex> lock(g_JobMutex);
-                if (g_JobIdToPendingStats.size() >= 256) {
-                    g_JobIdToPendingStats.erase(g_JobIdToPendingStats.begin());
-                }
-                g_JobIdToPendingStats[jobId] = {appId, shaSchema};
-                LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: stored jobid={} -> appid={}, sha_len={}",
-                    jobId, appId, shaSchema.size());
+        if (hdr.has_jobid_source()) {
+            uint64 jobId = hdr.jobid_source();
+            std::lock_guard<std::mutex> lock(g_JobMutex);
+            if (g_JobIdToPendingStats.size() >= 256) {
+                g_JobIdToPendingStats.erase(g_JobIdToPendingStats.begin());
             }
+            g_JobIdToPendingStats[jobId] = {appId, shaSchema};
+            LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: stored jobid={} -> appid={}, sha_len={}",
+                jobId, appId, shaSchema.size());
         }
 
         // When sha_schema is present, the client already has the schema definitions cached locally.
@@ -307,24 +304,18 @@ namespace Hooks_NetPacket_UserStats {
 
     // ── Recv: CPlayer_GetUserStats_Response (eMsg 147) ─────────
     //     Header: set eresult=OK. Body: strip donor stats, overlay CR achievements.
-    void HandleRecv_GetUserStatsResponse(const uint8* pHdr, uint32 cbHdr,
+    void HandleRecv_GetUserStatsResponse(const CMsgProtoBufHeader& inHdr,
                                          const uint8* pBody, uint32 cbBody,
                                          uint8* outHdr, uint32 maxHdr, uint32& outCbHdr, bool& outNeedHdr,
                                          uint8* outBody, uint32 maxBody, uint32& outCbBody, bool& outNeedBody)
     {
-        if (!pHdr || cbHdr == 0) return;
-        CMsgProtoBufHeader hdrMsg;
-        if (!hdrMsg.ParseFromArray(pHdr, static_cast<int>(cbHdr))) {
-            LOG_ACHIEVEMENT_WARN("Player::GetUserStats response: failed to ParseFromArray original header");
-            return;
-        }
-        LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: original header:\n{}", hdrMsg.DebugString());
+        LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: original header:\n{}", inHdr.DebugString());
 
         // Look up pending stats info via jobid_target -> jobid_source match
         PendingStatsJob pending;
         bool hasPending = false;
-        if (hdrMsg.has_jobid_target()) {
-            uint64 jobId = hdrMsg.jobid_target();
+        if (inHdr.has_jobid_target()) {
+            uint64 jobId = inHdr.jobid_target();
             std::lock_guard<std::mutex> lock(g_JobMutex);
             auto it = g_JobIdToPendingStats.find(jobId);
             if (it != g_JobIdToPendingStats.end()) {
@@ -388,6 +379,7 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // Transactional serialization: only commit both if both succeed
+        CMsgProtoBufHeader hdrMsg = inHdr;
         hdrMsg.set_eresult(static_cast<int32_t>(k_EResultOK));
         if (hdrMsg.has_error_message()) {
             hdrMsg.clear_error_message();
@@ -741,107 +733,149 @@ namespace Hooks_NetPacket_FamilySharing {
 //  Incoming: ContentServerDirectory.GetManifestRequestCode#1  (eMsg 147)
 //
 //  Launches an async HTTP fetch on send; the recv handler waits up to
-//  12 s for the result and patches both header (eresult=OK) and body
-//  (manifest_request_code).  On timeout or failure the original
-//  response passes through unmodified.
+//  400 ms for the result and patches both header (eresult=OK) and body
+//  (manifest_request_code). Results are cached in g_ManifestCodeCache
+//  so that if network latency exceeds 400ms on first attempt, subsequent
+//  retries hit the cache instantly without stalling the network thread.
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Manifest {
 
-    std::unordered_map<uint64, std::shared_future<uint64>> g_CodeFutures;
+    struct PendingManifestJob {
+        uint64 manifestGid = 0;
+        uint64 cachedCode  = 0;
+        std::shared_future<uint64> future;
+    };
+
     std::mutex g_CodeMutex;
-    constexpr uint32 kMaxWaitSeconds = 12;
+    std::unordered_map<uint64, uint64> g_ManifestCodeCache; // manifestGid -> code
+    std::unordered_map<uint64, std::shared_future<uint64>> g_InFlightFutures; // manifestGid -> future
+    std::unordered_map<uint64, PendingManifestJob> g_PendingJobs; // jobId -> PendingManifestJob
+    constexpr uint32 kMaxWaitMilliseconds = 400;
 
     bool HandleSend(const uint8* pBody, uint32 cbBody,
-                    const uint8* pHdr, uint32 cbHdr)
+                    const CMsgProtoBufHeader& hdr)
     {
         CContentServerDirectory_GetManifestRequestCode_Request req;
-        if (!req.ParseFromArray(pBody, cbBody)) {
+        if (!req.ParseFromArray(pBody, static_cast<int>(cbBody))) {
             LOG_MANIFEST_WARN("GetManifestRequestCode: failed to parse request");
             return false;
         }
         if (!req.has_depot_id() || !req.has_manifest_id()) return false;
         if (!LuaConfig::HasDepot(req.depot_id())) return false;
 
-        CMsgProtoBufHeader hdr;
-        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_source()) {
+        if (!hdr.has_jobid_source()) {
             LOG_MANIFEST_WARN("GetManifestRequestCode: missing jobid_source in header");
             return false;
         }
 
-        uint64 jobId       = hdr.jobid_source();
-        uint64 manifestGid = req.manifest_id();
-        uint32 depotId     = req.depot_id();
-        uint32 appId       = req.has_app_id() ? req.app_id() : 0;
+        const uint64 jobId       = hdr.jobid_source();
+        const uint64 manifestGid = req.manifest_id();
+        const uint32 depotId     = req.depot_id();
+        const uint32 appId       = req.has_app_id() ? req.app_id() : 0;
 
         LOG_MANIFEST_DEBUG("GetManifestRequestCode send: depot={} gid={} jobid={} app_id={}",
-                            depotId, manifestGid, jobId, appId);
+                           depotId, manifestGid, jobId, appId);
 
+        std::lock_guard<std::mutex> lock(g_CodeMutex);
+
+        if (g_PendingJobs.size() >= 256) {
+            g_PendingJobs.erase(g_PendingJobs.begin());
+        }
+
+        // 1. Check if already cached
+        auto itCache = g_ManifestCodeCache.find(manifestGid);
+        if (itCache != g_ManifestCodeCache.end() && itCache->second != 0) {
+            PendingManifestJob job;
+            job.manifestGid = manifestGid;
+            job.cachedCode  = itCache->second;
+            g_PendingJobs[jobId] = std::move(job);
+            LOG_MANIFEST_DEBUG("GetManifestRequestCode send: cache hit for gid={} (code={})", manifestGid, itCache->second);
+            return false;
+        }
+
+        // 2. Check if an async fetch for this manifest is already in flight
+        auto itFlight = g_InFlightFutures.find(manifestGid);
+        if (itFlight != g_InFlightFutures.end()) {
+            PendingManifestJob job;
+            job.manifestGid = manifestGid;
+            job.future      = itFlight->second;
+            g_PendingJobs[jobId] = std::move(job);
+            LOG_MANIFEST_DEBUG("GetManifestRequestCode send: attaching to in-flight fetch for gid={}", manifestGid);
+            return false;
+        }
+
+        // 3. Launch async fetch
         auto task = std::async(std::launch::async,
             [manifestGid, depotId, appId]() -> uint64 {
                 uint64 code = 0;
                 ManifestClient::FetchManifestRequestCode(manifestGid, &code, appId, depotId);
+                {
+                    std::lock_guard<std::mutex> lk(g_CodeMutex);
+                    if (code != 0) {
+                        if (g_ManifestCodeCache.size() >= 512) {
+                            g_ManifestCodeCache.erase(g_ManifestCodeCache.begin());
+                        }
+                        g_ManifestCodeCache[manifestGid] = code;
+                    }
+                    g_InFlightFutures.erase(manifestGid);
+                }
                 return code;
             });
 
-        {
-            std::lock_guard<std::mutex> lock(g_CodeMutex);
-            if (g_CodeFutures.size() >= 256) {
-                std::erase_if(g_CodeFutures, [](const auto& item) {
-                    return item.second.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-                });
-                if (g_CodeFutures.size() >= 256) {
-                    g_CodeFutures.clear();
-                }
-            }
-            g_CodeFutures[jobId] = task.share();
-        }
+        auto sharedFuture = task.share();
+        g_InFlightFutures[manifestGid] = sharedFuture;
+
+        PendingManifestJob job;
+        job.manifestGid = manifestGid;
+        job.future      = sharedFuture;
+        g_PendingJobs[jobId] = std::move(job);
 
         return false; // Don't modify the outgoing request body
     }
 
     void HandleRecv(const uint8* pBody, uint32 cbBody,
-                    const uint8* pHdr, uint32 cbHdr,
+                    const CMsgProtoBufHeader& inHdr,
                     uint8* outHdr, uint32 maxHdr, uint32& outCbHdr, bool& outNeedHdr,
                     uint8* outBody, uint32 maxBody, uint32& outCbBody, bool& outNeedBody)
     {
-        CMsgProtoBufHeader hdr;
-        if (!hdr.ParseFromArray(pHdr, static_cast<int>(cbHdr))){
-            LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to ParseFromArray original header");
-            return;
-        }
+        if (!inHdr.has_jobid_target()) return;
+        const uint64 jobId = inHdr.jobid_target();
 
-        uint64 jobId = hdr.jobid_target();
-        std::shared_future<uint64> future;
-
+        PendingManifestJob job;
         {
             std::lock_guard<std::mutex> lock(g_CodeMutex);
-            auto it = g_CodeFutures.find(jobId);
-            if (it == g_CodeFutures.end()) return;
-            future = it->second;
-            g_CodeFutures.erase(it); // Always clean up immediately
-        }
-        // Wait up to kMaxWaitSeconds seconds for the HTTP fetch to complete
-        auto status = future.wait_for(std::chrono::seconds(kMaxWaitSeconds));
-        if (status != std::future_status::ready) {
-            LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out for jobid={}", jobId);
-            return;
+            auto it = g_PendingJobs.find(jobId);
+            if (it == g_PendingJobs.end()) return;
+            job = std::move(it->second);
+            g_PendingJobs.erase(it); // Always clean up immediately
         }
 
-        uint64 code = future.get();
+        uint64 code = job.cachedCode;
+        if (code == 0 && job.future.valid()) {
+            auto status = job.future.wait_for(std::chrono::milliseconds(kMaxWaitMilliseconds));
+            if (status != std::future_status::ready) {
+                LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out ({}ms) for jobid={}, gid={}, passing through",
+                                  kMaxWaitMilliseconds, jobId, job.manifestGid);
+                return;
+            }
+            code = job.future.get();
+        }
+
         if (!code) {
-            LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP returned 0 for jobid={}", jobId);
+            LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP returned 0 for jobid={}, gid={}", jobId, job.manifestGid);
             return;
         }
 
-        LOG_MANIFEST_DEBUG("GetManifestRequestCode recv: injecting code={} for jobid={}",
-                            code, jobId);
+        LOG_MANIFEST_DEBUG("GetManifestRequestCode recv: injecting code={} for jobid={}, gid={}",
+                           code, jobId, job.manifestGid);
 
         // Header: set eresult=OK
+        CMsgProtoBufHeader hdr = inHdr;
         hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
         uint32 cbHdrNew = static_cast<uint32>(hdr.ByteSizeLong());
-        if (cbHdrNew > maxHdr || !hdr.SerializeToArray(outHdr, static_cast<int>(maxHdr))){
-            LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to SerializeToArray modified header,"
-                    "cbHdrNew: {}, maxHdr: {}", cbHdrNew, maxHdr);
+        if (cbHdrNew > maxHdr || !hdr.SerializeToArray(outHdr, static_cast<int>(maxHdr))) {
+            LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to SerializeToArray modified header, cbHdrNew: {}, maxHdr: {}",
+                              cbHdrNew, maxHdr);
             return;
         }
 
@@ -850,9 +884,9 @@ namespace Hooks_NetPacket_Manifest {
         resp.set_manifest_request_code(code);
 
         uint32 cbBodyNew = static_cast<uint32>(resp.ByteSizeLong());
-        if (cbBodyNew > maxBody || !resp.SerializeToArray(outBody, static_cast<int>(maxBody))){
-            LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to SerializeToArray modified body,"
-                "cbBodyNew:{}, maxBody:{}", cbBodyNew, maxBody);
+        if (cbBodyNew > maxBody || !resp.SerializeToArray(outBody, static_cast<int>(maxBody))) {
+            LOG_MANIFEST_WARN("GetManifestRequestCode recv: failed to SerializeToArray modified body, cbBodyNew: {}, maxBody: {}",
+                              cbBodyNew, maxBody);
             return;
         }
         outCbHdr = cbHdrNew;
@@ -1225,8 +1259,15 @@ namespace Hooks_NetPacket_OnlineFix {
 
         Hooks_NetPacket_RichPresence::TrackSend(msg, pHdr, cbHdr);
 
-        const uint32 localAccountId = static_cast<uint32>(
+        uint32 localAccountId = static_cast<uint32>(
             Hooks_NetPacket_RichPresence::g_LocalSteamId.load(std::memory_order_relaxed) & 0xFFFFFFFF);
+        if (localAccountId == 0 && pHdr && cbHdr > 0) {
+            CMsgProtoBufHeader hdr;
+            if (hdr.ParseFromArray(pHdr, static_cast<int>(cbHdr)) && hdr.has_steamid() && hdr.steamid() != 0) {
+                Hooks_NetPacket_RichPresence::g_LocalSteamId.store(hdr.steamid(), std::memory_order_relaxed);
+                localAccountId = static_cast<uint32>(hdr.steamid() & 0xFFFFFFFF);
+            }
+        }
 
         bool patched = false;
         for (int i = 0; i < msg.games_played_size(); ++i) {
@@ -1362,12 +1403,10 @@ namespace Hooks_NetPacket_Cloud {
     // then suppress the outbound frame.
     bool HandleSend(const char* jobName,
                     const uint8* pBody, uint32 cbBody,
-                    const uint8* pHdr, uint32 cbHdr)
+                    const CMsgProtoBufHeader& reqHdr)
     {
         if (!CloudRedirectHost::IsActive()) return false;
 
-        CMsgProtoBufHeader reqHdr;
-        if (!reqHdr.ParseFromArray(pHdr, static_cast<int>(cbHdr))) return false;
         if (reqHdr.has_steamid() && reqHdr.steamid())
             g_localSteamId = reqHdr.steamid();
 
@@ -1459,13 +1498,12 @@ namespace Hooks_NetPacket_Cloud {
 // ════════════════════════════════════════════════════════════════
 namespace {
 
-    bool SendServiceJob(const char* targetJobName,
+    bool SendServiceJob(const CMsgProtoBufHeader& hdr,
                         const uint8* pBody, uint32 cbBody,
-                        const uint8* pHdr, uint32 cbHdr,
                         uint8* outBody, uint32 maxBody, uint32& outCbBody,
                         bool& outSuppress)
     {
-        if (!targetJobName) return false;
+        const std::string& targetJobName = hdr.target_job_name();
         LOG_NETPACKET_DEBUG("Send target_job_name: {}", targetJobName);
 
         // Steam Cloud save redirection: hand every "Cloud.*" request to
@@ -1481,19 +1519,19 @@ namespace {
             }
             if (jobView == "Cloud.ClientConflictResolution#1")
                 return false;
-            if (Hooks_NetPacket_Cloud::HandleSend(targetJobName, pBody, cbBody, pHdr, cbHdr))
+            if (Hooks_NetPacket_Cloud::HandleSend(targetJobName.c_str(), pBody, cbBody, hdr))
                 outSuppress = true;
             return false;   // never body-replace a cloud frame
         }
 
-        switch (Fnv1aHash(targetJobName)) {
+        switch (Fnv1aHash(targetJobName.c_str())) {
 
         case HASH_JOB_GetUserStats:
-            return Hooks_NetPacket_UserStats::HandleSend_GetUserStats(pBody, cbBody, pHdr, cbHdr,
+            return Hooks_NetPacket_UserStats::HandleSend_GetUserStats(pBody, cbBody, hdr,
                                                                       outBody, maxBody, outCbBody);
 
         case HASH_JOB_GetManifestRequestCode:
-            return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
+            return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, hdr);
 
         default:
             return false;
@@ -1529,7 +1567,7 @@ namespace {
         case k_EMsgServiceMethodCallFromClient: {   // 151
             CMsgProtoBufHeader hdr;
             if (pHdr && cbHdr > 0 && hdr.ParseFromArray(pHdr, static_cast<int>(cbHdr)) && hdr.has_target_job_name()) {
-                outNeedReplace = SendServiceJob(hdr.target_job_name().c_str(), pBody, cbBody, pHdr, cbHdr,
+                outNeedReplace = SendServiceJob(hdr, pBody, cbBody,
                                                 outBody, maxBody, outCbBody, outSuppress);
             }
             return;
@@ -1587,16 +1625,15 @@ namespace {
         }
     }
 
-    void RecvServiceJob(const char* targetJobName,
+    void RecvServiceJob(const CMsgProtoBufHeader& hdr,
                         const uint8* pBody, uint32 cbBody,
-                        const uint8* pHdr, uint32 cbHdr,
                         uint8* outHdr, uint32 maxHdr, uint32& outCbHdr, bool& outNeedHdr,
                         uint8* outBody, uint32 maxBody, uint32& outCbBody, bool& outNeedBody)
     {
-        if (!targetJobName) return;
+        const std::string& targetJobName = hdr.target_job_name();
         LOG_NETPACKET_DEBUG("Recv target_job_name: {}", targetJobName);
 
-        switch (Fnv1aHash(targetJobName)) {
+        switch (Fnv1aHash(targetJobName.c_str())) {
 
         case HASH_JOB_NotifyRunningApps:
             Hooks_NetPacket_FamilySharing::HandleRecv_NotifyRunningApps(
@@ -1605,14 +1642,14 @@ namespace {
 
         case HASH_JOB_GetUserStats:
             Hooks_NetPacket_UserStats::HandleRecv_GetUserStatsResponse(
-                pHdr, cbHdr, pBody, cbBody,
+                hdr, pBody, cbBody,
                 outHdr, maxHdr, outCbHdr, outNeedHdr,
                 outBody, maxBody, outCbBody, outNeedBody);
             return;
 
         case HASH_JOB_GetManifestRequestCode:
             Hooks_NetPacket_Manifest::HandleRecv(
-                pBody, cbBody, pHdr, cbHdr,
+                pBody, cbBody, hdr,
                 outHdr, maxHdr, outCbHdr, outNeedHdr,
                 outBody, maxBody, outCbBody, outNeedBody);
             return;
@@ -1646,7 +1683,7 @@ namespace {
         case k_EMsgServiceMethodSendToClient: {        // 152
             CMsgProtoBufHeader hdr;
             if (pHdr && cbHdr > 0 && hdr.ParseFromArray(pHdr, static_cast<int>(cbHdr)) && hdr.has_target_job_name()) {
-                RecvServiceJob(hdr.target_job_name().c_str(), pBody, cbBody, pHdr, cbHdr,
+                RecvServiceJob(hdr, pBody, cbBody,
                                outHdr, maxHdr, outCbHdr, outNeedHdr,
                                outBody, maxBody, outCbBody, outNeedBody);
             }
