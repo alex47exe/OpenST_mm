@@ -6,7 +6,6 @@
 #include "Hook/Hooks_SteamUI.h"
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Config/ConfigFileWatcher.h"
-#include "Utils/Config/LuaConfig.h"
 #include "Utils/Config/LuaFileWatcher.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
@@ -14,20 +13,15 @@
 #include "Utils/SteamMetadata/PatternLoader.h"
 #include "Utils/SteamMetadata/StatsClient.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
-#include "OSTPlatform/include/DynamicLibrary.h"
-#include "OSTPlatform/include/Encoding.h"
 #include "OSTPlatform/include/Thread.h"
 
-#include <chrono>
-#include <thread>
-#include <unordered_set>
 #include <windows.h>
 
 // Prepare key runtime paths.
 // Portable: Steam components (steamclient64.dll, steamui.dll, etc.) are located
 // in Steam's real installation directory, while configuration and Lua scripts can be
 // loaded from the portable DLL directory or fallback to Steam's installation directory.
-bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
+static bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
 {
     using OSTPlatform::Encoding::PathFromUtf8;
     using OSTPlatform::Encoding::PathToUtf8;
@@ -72,7 +66,7 @@ bool InitializeSteamComponents(OSTPlatform::DynamicLibrary::ModuleHandle selfMod
     if (!std::filesystem::exists(tomlFs, ecToml) || ecToml) {
         std::filesystem::path steamTomlFs = steamFsPath / "opensteamtool.toml";
         std::error_code ecSteamToml;
-        if ((std::filesystem::exists(steamTomlFs, ecSteamToml) && !ecSteamToml) || dllPath.empty()) {
+        if (std::filesystem::exists(steamTomlFs, ecSteamToml) && !ecSteamToml) {
             tomlPath = PathToUtf8(steamTomlFs);
         }
     }
@@ -190,7 +184,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
 
     std::vector<std::string> watchDirs;
     std::unordered_set<std::string> seenDirs;
-    auto addWatchDir = [&](const std::string& dir) {
+    auto addWatchDir = [&](std::string_view dir) {
         if (dir.empty()) return;
         std::string norm = OSTPlatform::Encoding::PathToUtf8(
             OSTPlatform::Encoding::PathFromUtf8(dir).lexically_normal());
@@ -201,7 +195,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     for (const auto& p : Config::GetLuaPaths()) {
         addWatchDir(p);
     }
-    addWatchDir(std::string(LuaDir));
+    addWatchDir(LuaDir);
     // In portable mode, also watch Steam's config/lua if it already exists
     if (IsPortableMode()) {
         const auto steamLuaFs = OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / "config" / "lua";

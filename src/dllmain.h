@@ -3,21 +3,6 @@
 
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Encoding.h"
-
-#include <string>
-#include <fstream>
-#include <filesystem>
-#include <array>
-#include <vector>
-#include <unordered_set>
-#include <unordered_map>
-#include <regex>
-#include <memory>
-#include <atomic>
-#include <format>
-#include <chrono>
-#include <thread>
-
 #include "Steam/Types.h"
 #include "Steam/Enums.h"
 #include "Steam/Structs.h"
@@ -26,8 +11,8 @@
 #include "Utils/Logging/Log.h"
 #include "Utils/Config/Config.h"
 
-
-#include <cstring>
+#include <atomic>
+#include <cstddef>
 
 inline OSTPlatform::DynamicLibrary::ModuleHandle client_hModule = nullptr;
 inline OSTPlatform::DynamicLibrary::ModuleHandle ui_hModule = nullptr;
@@ -47,11 +32,11 @@ inline char DllDir[kRuntimePathCapacity]           = {};
 
 inline std::atomic<bool> g_IsPortableMode{false};
 
-inline bool IsPortableMode() {
+inline bool IsPortableMode() noexcept {
     return g_IsPortableMode.load(std::memory_order_relaxed);
 }
 
-inline const char* GetStorageDirectory() {
+inline const char* GetStorageDirectory() noexcept {
     if (IsPortableMode()) {
         return DllDir;
     }
