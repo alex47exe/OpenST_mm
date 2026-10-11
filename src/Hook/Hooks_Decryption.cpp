@@ -1,11 +1,13 @@
 #include "Hooks_Decryption.h"
 #include "HookMacros.h"
+#include "Steam/Enums.h"
+#include "Utils/Config/LuaConfig.h"
+#include "Utils/Logging/Log.h"
 #include "dllmain.h"
 
 #include <atomic>
 #include <charconv>
 #include <cstring>
-#include <string>
 #include <string_view>
 
 namespace {
@@ -57,7 +59,11 @@ namespace {
         return oConfigStoreGetBinary(pObject, eConfigStore, KeyName, Key, KeySize);
     }
 
-    std::vector<uint8_t> ReadConfigStoreLocalBinary(const std::string& keyName) {
+    [[nodiscard]] std::vector<uint8_t> ReadConfigStoreLocalBinary(const char* keyName) {
+        if (!keyName) {
+            return {};
+        }
+
         void* pLocal = g_pConfigStoreLocal.load(std::memory_order_acquire);
         if (!pLocal || !oConfigStoreGetBinary) {
             LOG_DECRYPTIONKEY_WARN("GetConfigStoreLocalBinary: ConfigStoreGetBinary not ready, cannot get binary value");
@@ -67,34 +73,40 @@ namespace {
         constexpr size_t kInitialBufferSize = 4096;
         constexpr int32  kMaxSafeBufferSize  = 1024 * 1024; // 1MB safe ceiling
 
-        std::vector<uint8_t> value(kInitialBufferSize);
+        uint8_t stackBuf[kInitialBufferSize];
         int32 result = oConfigStoreGetBinary(pLocal, k_EConfigStoreUserLocal,
-                                             keyName.c_str(),
-                                             reinterpret_cast<char*>(value.data()),
-                                             static_cast<uint32>(value.size()));
+                                             keyName,
+                                             reinterpret_cast<char*>(stackBuf),
+                                             static_cast<uint32>(sizeof(stackBuf)));
         if (result <= 0) {
             LOG_DECRYPTIONKEY_DEBUG("GetConfigStoreLocalBinary: failed to read KeyName='{}'", keyName);
             return {};
         }
 
-        if (result > static_cast<int32>(value.size())) {
-            if (result > kMaxSafeBufferSize) {
-                LOG_DECRYPTIONKEY_WARN("GetConfigStoreLocalBinary: requested size {} exceeds maximum safe limit {} for KeyName='{}'",
-                                       result, kMaxSafeBufferSize, keyName);
-                return {};
-            }
-            LOG_DECRYPTIONKEY_DEBUG("GetConfigStoreLocalBinary: buffer truncated ({}/{}), resizing and retrying for KeyName='{}'",
-                                   value.size(), result, keyName);
-            value.resize(static_cast<size_t>(result));
-            result = oConfigStoreGetBinary(pLocal, k_EConfigStoreUserLocal,
-                                           keyName.c_str(),
-                                           reinterpret_cast<char*>(value.data()),
-                                           static_cast<uint32>(value.size()));
-            if (result <= 0 || result > static_cast<int32>(value.size())) {
-                LOG_DECRYPTIONKEY_WARN("GetConfigStoreLocalBinary: retry failed or returned invalid size {} for KeyName='{}'",
-                                       result, keyName);
-                return {};
-            }
+        if (result <= static_cast<int32>(sizeof(stackBuf))) {
+            std::vector<uint8_t> value(stackBuf, stackBuf + result);
+            LOG_DECRYPTIONKEY_DEBUG("GetConfigStoreLocalBinary: got value for KeyName='{}' ({} bytes)",
+                                    keyName, value.size());
+            return value;
+        }
+
+        if (result > kMaxSafeBufferSize) {
+            LOG_DECRYPTIONKEY_WARN("GetConfigStoreLocalBinary: requested size {} exceeds maximum safe limit {} for KeyName='{}'",
+                                   result, kMaxSafeBufferSize, keyName);
+            return {};
+        }
+
+        LOG_DECRYPTIONKEY_DEBUG("GetConfigStoreLocalBinary: buffer truncated ({}/{}), resizing and retrying for KeyName='{}'",
+                               sizeof(stackBuf), result, keyName);
+        std::vector<uint8_t> value(static_cast<size_t>(result));
+        result = oConfigStoreGetBinary(pLocal, k_EConfigStoreUserLocal,
+                                       keyName,
+                                       reinterpret_cast<char*>(value.data()),
+                                       static_cast<uint32>(value.size()));
+        if (result <= 0 || result > static_cast<int32>(value.size())) {
+            LOG_DECRYPTIONKEY_WARN("GetConfigStoreLocalBinary: retry failed or returned invalid size {} for KeyName='{}'",
+                                   result, keyName);
+            return {};
         }
 
         value.resize(static_cast<size_t>(result));
@@ -118,7 +130,16 @@ namespace Hooks_Decryption {
     }
 
     std::vector<uint8_t> GetCacheAppOwnershipTicket(AppId_t appId) {
-        std::vector<uint8_t> ticket = ReadConfigStoreLocalBinary(std::format("apptickets\\{}", appId));
+        constexpr std::string_view kPrefix = "apptickets\\";
+        char keyName[32];
+        std::memcpy(keyName, kPrefix.data(), kPrefix.size());
+        auto [ptr, ec] = std::to_chars(keyName + kPrefix.size(), keyName + sizeof(keyName) - 1, appId);
+        if (ec != std::errc{}) {
+            return {};
+        }
+        *ptr = '\0';
+
+        std::vector<uint8_t> ticket = ReadConfigStoreLocalBinary(keyName);
         if (ticket.empty()) {
             LOG_DECRYPTIONKEY_DEBUG("no cached ticket for AppId {}", appId);
             return ticket;

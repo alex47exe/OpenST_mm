@@ -1,31 +1,69 @@
 #include "Hooks_Package.h"
 #include "HookMacros.h"
 #include "Hooks_SteamUI.h"
-#include "dllmain.h"
+#include "Steam/Enums.h"
+#include "Steam/Structs.h"
+#include "Utils/Config/LuaConfig.h"
 #include "Utils/HookSupport/VehCommon.h"
+#include "Utils/Logging/Log.h"
+#include "dllmain.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
+#include <span>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace {
+    // ── Trivially destructible wrapper for process-lifetime globals ──
+    // Prevents CRT atexit static destruction crashes during ExitProcess
+    // when secondary threads are terminated mid-operation by the OS.
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
+
     RESOLVE_FUNC(CUtlMemoryGrow,               void*, CUtlVector<AppId_t>*, int);
     RESOLVE_FUNC(MarkLicenseAsChanged,         int64, void*, uint32, bool);
     RESOLVE_FUNC(ProcessPendingLicenseUpdates, bool,  void*);
 
-    CAPTURE_THIS_FUNC(GetPackageInfo, PackageInfo*,g_pCPackageInfo,void* pThis, uint32 packageId, uint64 accessToken);
+    CAPTURE_THIS_FUNC(GetPackageInfo, PackageInfo*, g_pCPackageInfo, void* pThis, uint32 packageId, uint64 accessToken);
     
-    std::mutex                 g_packageInfoMutex;
-    std::atomic<void*>         g_pCUser{nullptr};
-    std::atomic<PackageInfo*>  g_pInjectedPackageInfo{nullptr};
-    std::atomic<bool>          g_licenseInitialized{false};
-    std::atomic<bool>          g_licenseRefreshPending{false};
-    std::shared_mutex          g_sharedLicensesMutex;
-    std::unordered_set<AppId_t> g_sharedLicenses;
-    std::atomic<bool>          g_hasSharedLicenses{false};
-    std::unordered_set<AppId_t> g_unlicensedApps;
-    std::atomic<bool>          g_hasUnlicensedApps{false};
+    std::mutex                                  g_packageInfoMutex;
+    std::atomic<void*>                          g_pCUser{nullptr};
+    std::atomic<PackageInfo*>                   g_pInjectedPackageInfo{nullptr};
+    std::atomic<bool>                           g_licenseInitialized{false};
+    std::atomic<bool>                           g_licenseRefreshPending{false};
+    std::shared_mutex                           g_sharedLicensesMutex;
+    NoDestructor<std::unordered_set<AppId_t>>   g_sharedLicenses;
+    std::atomic<bool>                           g_hasSharedLicenses{false};
+    NoDestructor<std::unordered_set<AppId_t>>   g_unlicensedApps;
+    std::atomic<bool>                           g_hasUnlicensedApps{false};
 
     constexpr PackageId_t kInjectedPackageId = 0;
     constexpr uint64_t kInjectedPkgAccessToken = 10660652434190618804ull;
@@ -57,6 +95,52 @@ namespace {
         return oCUtlMemoryGrow(pVec, grow_size);
     }
 
+    [[nodiscard]] bool AppendUniqueAppIdsToPackage(PackageInfo* pPkg,
+                                                   std::span<const AppId_t> candidateIds,
+                                                   uint32_t* outAddedCount = nullptr) {
+        if (outAddedCount) {
+            *outAddedCount = 0;
+        }
+        if (!pPkg || candidateIds.empty()) {
+            return true;
+        }
+
+        const AppId_t* existingData = pPkg->AppIdVec.m_Memory.m_pMemory;
+        const uint32 existingSize = existingData ? pPkg->AppIdVec.m_Size : 0u;
+        const std::span<const AppId_t> existingSpan(existingData, existingSize);
+
+        std::vector<AppId_t> toAdd;
+        toAdd.reserve(candidateIds.size());
+        for (AppId_t id : candidateIds) {
+            if (id == 0 || id == k_uAppIdInvalid) {
+                continue;
+            }
+            if (std::ranges::find(existingSpan, id) == existingSpan.end() &&
+                std::ranges::find(toAdd, id) == toAdd.end()) {
+                toAdd.push_back(id);
+            }
+        }
+
+        if (toAdd.empty()) {
+            return true;
+        }
+
+        const uint32 oldSize = pPkg->AppIdVec.m_Size;
+        const uint32 numToAdd = static_cast<uint32>(toAdd.size());
+        if (!CUtlMemoryGrowWrap(&pPkg->AppIdVec, static_cast<int>(numToAdd))) {
+            return false;
+        }
+
+        for (uint32 i = 0; i < numToAdd; ++i) {
+            pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = toAdd[i];
+        }
+        pPkg->AppIdVec.m_Size = oldSize + numToAdd;
+        if (outAddedCount) {
+            *outAddedCount = numToAdd;
+        }
+        return true;
+    }
+
     bool InitFakeLicenseOnce(PackageInfo* pPkg) {
         std::lock_guard lock(g_packageInfoMutex);
         if (g_licenseInitialized.load(std::memory_order_relaxed)) return true;
@@ -68,34 +152,16 @@ namespace {
         }
 
         // Inject all depots from config into the fake license. 
-        std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
+        const std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
         if (!appIds.empty()) {
-            std::vector<AppId_t> toAdd;
-            toAdd.reserve(appIds.size());
-            for (AppId_t id : appIds) {
-                bool alreadyPresent = false;
-                for (uint32_t i = 0; i < pPkg->AppIdVec.m_Size; ++i) {
-                    if (pPkg->AppIdVec.m_Memory.m_pMemory[i] == id) {
-                        alreadyPresent = true;
-                        break;
-                    }
-                }
-                if (!alreadyPresent) {
-                    toAdd.push_back(id);
-                }
+            const uint32 oldSize = pPkg->AppIdVec.m_Size;
+            uint32 addedCount = 0;
+            if (!AppendUniqueAppIdsToPackage(pPkg, appIds, &addedCount)) {
+                LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
+                return false;
             }
-
-            if (!toAdd.empty()) {
-                uint32 oldSize = pPkg->AppIdVec.m_Size;
-                uint32 numToAdd = static_cast<uint32>(toAdd.size());
-                LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): adding {} apps, oldSize={}", kInjectedPackageId, numToAdd, oldSize);
-                if (!CUtlMemoryGrowWrap(&pPkg->AppIdVec, numToAdd)) {
-                    LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
-                    return false;
-                }
-                for (uint32 i = 0; i < numToAdd; i++)
-                    pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = toAdd[i];
-                pPkg->AppIdVec.m_Size = oldSize + numToAdd;
+            if (addedCount > 0) {
+                LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} apps, oldSize={}", kInjectedPackageId, addedCount, oldSize);
             }
         }
 
@@ -155,7 +221,7 @@ namespace {
         if (lc.isShared) {
             if (g_hasSharedLicenses.load(std::memory_order_acquire)) {
                 std::shared_lock rlock(g_sharedLicensesMutex);
-                if (g_sharedLicenses.contains(appId)) {
+                if (g_sharedLicenses->contains(appId)) {
                     return;
                 }
             }
@@ -163,12 +229,12 @@ namespace {
                 LuaConfig::UnmarkOwned(appId);
             }
             std::unique_lock wlock(g_sharedLicensesMutex);
-            if (g_sharedLicenses.insert(appId).second) {
+            if (g_sharedLicenses->insert(appId).second) {
                 g_hasSharedLicenses.store(true, std::memory_order_release);
             }
             if (g_hasUnlicensedApps.load(std::memory_order_acquire)) {
-                if (g_unlicensedApps.erase(appId) > 0) {
-                    g_hasUnlicensedApps.store(!g_unlicensedApps.empty(), std::memory_order_release);
+                if (g_unlicensedApps->erase(appId) > 0) {
+                    g_hasUnlicensedApps.store(!g_unlicensedApps->empty(), std::memory_order_release);
                 }
             }
         } else if (lc.isTrulyOwned) {
@@ -179,18 +245,18 @@ namespace {
             if (g_hasSharedLicenses.load(std::memory_order_acquire) ||
                 g_hasUnlicensedApps.load(std::memory_order_acquire)) {
                 std::unique_lock wlock(g_sharedLicensesMutex);
-                if (g_sharedLicenses.erase(appId) > 0) {
-                    g_hasSharedLicenses.store(!g_sharedLicenses.empty(), std::memory_order_release);
+                if (g_sharedLicenses->erase(appId) > 0) {
+                    g_hasSharedLicenses.store(!g_sharedLicenses->empty(), std::memory_order_release);
                 }
-                if (g_unlicensedApps.erase(appId) > 0) {
-                    g_hasUnlicensedApps.store(!g_unlicensedApps.empty(), std::memory_order_release);
+                if (g_unlicensedApps->erase(appId) > 0) {
+                    g_hasUnlicensedApps.store(!g_unlicensedApps->empty(), std::memory_order_release);
                 }
             }
         } else {
             // Neither shared nor owned: check negative cache fast path
             if (g_hasUnlicensedApps.load(std::memory_order_acquire)) {
                 std::shared_lock rlock(g_sharedLicensesMutex);
-                if (g_unlicensedApps.contains(appId)) {
+                if (g_unlicensedApps->contains(appId)) {
                     return;
                 }
             }
@@ -198,10 +264,10 @@ namespace {
                 LuaConfig::UnmarkOwned(appId);
             }
             std::unique_lock wlock(g_sharedLicensesMutex);
-            if (g_sharedLicenses.erase(appId) > 0) {
-                g_hasSharedLicenses.store(!g_sharedLicenses.empty(), std::memory_order_release);
+            if (g_sharedLicenses->erase(appId) > 0) {
+                g_hasSharedLicenses.store(!g_sharedLicenses->empty(), std::memory_order_release);
             }
-            if (g_unlicensedApps.insert(appId).second) {
+            if (g_unlicensedApps->insert(appId).second) {
                 g_hasUnlicensedApps.store(true, std::memory_order_release);
             }
         }
@@ -215,8 +281,8 @@ namespace {
             if (currentCUser != nullptr) {
                 LuaConfig::ClearOwned();
                 std::unique_lock wlock(g_sharedLicensesMutex);
-                g_sharedLicenses.clear();
-                g_unlicensedApps.clear();
+                g_sharedLicenses->clear();
+                g_unlicensedApps->clear();
                 g_hasSharedLicenses.store(false, std::memory_order_release);
                 g_hasUnlicensedApps.store(false, std::memory_order_release);
             }
@@ -246,32 +312,31 @@ namespace {
         }
 
         if (LuaConfig::HasDepot(appId, false)) {
-            if (pOwn) {
-                if (hasValidLicense) {
-                    pOwn->ReleaseState = EAppReleaseState::Released;
-                } else {
-                    pOwn->PackageId    = kInjectedPackageId;
-                    pOwn->ReleaseState = EAppReleaseState::Released;
-                    pOwn->bOwnsLicense = true; // This forces DLCs on steam family shared games that u dont own when adding their appid via .lua
-                    pOwn->bFreeLicense = false;
-                    return true;
-                }
-            } else {
+            if (!pOwn) {
                 return true;
             }
-        } else {
-            // App is not active in LuaConfig:
-            // 1. If explicitly marked as removed in the UI session (and not genuinely owned or family shared):
-            if (Hooks_SteamUI::IsRemoved(appId) && !hasValidLicense) {
-                if (pOwn) {
-                    pOwn->bOwnsLicense = false;
-                    pOwn->PackageId = 0;
-                }
-                return false;
+            if (hasValidLicense) {
+                pOwn->ReleaseState = EAppReleaseState::Released;
+                return result;
             }
-            if (!result && pOwn) {
+            pOwn->PackageId    = kInjectedPackageId;
+            pOwn->ReleaseState = EAppReleaseState::Released;
+            pOwn->bOwnsLicense = true; // This forces DLCs on steam family shared games that u dont own when adding their appid via .lua
+            pOwn->bFreeLicense = false;
+            return true;
+        }
+
+        // App is not active in LuaConfig:
+        // 1. If explicitly marked as removed in the UI session (and not genuinely owned or family shared):
+        if (Hooks_SteamUI::IsRemoved(appId) && !hasValidLicense) {
+            if (pOwn) {
                 pOwn->bOwnsLicense = false;
+                pOwn->PackageId = 0;
             }
+            return false;
+        }
+        if (!result && pOwn) {
+            pOwn->bOwnsLicense = false;
         }
 
         return result;
@@ -287,10 +352,10 @@ namespace {
         if (g_hasSharedLicenses.load(std::memory_order_acquire) ||
             g_hasUnlicensedApps.load(std::memory_order_acquire)) {
             std::shared_lock lock(g_sharedLicensesMutex);
-            if (g_sharedLicenses.contains(appId)) {
+            if (g_sharedLicenses->contains(appId)) {
                 return { .isTrulyOwned = false, .isShared = true };
             }
-            if (g_unlicensedApps.contains(appId)) {
+            if (g_unlicensedApps->contains(appId)) {
                 return {};
             }
         }
@@ -341,6 +406,17 @@ namespace Hooks_Package {
         std::vector<AppId_t> additions = LuaConfig::TakePendingAdditions();
         uint32_t removedCount = 0;
         std::unordered_set<AppId_t> addedIds;
+        std::vector<AppId_t> uniqueAdditions;
+
+        if (!additions.empty()) {
+            addedIds.reserve(additions.size());
+            uniqueAdditions.reserve(additions.size());
+            for (AppId_t id : additions) {
+                if (addedIds.insert(id).second) {
+                    uniqueAdditions.push_back(id);
+                }
+            }
+        }
 
         {
             std::lock_guard lock(g_packageInfoMutex);
@@ -354,39 +430,11 @@ namespace Hooks_Package {
 
             // ── Add depots that are newly loaded ──
             LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} additions", additions.size());
-            if (!additions.empty()) {
-                addedIds.reserve(additions.size());
-                std::vector<AppId_t> toAdd;
-                toAdd.reserve(additions.size());
-                for (AppId_t id : additions) {
-                    if (!addedIds.insert(id).second) {
-                        continue;
-                    }
-                    Hooks_SteamUI::QueueAddition(id);
-
-                    bool alreadyPresent = false;
-                    for (uint32_t i = 0; i < pPkg->AppIdVec.m_Size; ++i) {
-                        if (pPkg->AppIdVec.m_Memory.m_pMemory[i] == id) {
-                            alreadyPresent = true;
-                            break;
-                        }
-                    }
-                    if (!alreadyPresent) {
-                        toAdd.push_back(id);
-                    }
-                }
-
-                if (!toAdd.empty()) {
-                    uint32 oldSize = pPkg->AppIdVec.m_Size;
-                    if (CUtlMemoryGrowWrap(&pPkg->AppIdVec, static_cast<int>(toAdd.size()))) {
-                        for (size_t i = 0; i < toAdd.size(); ++i) {
-                            pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = toAdd[i];
-                            LOG_PACKAGE_DEBUG("NotifyLicenseChanged: inserted AppId {} at [{}]", toAdd[i], oldSize + i);
-                        }
-                        pPkg->AppIdVec.m_Size = oldSize + static_cast<uint32_t>(toAdd.size());
-                    } else {
-                        LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow AppId vector for additions");
-                    }
+            if (!uniqueAdditions.empty()) {
+                Hooks_SteamUI::QueueAdditions(uniqueAdditions);
+                uint32 addedToPkgCount = 0;
+                if (!AppendUniqueAppIdsToPackage(pPkg, uniqueAdditions, &addedToPkgCount)) {
+                    LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow AppId vector for additions");
                 }
             }
         }
@@ -405,18 +453,16 @@ namespace Hooks_Package {
 
         // Queue UI removals for the main-thread RunFrame hook to drain.
         // Never touch MarkAppChange from this (FileWatcher) thread.
-        size_t queuedRemovalCount = 0;
         std::unordered_set<AppId_t> queuedRemovals;
         for (AppId_t id : removals) {
             // ParseFile unloads the old file before parsing the replacement.
             // Do not queue that transient removal when the id was added again.
             if (!addedIds.contains(id) && !Hooks_Package::HasValidLicense(id) && queuedRemovals.insert(id).second) {
                 Hooks_SteamUI::QueueRemoval(id);
-                ++queuedRemovalCount;
             }
         }
         LOG_PACKAGE_DEBUG("NotifyLicenseChanged: queued {} UI removals, skipped {} transient removals",
-                          queuedRemovalCount, removals.size() - queuedRemovalCount);
+                          queuedRemovals.size(), removals.size() - queuedRemovals.size());
     }
 
     bool IsAppTrulyOwned(AppId_t appId) {
