@@ -69,8 +69,11 @@ if(WIN32)
         Injector/ost-Injector.rc
     )
     target_compile_features(ost-Injector PRIVATE cxx_std_20)
+    target_include_directories(ost-Injector PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src/OSTPlatform/include"
+    )
     if(MSVC)
-        target_compile_options(ost-Injector PRIVATE /utf-8)
+        target_compile_options(ost-Injector PRIVATE /utf-8 /W4 /permissive-)
     endif()
     set_target_properties(ost-Injector PROPERTIES
         OUTPUT_NAME "ost-Injector"

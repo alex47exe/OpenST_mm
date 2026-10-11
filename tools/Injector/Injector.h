@@ -4,6 +4,12 @@
 #error "OpenSteamTool Injector is strictly designed for 64-bit Windows architecture (x64)."
 #endif
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <filesystem>
 #include <string>
@@ -43,18 +49,18 @@ namespace Injector {
     };
 
     // Configuration & Environment
-    RuntimeConfig ResolveConfig(const std::filesystem::path& baseDir);
+    [[nodiscard]] RuntimeConfig ResolveConfig(const std::filesystem::path& baseDir);
 
     // Process & Module Inspection
-    bool IsModulePresent(DWORD pid, std::wstring_view moduleName);
-    std::vector<DWORD> SnapshotProcessIds(std::wstring_view processName);
+    [[nodiscard]] bool IsModulePresent(DWORD pid, std::wstring_view moduleName);
+    [[nodiscard]] std::vector<DWORD> SnapshotProcessIds(std::wstring_view processName);
     void PrioritizeCandidatePids(std::vector<DWORD>& pids);
 
     // Core Injection & Lifecycle Orchestration
-    ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, bool isSilent = false);
-    ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
-                                  std::chrono::milliseconds timeout = std::chrono::seconds(30),
-                                  bool isSilent = false);
+    [[nodiscard]] ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, bool isSilent = false);
+    [[nodiscard]] ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
+                                                 std::chrono::milliseconds timeout = std::chrono::seconds(30),
+                                                 bool isSilent = false);
 
     // Execution Modes
     int RunWatcher(const RuntimeConfig& config);
@@ -64,6 +70,6 @@ namespace Injector {
     // UI & Logging
     void LogMessage(const std::filesystem::path& baseDir, const std::string& msg, bool isSilent = false);
     void ShowErrorAlert(const std::wstring& message);
-    std::wstring Utf8ToWide(std::string_view utf8);
+    [[nodiscard]] std::wstring Utf8ToWide(std::string_view utf8);
 
 } // namespace Injector
