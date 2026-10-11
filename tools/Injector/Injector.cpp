@@ -14,7 +14,6 @@
 #include <thread>
 #include <vector>
 #include <string>
-#include <set>
 #include <unordered_map>
 #include <algorithm>
 #include <optional>
@@ -103,8 +102,9 @@ namespace {
         bool active_ = true;
     };
 
-    // Global stop flag for graceful exit on system shutdown / logoff / Ctrl+C
+    // Global stop flag and process-lifetime manual-reset kernel event for zero-polling instant wakeup
     std::atomic<bool> g_stopRequested{ false };
+    std::atomic<HANDLE> g_stopEventHandle{ nullptr };
 
     BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) noexcept {
         switch (ctrlType) {
@@ -114,10 +114,57 @@ namespace {
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT:
             g_stopRequested.store(true, std::memory_order_release);
+            if (HANDLE hEvent = g_stopEventHandle.load(std::memory_order_acquire)) {
+                ::SetEvent(hEvent);
+            }
             return TRUE;
         default:
             return FALSE;
         }
+    }
+
+    // Trivially-destructible C++20 magic-static initialization: avoids atexit destructor lock
+    // inversion and guarantees the kernel event remains valid for asynchronous OS CtrlRoutine callbacks.
+    void EnsureStopHandlerRegistered() noexcept {
+        static const bool s_registered = []() noexcept {
+            HANDLE hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_stopEventHandle.store(hEvent, std::memory_order_release);
+            ::SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+            if (g_stopRequested.load(std::memory_order_acquire) && hEvent != nullptr) {
+                ::SetEvent(hEvent);
+            }
+            return true;
+        }();
+        (void)s_registered;
+    }
+
+    // Zero-polling interruptible wait backed by manual-reset kernel event
+    bool SleepInterruptible(std::chrono::milliseconds duration) noexcept {
+        if (g_stopRequested.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (duration <= std::chrono::milliseconds::zero()) {
+            return true;
+        }
+        if (HANDLE hEvent = g_stopEventHandle.load(std::memory_order_acquire)) {
+            const DWORD waitMs = (duration.count() > static_cast<long long>(INFINITE - 1))
+                ? (INFINITE - 1)
+                : static_cast<DWORD>(duration.count());
+            return ::WaitForSingleObject(hEvent, waitMs) != WAIT_OBJECT_0 &&
+                   !g_stopRequested.load(std::memory_order_acquire);
+        }
+
+        constexpr auto kStep = std::chrono::milliseconds(50);
+        auto remaining = duration;
+        while (remaining > std::chrono::milliseconds::zero()) {
+            if (g_stopRequested.load(std::memory_order_acquire)) {
+                return false;
+            }
+            const auto slice = (remaining < kStep) ? remaining : kStep;
+            std::this_thread::sleep_for(slice);
+            remaining -= slice;
+        }
+        return !g_stopRequested.load(std::memory_order_acquire);
     }
 
     // Single-instance protection for the background watcher daemon
@@ -155,6 +202,50 @@ namespace {
         return full;
     }
 
+    [[nodiscard]] std::string WideToUtf8(std::wstring_view wide) noexcept {
+        if (wide.empty() || wide.size() > static_cast<size_t>(INT_MAX)) {
+            return {};
+        }
+        const int size = ::WideCharToMultiByte(
+            CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+        if (size <= 0) {
+            return {};
+        }
+        std::string utf8(static_cast<size_t>(size), '\0');
+        ::WideCharToMultiByte(
+            CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), size, nullptr, nullptr);
+        return utf8;
+    }
+
+    [[nodiscard]] std::string PathToUtf8(const std::filesystem::path& path) noexcept {
+        return WideToUtf8(path.native());
+    }
+
+    struct ProcessIdentity {
+        DWORD pid = 0;
+        ULONGLONG creationTime = 0;
+    };
+
+    // Query active process liveness and 64-bit FILETIME creation timestamp to prevent PID reuse collisions
+    [[nodiscard]] std::optional<ULONGLONG> QueryActiveProcessCreationTime(DWORD pid) noexcept {
+        ScopedHandle h(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+        if (!h) {
+            return std::nullopt;
+        }
+        DWORD exitCode = 0;
+        if (!::GetExitCodeProcess(h.Get(), &exitCode) || exitCode != STILL_ACTIVE) {
+            return std::nullopt;
+        }
+        FILETIME ftCreate{}, ftExit{}, ftKernel{}, ftUser{};
+        if (!::GetProcessTimes(h.Get(), &ftCreate, &ftExit, &ftKernel, &ftUser)) {
+            return 0ULL;
+        }
+        ULARGE_INTEGER uli{};
+        uli.LowPart = ftCreate.dwLowDateTime;
+        uli.HighPart = ftCreate.dwHighDateTime;
+        return uli.QuadPart;
+    }
+
     // Query Steam installation executable with 5-tier fast short-circuit detection
     [[nodiscard]] std::optional<std::filesystem::path> QuerySteamRegistryPath() noexcept {
         if (auto dir = OSTPlatform::SteamLocator::ResolvePath()) {
@@ -165,38 +256,67 @@ namespace {
 
     // Attach or allocate console for interactive sessions and force UTF-8 output
     void EnsureInteractiveConsole() noexcept {
-        if (GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_UNKNOWN) {
-            if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
+        HANDLE hOut = ::GetStdHandle(STD_OUTPUT_HANDLE);
+        const DWORD fileType = (hOut != nullptr && hOut != INVALID_HANDLE_VALUE)
+            ? ::GetFileType(hOut)
+            : FILE_TYPE_UNKNOWN;
+        if (fileType == FILE_TYPE_UNKNOWN) {
+            if (::AttachConsole(ATTACH_PARENT_PROCESS) || ::AllocConsole()) {
                 FILE* fp = nullptr;
                 freopen_s(&fp, "CONOUT$", "w", stdout);
                 freopen_s(&fp, "CONOUT$", "w", stderr);
                 freopen_s(&fp, "CONIN$", "r", stdin);
+                std::cout.clear();
+                std::cerr.clear();
+                std::cin.clear();
             }
         }
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
+        ::SetConsoleOutputCP(CP_UTF8);
+        ::SetConsoleCP(CP_UTF8);
         std::ios::sync_with_stdio(false);
-        SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+        EnsureStopHandlerRegistered();
     }
 
-    // Successor process detection (handles Steam cold-start bootstrap updater restarts)
-    [[nodiscard]] std::optional<DWORD> PollSuccessorProcess(
+    // Successor process detection with active liveness, creation timestamp, and exclusion verification
+    template <typename ExcludePred>
+    [[nodiscard]] std::optional<ProcessIdentity> PollSuccessorProcessWhere(
         DWORD oldPid,
-        std::chrono::milliseconds timeout = std::chrono::seconds(15)) {
-        auto startTime = std::chrono::steady_clock::now();
-        while (std::chrono::steady_clock::now() - startTime < timeout) {
-            if (g_stopRequested.load(std::memory_order_acquire)) return std::nullopt;
+        std::chrono::milliseconds timeout,
+        ExcludePred&& isExcluded) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (g_stopRequested.load(std::memory_order_acquire)) {
+                return std::nullopt;
+            }
 
             auto pids = SnapshotProcessIds(L"steam.exe");
             PrioritizeCandidatePids(pids);
             for (DWORD pid : pids) {
-                if (pid != oldPid) {
-                    return pid;
+                if (pid == oldPid) {
+                    continue;
                 }
+                const auto createTime = QueryActiveProcessCreationTime(pid);
+                if (!createTime.has_value()) {
+                    continue;
+                }
+                if (isExcluded(pid, *createTime)) {
+                    continue;
+                }
+                return ProcessIdentity{ pid, *createTime };
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            if (!SleepInterruptible(std::chrono::milliseconds(300))) {
+                return std::nullopt;
+            }
         }
         return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<ProcessIdentity> PollSuccessorProcess(
+        DWORD oldPid,
+        std::chrono::milliseconds timeout = std::chrono::seconds(15)) {
+        return PollSuccessorProcessWhere(oldPid, timeout, [](DWORD, ULONGLONG) noexcept {
+            return false;
+        });
     }
 
     void PrintUsage() {
@@ -253,7 +373,7 @@ namespace {
             ScopedHandle snap(::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid));
             if (!snap) {
                 const DWORD gle = ::GetLastError();
-                if (gle == ERROR_BAD_LENGTH || gle == ERROR_PARTIAL_COPY) {
+                if ((gle == ERROR_BAD_LENGTH || gle == ERROR_PARTIAL_COPY) && attempt + 1 < 5) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(25));
                     continue;
                 }
@@ -266,8 +386,9 @@ namespace {
             if (::Module32FirstW(snap.Get(), &me)) {
                 const bool checkPayload = !payloadName.empty();
                 do {
-                    if (checkPayload && !result.hasPayload && EqualsIgnoreCase(payloadName, me.szModule)) {
+                    if (checkPayload && EqualsIgnoreCase(payloadName, me.szModule)) {
                         result.hasPayload = true;
+                        break;
                     }
                     if (!result.hasClient && EqualsIgnoreCase(L"steamclient64.dll", me.szModule)) {
                         result.hasClient = true;
@@ -277,7 +398,7 @@ namespace {
                         result.hasTier0 = true;
                     }
                 } while (::Module32NextW(snap.Get(), &me) &&
-                         ((checkPayload && !result.hasPayload) || !result.hasClient || !result.hasUI || !result.hasTier0));
+                         (!result.hasClient || !result.hasUI || !result.hasTier0));
             }
             break;
         }
@@ -339,9 +460,14 @@ void PrioritizeCandidatePids(std::vector<DWORD>& pids) {
         ScopedHandle h(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
         if (h) {
             DWORD exitCode = 0;
-            if (GetExitCodeProcess(h.Get(), &exitCode) && exitCode != STILL_ACTIVE) {
+            if (!GetExitCodeProcess(h.Get(), &exitCode) || exitCode != STILL_ACTIVE) {
                 score = -100; // Deprioritize terminated/zombie processes
             } else {
+                BOOL isWow64 = FALSE;
+                if (IsWow64Process(h.Get(), &isWow64) && !isWow64) {
+                    score += 10; // Prefer native 64-bit host processes over 32-bit helpers
+                }
+
                 FILETIME ftCreate{}, ftExit{}, ftKernel{}, ftUser{};
                 if (GetProcessTimes(h.Get(), &ftCreate, &ftExit, &ftKernel, &ftUser)) {
                     ULARGE_INTEGER uli{};
@@ -378,11 +504,12 @@ RuntimeConfig ResolveConfig(const std::filesystem::path& baseDir) {
         ? NormalizePathNoThrow(std::filesystem::current_path(ec))
         : NormalizePathNoThrow(baseDir);
 
-    std::filesystem::path iniPath = effectiveBase / L"config.ini";
+    const std::filesystem::path iniPath = effectiveBase / L"config.ini";
+    const std::filesystem::path defaultDll = effectiveBase / L"OpenSteamTool.dll";
     std::filesystem::path resolvedExe;
-    std::filesystem::path resolvedDll = effectiveBase / L"OpenSteamTool.dll";
+    std::filesystem::path resolvedDll = defaultDll;
 
-    if (std::filesystem::exists(iniPath)) {
+    if (std::filesystem::is_regular_file(iniPath, ec) && !ec) {
         wchar_t bufExe[1024]{};
         wchar_t bufDll[1024]{};
         GetPrivateProfileStringW(L"Settings", L"ExePath", L"", bufExe, static_cast<DWORD>(std::size(bufExe)), iniPath.c_str());
@@ -398,39 +525,72 @@ RuntimeConfig ResolveConfig(const std::filesystem::path& baseDir) {
         }
     }
 
-    if (resolvedExe.empty()) {
-        if (auto regPath = QuerySteamRegistryPath()) {
-            resolvedExe = *regPath;
-        } else {
-            resolvedExe = L"C:\\Program Files (x86)\\Steam\\steam.exe";
-        }
-
-        if (!std::filesystem::exists(iniPath)) {
-            ScopedHandle hFile(CreateFileW(iniPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-            if (hFile) {
-                const WORD bom = 0xFEFF;
-                DWORD written = 0;
-                WriteFile(hFile.Get(), &bom, sizeof(bom), &written, nullptr);
-            }
-            WritePrivateProfileStringW(L"Settings", L"ExePath", resolvedExe.c_str(), iniPath.c_str());
-            WritePrivateProfileStringW(L"Settings", L"DllPath", L"OpenSteamTool.dll", iniPath.c_str());
+    // Fallback to default sibling OpenSteamTool.dll if configured DllPath is stale/missing on disk
+    std::error_code ecDll;
+    if (!std::filesystem::is_regular_file(resolvedDll, ecDll) || ecDll) {
+        std::error_code ecDefDll;
+        if (std::filesystem::is_regular_file(defaultDll, ecDefDll) && !ecDefDll) {
+            resolvedDll = defaultDll;
         }
     }
 
-    resolvedExe = resolvedExe.lexically_normal();
-    resolvedDll = resolvedDll.lexically_normal();
-    resolvedExe.make_preferred();
-    resolvedDll.make_preferred();
+    // Fallback to 5-tier SteamLocator when ExePath is unset or points to a non-existent path on disk
+    std::error_code ecExe;
+    if (resolvedExe.empty() || !std::filesystem::is_regular_file(resolvedExe, ecExe) || ecExe) {
+        if (auto regPath = QuerySteamRegistryPath()) {
+            resolvedExe = *regPath;
+        } else if (resolvedExe.empty()) {
+            resolvedExe = L"C:\\Program Files (x86)\\Steam\\steam.exe";
+        }
+
+        std::error_code ecIni;
+        if (!std::filesystem::exists(iniPath, ecIni) && !ecIni) {
+            // Atomic config creation (INV-04): write UTF-16 LE BOM + INI payload to PID-isolated .tmp then MoveFileExW
+            std::filesystem::path tmpPath = iniPath;
+            tmpPath += L"." + std::to_wstring(::GetCurrentProcessId()) + L".tmp";
+
+            std::wstring iniContent = L"\xFEFF[Settings]\r\nExePath=";
+            iniContent += resolvedExe.wstring();
+            iniContent += L"\r\nDllPath=OpenSteamTool.dll\r\n";
+
+            ScopedHandle hTmp(::CreateFileW(
+                tmpPath.c_str(),
+                GENERIC_WRITE,
+                0,
+                nullptr,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                nullptr));
+            if (hTmp) {
+                const DWORD bytesToWrite = static_cast<DWORD>(iniContent.size() * sizeof(wchar_t));
+                DWORD bytesWritten = 0;
+                const BOOL writeOk = ::WriteFile(hTmp.Get(), iniContent.data(), bytesToWrite, &bytesWritten, nullptr);
+                hTmp.Reset();
+                if (writeOk && bytesWritten == bytesToWrite) {
+                    if (!::MoveFileExW(tmpPath.c_str(), iniPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                        ::DeleteFileW(tmpPath.c_str());
+                    }
+                } else {
+                    ::DeleteFileW(tmpPath.c_str());
+                }
+            }
+        }
+    }
+
+    resolvedExe = NormalizePathNoThrow(resolvedExe);
+    resolvedDll = NormalizePathNoThrow(resolvedDll);
     return { resolvedExe, resolvedDll, effectiveBase };
 }
 
 ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, bool isSilent) {
-    if (!std::filesystem::exists(dllPath)) {
-        return { Status::PayloadNotFound, ERROR_FILE_NOT_FOUND, "Payload DLL not found: " + dllPath.string() };
+    const std::filesystem::path fullDllPath = NormalizePathNoThrow(dllPath);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(fullDllPath, ec) || ec) {
+        return { Status::PayloadNotFound, ERROR_FILE_NOT_FOUND, "Payload DLL not found: " + PathToUtf8(fullDllPath) };
     }
 
-    const std::wstring dllName = dllPath.filename().wstring();
-    if (IsModulePresent(pid, dllName)) {
+    const std::wstring payloadName = fullDllPath.filename().wstring();
+    if (IsModulePresent(pid, payloadName)) {
         return { Status::AlreadyInjected, 0, "Module already loaded in target process." };
     }
 
@@ -452,8 +612,8 @@ ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, b
             "Target process is 32-bit (WOW64), but OpenSteamTool payload is 64-bit." };
     }
 
-    const std::wstring fullDllPath = dllPath.wstring();
-    const SIZE_T byteCount = (fullDllPath.size() + 1) * sizeof(wchar_t);
+    const std::wstring nativeDllPath = fullDllPath.wstring();
+    const SIZE_T byteCount = (nativeDllPath.size() + 1) * sizeof(wchar_t);
 
     void* remoteMem = VirtualAllocEx(hProcess.Get(), nullptr, byteCount, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remoteMem) {
@@ -465,7 +625,9 @@ ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, b
         VirtualFreeEx(hProcess.Get(), remoteMem, 0, MEM_RELEASE);
     });
 
-    if (!WriteProcessMemory(hProcess.Get(), remoteMem, fullDllPath.c_str(), byteCount, nullptr)) {
+    SIZE_T bytesWritten = 0;
+    if (!WriteProcessMemory(hProcess.Get(), remoteMem, nativeDllPath.c_str(), byteCount, &bytesWritten) ||
+        bytesWritten != byteCount) {
         DWORD gle = GetLastError();
         return { Status::RemoteAllocFailed, gle, "WriteProcessMemory failed." };
     }
@@ -498,14 +660,25 @@ ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, b
     }
 
     DWORD exitCode = 0;
-    GetExitCodeThread(hThread.Get(), &exitCode);
+    const BOOL hasExitCode = GetExitCodeThread(hThread.Get(), &exitCode);
 
-    // Note: On x64 Windows, GetExitCodeThread truncates the 64-bit HMODULE return value of LoadLibraryW
-    // to 32 bits. If a DLL is mapped at an address where the lower 32 bits are 0x00000000, exitCode may
-    // be 0 even on success. Therefore, if exitCode == 0, we double-check via IsModulePresent.
-    if (exitCode == 0 && !IsModulePresent(pid, dllName)) {
-        return { Status::LoadLibraryFailed, 0,
-            "LoadLibraryW returned NULL in target process. Check if OpenSteamTool.dll is blocked by antivirus or missing dependencies." };
+    // Ground-truth verification: regardless of the truncated 32-bit thread exit code,
+    // verify the payload module actually resides in the target process PEB_LDR module list.
+    bool moduleLoaded = IsModulePresent(pid, payloadName);
+    for (int retry = 0; !moduleLoaded && retry < 3; ++retry) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (GetExitCodeProcess(hProcess.Get(), &procExitCode) && procExitCode != STILL_ACTIVE) {
+            return { Status::TargetExited, procExitCode, "Target process terminated or crashed during injection." };
+        }
+        moduleLoaded = IsModulePresent(pid, payloadName);
+    }
+
+    if (!moduleLoaded) {
+        const DWORD diagCode = hasExitCode ? exitCode : GetLastError();
+        return { Status::LoadLibraryFailed, diagCode,
+            "LoadLibraryW failed to load payload in target process (ThreadExitCode=" +
+            std::to_string(diagCode) +
+            "). Check if OpenSteamTool.dll is blocked by antivirus or missing dependencies." };
     }
 
     return { Status::Success, 0, "Injection succeeded." };
@@ -514,7 +687,13 @@ ExecutionResult InjectPayload(DWORD pid, const std::filesystem::path& dllPath, b
 ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
                                std::chrono::milliseconds timeout,
                                bool isSilent) {
-    const std::wstring payloadName = dllPath.filename().wstring();
+    const std::filesystem::path fullDllPath = NormalizePathNoThrow(dllPath);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(fullDllPath, ec) || ec) {
+        return { Status::PayloadNotFound, ERROR_FILE_NOT_FOUND, "Payload DLL not found: " + PathToUtf8(fullDllPath) };
+    }
+
+    const std::wstring payloadName = fullDllPath.filename().wstring();
     const auto initialMods = InspectProcessModules(pid, payloadName);
     if (initialMods.hasPayload) {
         return { Status::AlreadyInjected, 0, "Module already loaded in target process." };
@@ -526,17 +705,31 @@ ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
         if (!isSilent) {
             std::cout << "[!] 检测到 Steam 已完全启动（steamclient64.dll 已加载），执行热补丁注入...\n";
         }
-        return InjectPayload(pid, dllPath, isSilent);
+        return InjectPayload(pid, fullDllPath, isSilent);
     }
 
-    ScopedHandle hWatch(OpenProcess(SYNCHRONIZE, FALSE, pid));
+    ScopedHandle hWatch(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
     if (!hWatch) {
         return { Status::ProcessAccessDenied, GetLastError(), "Failed to open process for monitoring." };
     }
 
+    const auto waitTargetOrStop = [&](DWORD waitMs) noexcept -> DWORD {
+        if (HANDLE hStop = g_stopEventHandle.load(std::memory_order_acquire)) {
+            const HANDLE waitHandles[2] = { hWatch.Get(), hStop };
+            return ::WaitForMultipleObjects(2, waitHandles, FALSE, waitMs);
+        }
+        return ::WaitForSingleObject(hWatch.Get(), waitMs);
+    };
+
     if (initialMods.hasUI) {
-        WaitForSingleObject(hWatch.Get(), 20);
-        return InjectPayload(pid, dllPath, isSilent);
+        const DWORD settleRes = waitTargetOrStop(20);
+        if (settleRes == WAIT_OBJECT_0) {
+            return { Status::TargetExited, 0, "Target process terminated before injection." };
+        }
+        if (settleRes == WAIT_OBJECT_0 + 1 || g_stopRequested.load(std::memory_order_acquire)) {
+            return { Status::TargetExited, ERROR_CANCELLED, "Operation cancelled by user or system shutdown." };
+        }
+        return InjectPayload(pid, fullDllPath, isSilent);
     }
 
     const auto startTime = std::chrono::steady_clock::now();
@@ -550,14 +743,19 @@ ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
         // Staged dynamic interval:
         //   Phase 1 (before beacon seen): 200ms gentle polling to avoid burning CPU during early startup
         //   Phase 2 (after beacon seen):  50ms tight burst to precisely catch the UI loading moment
-        DWORD currentInterval = beaconSeen ? 50 : 200;
+        const DWORD currentInterval = beaconSeen ? 50 : 200;
 
-        // Kernel wait: Sleep without active spinning. Wakes immediately in 0ms if the target process exits.
-        DWORD waitRes = WaitForSingleObject(hWatch.Get(), currentInterval);
+        // Kernel wait: Sleep without active spinning. Wakes immediately in 0ms on either
+        // target process termination or process-wide stop event.
+        const DWORD waitRes = waitTargetOrStop(currentInterval);
         if (waitRes == WAIT_OBJECT_0) {
             return { Status::TargetExited, 0, "Target process terminated before steamui.dll loaded." };
         }
+        if (waitRes == WAIT_OBJECT_0 + 1 || g_stopRequested.load(std::memory_order_acquire)) {
+            return { Status::TargetExited, ERROR_CANCELLED, "Operation cancelled by user or system shutdown." };
+        }
 
+        // Single-snapshot probe for payload, tier0_s64.dll, and steamui.dll
         const auto mods = InspectProcessModules(pid, payloadName);
         if (mods.hasPayload) {
             return { Status::AlreadyInjected, 0, "Module already loaded in target process." };
@@ -567,8 +765,14 @@ ExecutionResult AwaitAndInject(DWORD pid, const std::filesystem::path& dllPath,
         }
         if (mods.hasUI || mods.hasClient) {
             // Smooth 20ms kernel wait to let PE mapping and loader linking settle
-            WaitForSingleObject(hWatch.Get(), 20);
-            return InjectPayload(pid, dllPath, isSilent);
+            const DWORD settleRes = waitTargetOrStop(20);
+            if (settleRes == WAIT_OBJECT_0) {
+                return { Status::TargetExited, 0, "Target process terminated before injection." };
+            }
+            if (settleRes == WAIT_OBJECT_0 + 1 || g_stopRequested.load(std::memory_order_acquire)) {
+                return { Status::TargetExited, ERROR_CANCELLED, "Operation cancelled by user or system shutdown." };
+            }
+            return InjectPayload(pid, fullDllPath, isSilent);
         }
     }
 
@@ -612,16 +816,43 @@ int RunWatcher(const RuntimeConfig& config) {
         return 0; // Instance already running
     }
 
-    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+    EnsureStopHandlerRegistered();
     LogMessage(config.baseDir, "[Watcher] 后台自动注入监听已启动，等待 steam.exe 启动...", true);
 
-    std::set<DWORD> injectedPids;
+    // Map PID -> creationTime (FILETIME QuadPart) to defend against Windows PID reuse
+    std::unordered_map<DWORD, ULONGLONG> injectedPids;
 
     struct FailureRecord {
+        ULONGLONG creationTime = 0;
         int count = 0;
         bool permanent = false;
     };
     std::unordered_map<DWORD, FailureRecord> failedPids;
+
+    const auto isPidExcluded = [&](DWORD candidatePid, ULONGLONG candidateCreateTime) noexcept -> bool {
+        if (auto itInj = injectedPids.find(candidatePid); itInj != injectedPids.end()) {
+            if (itInj->second == candidateCreateTime) {
+                return true;
+            }
+        }
+        if (auto itFail = failedPids.find(candidatePid); itFail != failedPids.end()) {
+            if (itFail->second.creationTime == candidateCreateTime &&
+                (itFail->second.permanent || itFail->second.count >= 2)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const auto recordInjected = [&](DWORD targetPid, ULONGLONG targetCreateTime, Status status) {
+        injectedPids[targetPid] = targetCreateTime;
+        failedPids.erase(targetPid);
+        if (status == Status::AlreadyInjected) {
+            LogMessage(config.baseDir, "[Watcher] 检测到 Steam (PID: " + std::to_string(targetPid) + ") 已驻留 OpenSteamTool.dll，跳过重复注入。", true);
+        } else {
+            LogMessage(config.baseDir, "[Watcher] 成功自动注入 OpenSteamTool 到 Steam (PID: " + std::to_string(targetPid) + ")", true);
+        }
+    };
 
     while (!g_stopRequested.load(std::memory_order_acquire)) {
         auto pids = SnapshotProcessIds(L"steam.exe");
@@ -629,48 +860,66 @@ int RunWatcher(const RuntimeConfig& config) {
             PrioritizeCandidatePids(pids);
 
             for (DWORD pid : pids) {
-                if (g_stopRequested.load(std::memory_order_acquire)) break;
-                if (injectedPids.contains(pid)) continue;
+                if (g_stopRequested.load(std::memory_order_acquire)) {
+                    break;
+                }
 
-                auto itFail = failedPids.find(pid);
-                if (itFail != failedPids.end() && (itFail->second.permanent || itFail->second.count >= 2)) {
+                const auto createTimeOpt = QueryActiveProcessCreationTime(pid);
+                if (!createTimeOpt.has_value()) {
                     continue;
+                }
+                const ULONGLONG createTime = *createTimeOpt;
+
+                if (auto itInj = injectedPids.find(pid); itInj != injectedPids.end()) {
+                    if (itInj->second == createTime) {
+                        continue;
+                    }
+                    injectedPids.erase(itInj);
+                }
+                if (auto itFail = failedPids.find(pid); itFail != failedPids.end()) {
+                    if (itFail->second.creationTime != createTime) {
+                        failedPids.erase(itFail);
+                    } else if (itFail->second.permanent || itFail->second.count >= 2) {
+                        continue;
+                    }
                 }
 
                 auto res = AwaitAndInject(pid, config.payloadDll, std::chrono::seconds(15), true);
-                if (g_stopRequested.load(std::memory_order_acquire)) break;
+                if (g_stopRequested.load(std::memory_order_acquire)) {
+                    break;
+                }
 
                 if (res.status == Status::TargetExited) {
                     // Handle Steam cold-start updater restart (bootstrap exit & successor spawn)
-                    auto successorPid = PollSuccessorProcess(pid, std::chrono::seconds(8));
-                    if (successorPid && !injectedPids.contains(*successorPid)) {
-                        LogMessage(config.baseDir, "[Watcher] 捕获到 Steam 更新继任进程 (PID: " + std::to_string(*successorPid) + ")，继续注入...", true);
-                        res = AwaitAndInject(*successorPid, config.payloadDll, std::chrono::seconds(25), true);
+                    auto successor = PollSuccessorProcessWhere(pid, std::chrono::seconds(8), isPidExcluded);
+                    if (successor && !g_stopRequested.load(std::memory_order_acquire)) {
+                        LogMessage(config.baseDir, "[Watcher] 捕获到 Steam 更新继任进程 (PID: " + std::to_string(successor->pid) + ")，继续注入...", true);
+                        res = AwaitAndInject(successor->pid, config.payloadDll, std::chrono::seconds(25), true);
+                        if (g_stopRequested.load(std::memory_order_acquire)) {
+                            break;
+                        }
                         if (res.IsOk()) {
-                            injectedPids.insert(*successorPid);
-                            failedPids.erase(*successorPid);
-                            LogMessage(config.baseDir, "[Watcher] 成功自动注入 OpenSteamTool 到 Steam (PID: " + std::to_string(*successorPid) + ")", true);
+                            recordInjected(successor->pid, successor->creationTime, res.status);
                         } else {
-                            LogMessage(config.baseDir, "[Watcher] 注入继任进程失败 (PID: " + std::to_string(*successorPid) + "): " + res.message, true);
-                            failedPids[*successorPid].count = 2;
-                            failedPids[*successorPid].permanent = true;
+                            LogMessage(config.baseDir, "[Watcher] 注入继任进程失败 (PID: " + std::to_string(successor->pid) + "): " + res.message, true);
+                            failedPids[successor->pid] = { successor->creationTime, 2, true };
                         }
                     }
                 } else if (res.IsOk()) {
-                    injectedPids.insert(pid);
-                    failedPids.erase(pid);
-                    LogMessage(config.baseDir, "[Watcher] 成功自动注入 OpenSteamTool 到 Steam (PID: " + std::to_string(pid) + ")", true);
+                    recordInjected(pid, createTime, res.status);
                 } else {
                     if (res.status == Status::ProcessAccessDenied) {
-                        failedPids[pid].permanent = true;
+                        failedPids[pid] = { createTime, 1, true };
                         LogMessage(config.baseDir, "[Watcher] 注入失败 (PID: " + std::to_string(pid) + "): 权限不足 (Access Denied)。如果 Steam 以管理员权限运行，请以管理员身份启动 Injector。", true);
                     } else if (res.status == Status::IncompatibleArchitecture || res.status == Status::PayloadNotFound) {
-                        failedPids[pid].permanent = true;
+                        failedPids[pid] = { createTime, 1, true };
                         LogMessage(config.baseDir, "[Watcher] 注入失败 (PID: " + std::to_string(pid) + "): " + res.message, true);
                     } else {
-                        failedPids[pid].count++;
-                        if (failedPids[pid].count >= 2) {
-                            failedPids[pid].permanent = true;
+                        auto& rec = failedPids[pid];
+                        rec.creationTime = createTime;
+                        rec.count++;
+                        if (rec.count >= 2) {
+                            rec.permanent = true;
                             LogMessage(config.baseDir, "[Watcher] PID: " + std::to_string(pid) + " 注入超时，可能为后台辅助进程，已挂起重试。", true);
                         } else {
                             LogMessage(config.baseDir, "[Watcher] 注入失败 (PID: " + std::to_string(pid) + "): " + res.message, true);
@@ -678,26 +927,21 @@ int RunWatcher(const RuntimeConfig& config) {
                     }
                 }
             }
-
-            // Direct kernel liveness checks to avoid O(N*M) linear scans and handle PID reuse
-            std::erase_if(injectedPids, [](DWORD activePid) {
-                ScopedHandle h(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, activePid));
-                if (!h) return true;
-                DWORD code = 0;
-                return !GetExitCodeProcess(h.Get(), &code) || code != STILL_ACTIVE;
-            });
-            std::erase_if(failedPids, [](const auto& item) {
-                ScopedHandle h(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, item.first));
-                if (!h) return true;
-                DWORD code = 0;
-                return !GetExitCodeProcess(h.Get(), &code) || code != STILL_ACTIVE;
-            });
-        } else {
-            injectedPids.clear();
-            failedPids.clear();
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        // Direct kernel liveness & creation-time checks to purge exited or reused PIDs
+        std::erase_if(injectedPids, [](const auto& item) {
+            const auto ct = QueryActiveProcessCreationTime(item.first);
+            return !ct.has_value() || *ct != item.second;
+        });
+        std::erase_if(failedPids, [](const auto& item) {
+            const auto ct = QueryActiveProcessCreationTime(item.first);
+            return !ct.has_value() || *ct != item.second.creationTime;
+        });
+
+        if (!SleepInterruptible(std::chrono::milliseconds(1500))) {
+            break;
+        }
     }
 
     LogMessage(config.baseDir, "[Watcher] 后台监听服务正常退出。", true);
@@ -705,7 +949,7 @@ int RunWatcher(const RuntimeConfig& config) {
 }
 
 int RunSilentOnce(const RuntimeConfig& config) {
-    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+    EnsureStopHandlerRegistered();
 
     auto pids = SnapshotProcessIds(L"steam.exe");
     if (pids.empty()) return 0;
@@ -713,16 +957,24 @@ int RunSilentOnce(const RuntimeConfig& config) {
 
     DWORD activePid = pids.front();
     auto res = AwaitAndInject(activePid, config.payloadDll, std::chrono::seconds(30), true);
-    if (res.status == Status::TargetExited && !g_stopRequested.load(std::memory_order_acquire)) {
-        auto successorPid = PollSuccessorProcess(activePid, std::chrono::seconds(10));
-        if (successorPid) {
-            activePid = *successorPid;
+    if (g_stopRequested.load(std::memory_order_acquire)) {
+        return 1;
+    }
+
+    if (res.status == Status::TargetExited) {
+        auto successor = PollSuccessorProcess(activePid, std::chrono::seconds(10));
+        if (successor && !g_stopRequested.load(std::memory_order_acquire)) {
+            activePid = successor->pid;
             res = AwaitAndInject(activePid, config.payloadDll, std::chrono::seconds(25), true);
         }
     }
 
     if (res.IsOk()) {
-        LogMessage(config.baseDir, "[Silent] 成功静默注入 OpenSteamTool 到 Steam (PID: " + std::to_string(activePid) + ")", true);
+        if (res.status == Status::AlreadyInjected) {
+            LogMessage(config.baseDir, "[Silent] 检测到 Steam (PID: " + std::to_string(activePid) + ") 已驻留 OpenSteamTool.dll，跳过重复注入。", true);
+        } else {
+            LogMessage(config.baseDir, "[Silent] 成功静默注入 OpenSteamTool 到 Steam (PID: " + std::to_string(activePid) + ")", true);
+        }
         return 0;
     } else {
         LogMessage(config.baseDir, "[Silent] 注入失败 (PID: " + std::to_string(activePid) + "): " + res.message, true);
@@ -731,6 +983,7 @@ int RunSilentOnce(const RuntimeConfig& config) {
 }
 
 int RunInteractive(const RuntimeConfig& config) {
+    EnsureStopHandlerRegistered();
     SetConsoleTitleW(L"OpenSteamTool Injector (ost-Injector)");
 
     std::cout << "=================================================\n";
@@ -738,12 +991,16 @@ int RunInteractive(const RuntimeConfig& config) {
     std::cout << "       Supported modes: manual, -silent, -watch   \n";
     std::cout << "=================================================\n\n";
 
-    std::cout << "[+] Target Executable : " << config.targetExe.string() << "\n";
-    std::cout << "[+] Payload DLL       : " << config.payloadDll.string() << "\n\n";
+    const std::string targetExeUtf8 = PathToUtf8(config.targetExe);
+    const std::string payloadDllUtf8 = PathToUtf8(config.payloadDll);
 
-    if (!std::filesystem::exists(config.payloadDll)) {
+    std::cout << "[+] Target Executable : " << targetExeUtf8 << "\n";
+    std::cout << "[+] Payload DLL       : " << payloadDllUtf8 << "\n\n";
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(config.payloadDll, ec) || ec) {
         std::wstring err = L"Error: Payload DLL was not found at:\n" + config.payloadDll.wstring() + L"\n\nPlease ensure OpenSteamTool.dll exists.";
-        std::cerr << "[-] " << config.payloadDll.string() << " not found!\n";
+        std::cerr << "[-] " << payloadDllUtf8 << " not found!\n";
         ShowErrorAlert(err);
         return 1;
     }
@@ -756,17 +1013,29 @@ int RunInteractive(const RuntimeConfig& config) {
 
         std::cout << "[+] Waiting for Steam UI initialization...\n";
         auto res = AwaitAndInject(pid, config.payloadDll, std::chrono::seconds(30), false);
+        if (res.status == Status::TargetExited && !g_stopRequested.load(std::memory_order_acquire)) {
+            std::cout << "[!] 检测到 Steam 引导进程退出，正在捕获自更新后的继任主进程...\n";
+            auto successor = PollSuccessorProcess(pid, std::chrono::seconds(15));
+            if (successor && !g_stopRequested.load(std::memory_order_acquire)) {
+                std::cout << "[+] 成功捕获继任 Steam 进程 (PID: " << successor->pid << ")，继续等待注入...\n";
+                res = AwaitAndInject(successor->pid, config.payloadDll, std::chrono::seconds(30), false);
+            }
+        }
+
+        if (g_stopRequested.load(std::memory_order_acquire)) {
+            return 1;
+        }
         if (res.status == Status::AlreadyInjected) {
             std::cout << "[!] 当前 Steam 进程已加载过 OpenSteamTool.dll！\n";
             std::cout << "[!] 无需重复注入。\n";
             std::cout << "This console will close in 3 seconds...\n";
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            SleepInterruptible(std::chrono::seconds(3));
             return 0;
         }
         if (res.IsOk()) {
             std::cout << "[+] Injection completed successfully.\n";
             std::cout << "This console will close in 3 seconds...\n";
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            SleepInterruptible(std::chrono::seconds(3));
             return 0;
         } else {
             std::cerr << "[-] Injection failed: " << res.message << "\n";
@@ -776,9 +1045,9 @@ int RunInteractive(const RuntimeConfig& config) {
     }
 
     // Steam is not running: launch it
-    if (!std::filesystem::exists(config.targetExe)) {
+    if (!std::filesystem::is_regular_file(config.targetExe, ec) || ec) {
         std::wstring err = L"Error: Target Steam executable does not exist at:\n" + config.targetExe.wstring();
-        std::cerr << "[-] " << config.targetExe.string() << " not found!\n";
+        std::cerr << "[-] " << targetExeUtf8 << " not found!\n";
         ShowErrorAlert(err);
         return 1;
     }
@@ -809,17 +1078,20 @@ int RunInteractive(const RuntimeConfig& config) {
     // Handle Steam cold-start updater restart (bootstrap exit & successor spawn)
     if (res.status == Status::TargetExited && !g_stopRequested.load(std::memory_order_acquire)) {
         std::cout << "[!] 检测到 Steam 引导进程退出，正在捕获自更新后的继任主进程...\n";
-        auto successorPid = PollSuccessorProcess(currentPid, std::chrono::seconds(15));
-        if (successorPid) {
-            std::cout << "[+] 成功捕获继任 Steam 进程 (PID: " << *successorPid << ")，继续等待注入...\n";
-            res = AwaitAndInject(*successorPid, config.payloadDll, std::chrono::seconds(30), false);
+        auto successor = PollSuccessorProcess(currentPid, std::chrono::seconds(15));
+        if (successor && !g_stopRequested.load(std::memory_order_acquire)) {
+            std::cout << "[+] 成功捕获继任 Steam 进程 (PID: " << successor->pid << ")，继续等待注入...\n";
+            res = AwaitAndInject(successor->pid, config.payloadDll, std::chrono::seconds(30), false);
         }
     }
 
+    if (g_stopRequested.load(std::memory_order_acquire)) {
+        return 1;
+    }
     if (res.IsOk()) {
         std::cout << "[+] Injection completed successfully.\n";
         std::cout << "This console will close in 3 seconds...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        SleepInterruptible(std::chrono::seconds(3));
         return 0;
     } else {
         std::cerr << "[-] Injection failed: " << res.message << "\n";
@@ -876,15 +1148,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     std::vector<wchar_t> pathBuffer(1024, L'\0');
     DWORD len = GetModuleFileNameW(nullptr, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()));
-    while (len == pathBuffer.size() && pathBuffer.size() < 32768) {
+    while (len >= pathBuffer.size() - 1 && pathBuffer.size() < 32768) {
         pathBuffer.resize(pathBuffer.size() * 2, L'\0');
         len = GetModuleFileNameW(nullptr, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()));
     }
-    std::filesystem::path baseDir = (len > 0 && len < pathBuffer.size())
-        ? std::filesystem::path(pathBuffer.data()).parent_path()
-        : std::filesystem::current_path();
-
     std::error_code ecCwd;
+    std::filesystem::path baseDir = (len > 0 && len < pathBuffer.size())
+        ? std::filesystem::path(std::wstring_view(pathBuffer.data(), len)).parent_path()
+        : std::filesystem::current_path(ecCwd);
+
     if (!baseDir.empty()) {
         std::filesystem::current_path(baseDir, ecCwd);
     }

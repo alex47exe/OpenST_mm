@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal DisableDelayedExpansion
 chcp 65001 >nul
 echo =======================================================
 echo   OpenSteamTool - Setup Auto Inject (Standard Startup)
@@ -8,6 +8,17 @@ echo.
 echo Configuring auto-start for current user...
 
 set "INJECTOR_EXE=%~dp0ost-Injector.exe"
+
+if not exist "%INJECTOR_EXE%" (
+    echo.
+    echo =======================================================
+    echo [FAILED] Cannot find ost-Injector.exe in "%~dp0".
+    echo Please run this script from the build output directory.
+    echo =======================================================
+    echo.
+    pause
+    exit /b 1
+)
 
 REM Clean up any legacy scheduled task if previously configured
 schtasks /delete /tn "OpenSteamTool_AutoInject" /f >nul 2>&1
