@@ -771,10 +771,14 @@ namespace
 
             if (LuaConfig::HasDepot(pApp->nAppID, false))
             {
-                if (pApp->OwnershipFlags == k_EAppOwnershipFlags_None)
+                constexpr uint32_t kActiveLicenseMask =
+                    k_EAppOwnershipFlags_OwnsLicense |
+                    k_EAppOwnershipFlags_FreeLicense |
+                    k_EAppOwnershipFlags_SharedLicense;
+                if ((pApp->OwnershipFlags & kActiveLicenseMask) == 0)
                 {
                     pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
-                        k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        pApp->OwnershipFlags | k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
                 }
                 uint32_t t = LuaConfig::GetPurchaseTime(pApp->nAppID);
                 if (t)
@@ -855,8 +859,20 @@ namespace
                 {
                     if (CSteamApp *pApp = oGetAppByID(g_pController, appId, false))
                     {
-                        pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
-                            k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        if (pApp->OwnershipFlags & k_EAppOwnershipFlags_LicenseLocked)
+                        {
+                            pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
+                                pApp->OwnershipFlags & ~k_EAppOwnershipFlags_LicenseLocked);
+                        }
+                        constexpr uint32_t kActiveLicenseMask =
+                            k_EAppOwnershipFlags_OwnsLicense |
+                            k_EAppOwnershipFlags_FreeLicense |
+                            k_EAppOwnershipFlags_SharedLicense;
+                        if ((pApp->OwnershipFlags & kActiveLicenseMask) == 0)
+                        {
+                            pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
+                                pApp->OwnershipFlags | k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        }
 
                         uint32_t t = LuaConfig::GetPurchaseTime(appId);
                         if (t)
@@ -955,6 +971,8 @@ namespace Hooks_SteamUI
 {
     void InstallDiversionHooks()
     {
+        if (oGetModuleHandleA != &GetModuleHandleA) return;
+
         // These hooks are the only SteamUI hooks that must exist before Lua is
         // parsed. They redirect steamclient module lookups to the Diversion
         // shadow module and gate LoadModuleWithPath until client hooks finish.
@@ -993,18 +1011,39 @@ namespace Hooks_SteamUI
         g_autoSyncWorkerPool->Stop();
         g_trackedStates->clear();
         g_activeUpdatingApps->clear();
+        s_timeSliceCursor = 0;
 
         UNHOOK_BEGIN();
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
+        if (oGetModuleHandleA != &GetModuleHandleA) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleW != &GetModuleHandleW) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleExA != &GetModuleHandleExA) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleExW != &GetModuleHandleExW) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
+        }
 
         UNINSTALL_HOOK(LoadModuleWithPath);
         UNINSTALL_HOOK(FillInAppOverview);
         UNINSTALL_HOOK(BuildCompleteAppOverviewChange);
         UNINSTALL_HOOK(CSteamUIAppControllerRunFrame);
         UNHOOK_END();
+
+        {
+            std::lock_guard<std::mutex> lock(g_removalMutex);
+            g_pendingRemovals->clear();
+            g_pendingAdditions->clear();
+            g_removedAppIds->clear();
+            g_hasRemovedAppIds.store(false, std::memory_order_release);
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_installedMutex);
+            g_installedSnapshot->reset();
+        }
     }
 
     void DetachWorkerThreads()

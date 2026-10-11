@@ -37,8 +37,12 @@ namespace Hooks_Misc {
     // Uses CUtlBuffer::EnsureCapacity from steamclient, resolved on first call.
     bool EnsureBufferCapacity(CUtlBuffer* pWrite, uint32 newCapacity, bool updatePut = false);
 
-    // Resolve the real appid: if OnlineFix is active and pipe/context matches 480
-    // return real appid, otherwise fall back to GetAppIDForCurrentPipe().
+    // Resolve the current pipe's AppID: maps 480 -> realAppId when OnlineFix is active,
+    // and strictly returns 0 if the current pipe is unbound/non-game (no global fallback).
+    [[nodiscard]] AppId_t ResolvePipeAppId();
+
+    // Resolve the real appid: uses ResolvePipeAppId(), and falls back to the active
+    // OnlineFix realAppId when called from pipe-less contexts (e.g. CM network thread).
     [[nodiscard]] AppId_t ResolveAppId();
 
     // Atomically reset OnlineFix state (called when Steam signals exit sync completion

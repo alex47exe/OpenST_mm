@@ -6,6 +6,7 @@
 #include "HookMacros.h"
 #include "Hooks_Misc.h"
 #include "Pipe/PipeManager.h"
+#include "Pipe/Features/DenuvoAuth/DenuvoAuth.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
 
 #include <algorithm>
@@ -128,14 +129,16 @@ namespace {
             // NOTE: We do NOT blindly scan the entire payload to avoid corrupting file
             // data in FileWrite calls that might contain 480 (0x000001E0) as content.
             if (Hooks_Misc::IsOnlineFixActive() && call.interfaceID() == EIPCInterface::IClientRemoteStorage) {
-                const AppId_t realAppId = Hooks_Misc::ResolveAppId();
-                if (realAppId != 0 && call.body().size() >= sizeof(uint32_t)) {
-                    uint32_t firstArg = 0;
-                    memcpy(&firstArg, call.body().data(), sizeof(uint32_t));
-                    if (firstArg == kOnlineFixAppId) {
-                        memcpy(const_cast<uint8_t*>(call.body().data()), &realAppId, sizeof(uint32_t));
-                        LOG_IPC_DEBUG("IClientRemoteStorage IPC: mapped AppID {} -> {} in request header arg",
-                                      kOnlineFixAppId, realAppId);
+                if (Hooks_Misc::GetAppIDForCurrentPipeWrap() == Hooks_Misc::kOnlineFixAppId) {
+                    const AppId_t realAppId = Hooks_Misc::ResolvePipeAppId();
+                    if (realAppId != 0 && call.body().size() >= sizeof(uint32_t)) {
+                        uint32_t firstArg = 0;
+                        memcpy(&firstArg, call.body().data(), sizeof(uint32_t));
+                        if (firstArg == Hooks_Misc::kOnlineFixAppId) {
+                            memcpy(const_cast<uint8_t*>(call.body().data()), &realAppId, sizeof(uint32_t));
+                            LOG_IPC_DEBUG("IClientRemoteStorage IPC: mapped AppID {} -> {} in request header arg",
+                                          Hooks_Misc::kOnlineFixAppId, realAppId);
+                        }
                     }
                 }
             }
@@ -143,9 +146,12 @@ namespace {
             // Lookup handler by interface ID + method hash.
             // If matched and app is configured in Lua or OnlineFix is active, resolve pipe and invoke handlers.
             if (const auto* handler = FindHandler(call.interfaceID(), call.funcHash())) {
-                const AppId_t currentAppId = Hooks_Misc::ResolveAppId();
-                if (LuaConfig::HasDepot(currentAppId, false) || Hooks_Misc::IsOnlineFixActive()) {
-                    if (CPipeClient* pipe = GetPipe(pServer, hSteamPipe)) {
+                if (CPipeClient* pipe = GetPipe(pServer, hSteamPipe)) {
+                    AppId_t currentAppId = Hooks_Misc::ResolvePipeAppId();
+                    if (currentAppId == 0 && !pipe->m_bInProcess) {
+                        currentAppId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
+                    }
+                    if ((currentAppId != 0 && LuaConfig::HasDepot(currentAppId, false)) || Hooks_Misc::IsOnlineFixActive()) {
                         LOG_IPC_TRACE("Resolved IPC handler: {} {}", pipe->DebugString(), handler->DebugString());
                         if (handler->pre)
                             handler->pre(pipe, pRead, pWrite);
@@ -189,7 +195,6 @@ namespace Hooks_IPC {
         UNHOOK_BEGIN();
         UNINSTALL_HOOK_C(IPCProcessMessage);
         UNHOOK_END();
-        g_Handlers->clear();
     }
 
     void RegisterHandlers(std::span<const IPCHandlerEntry> entries) {

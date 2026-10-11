@@ -8,9 +8,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstddef>
 #include <mutex>
 #include <new>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -61,6 +63,24 @@ namespace {
     std::mutex           g_GameNameMutex;
     NoDestructor<std::unordered_map<AppId_t, std::string>> g_GameNameCache;
 
+    static bool IsCompanionSpawn(AppId_t appId, const char* pExePath, const char* cmdLine) noexcept {
+        constexpr AppId_t kSteamworksCommonRedistAppId = 228980;
+        if (appId == 0 || appId == kSteamworksCommonRedistAppId || appId == Hooks_Misc::kOnlineFixAppId) {
+            return true;
+        }
+        auto containsIgnoreCase = [](const char* text, std::string_view needle) noexcept -> bool {
+            if (!text || needle.empty()) return false;
+            const std::string_view haystack(text);
+            return !std::ranges::search(haystack, needle, [](unsigned char a, unsigned char b) noexcept {
+                return std::tolower(a) == std::tolower(b);
+            }).empty();
+        };
+        return containsIgnoreCase(pExePath, "GameOverlayUI.exe") ||
+               containsIgnoreCase(cmdLine,  "GameOverlayUI.exe") ||
+               containsIgnoreCase(pExePath, "steamerrorreporter") ||
+               containsIgnoreCase(cmdLine,  "steamerrorreporter");
+    }
+
     // ── SpawnProcess interception ────────────────────────────────────────────
     // CUser_SpawnProcess(pCUser, pExePath, pCommandLine, pWorkingDir,
     //                    pGameID, ...)
@@ -82,14 +102,14 @@ namespace {
             // Only flip GetAppID to 480 if user explicitly passes -p2pflip.
             const bool explicitFlip = PipeManager::DenuvoAuth::HasCmdLineArg(cmdLine, "-p2pflip");
             const bool suppress = !explicitFlip;
-            g_OnlineFixRealAppId.store(appId, std::memory_order_release);
             g_NetworkingSocketsActive.store(false, std::memory_order_release);
             g_SuppressAppIdFlip.store(suppress, std::memory_order_release);
+            g_OnlineFixRealAppId.store(appId, std::memory_order_release);
             pGameID->SetAppID(kOnlineFixAppId);
             CloudRedirectHost::AddApp(appId);
             LOG_MISC_INFO("SpawnProcess: appid {} -> {}, suppressFlip={}, cmd=\"{}\"",
                           appId, kOnlineFixAppId, suppress, cmdLine);
-        } else {
+        } else if (!IsCompanionSpawn(appId, pExePath, cmdLine)) {
             Hooks_Misc::ResetOnlineFixState();
         }
     }
@@ -101,7 +121,7 @@ namespace {
     // opt-in and gameoverlayrenderer hijacks the XInput stream.
     HOOK_FUNC(OptedInMask, int64,void* pThis, AppId_t appId)
     {
-        const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_relaxed);
+        const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
         if (appId == kOnlineFixAppId && realAppId != 0) {
             LOG_MISC_INFO("OptedInMask: appid {} -> {}", appId, realAppId);
             appId = realAppId;
@@ -119,7 +139,7 @@ namespace {
               CGameID* pOverlayCGameID, void* a6, int a7,
               void* a8, void* a9, unsigned int a10, char a11)
     {
-        const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_relaxed);
+        const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
         if (realAppId != 0 && pOverlayCGameID
             && pOverlayCGameID->AppID(true) == kOnlineFixAppId) 
         {
@@ -139,7 +159,7 @@ namespace {
     HOOK_FUNC(GetRedirectedAppId, AppId_t, AppId_t appId)
     {
         if (appId == kOnlineFixAppId && Hooks_Misc::IsOnlineFixActive()) {
-            const AppId_t realAppId = Hooks_Misc::ResolveAppId();
+            const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
             if (realAppId != 0) {
                 LOG_MISC_DEBUG("GetRedirectedAppId: redirecting AppID {} -> {}", appId, realAppId);
                 return realAppId;
@@ -158,7 +178,7 @@ namespace {
               const char* pchRelativePath, void* pstrResolvedPath)
     {
         if (appId == kOnlineFixAppId && Hooks_Misc::IsOnlineFixActive()) {
-            const AppId_t realAppId = Hooks_Misc::ResolveAppId();
+            const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
             if (realAppId != 0) {
                 LOG_MISC_DEBUG("RemoteStorage_ResolvePath: appid {} -> {}, ePathType={}, path='{}'",
                               appId, realAppId, ePathType, pchRelativePath ? pchRelativePath : "(null)");
@@ -194,6 +214,12 @@ namespace Hooks_Misc {
         UNINSTALL_HOOK(GetRedirectedAppId);
         UNINSTALL_HOOK(RemoteStorage_ResolvePath);
         UNHOOK_END();
+
+        ResetOnlineFixState();
+        {
+            std::scoped_lock lock(g_GameNameMutex);
+            g_GameNameCache->clear();
+        }
     }
 
     AppId_t GetAppIDForCurrentPipeWrap() {
@@ -211,12 +237,17 @@ namespace Hooks_Misc {
     }
 
     
-    AppId_t ResolveAppId() {
+    AppId_t ResolvePipeAppId() {
         const AppId_t pipeAppId = GetAppIDForCurrentPipeWrap();
         if (pipeAppId == kOnlineFixAppId) {
             const AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
             if (realAppId != 0) return realAppId;
         }
+        return pipeAppId;
+    }
+
+    AppId_t ResolveAppId() {
+        const AppId_t pipeAppId = ResolvePipeAppId();
         if (pipeAppId != 0) return pipeAppId;
         return g_OnlineFixRealAppId.load(std::memory_order_acquire);
     }
@@ -231,18 +262,18 @@ namespace Hooks_Misc {
     }
 
     bool IsOnlineFixActive() {
-        return g_OnlineFixRealAppId.load(std::memory_order_relaxed) != 0;
+        return g_OnlineFixRealAppId.load(std::memory_order_acquire) != 0;
     }
 
     bool IsNetworkingSocketsActive() {
-        return g_NetworkingSocketsActive.load(std::memory_order_relaxed);
+        return g_NetworkingSocketsActive.load(std::memory_order_acquire);
     }
 
     void NotifyNetworkingSocketsUsed() {
-        if (g_OnlineFixRealAppId.load(std::memory_order_relaxed) != 0) {
-            if (!g_NetworkingSocketsActive.exchange(true, std::memory_order_relaxed)) {
-                if (g_SuppressAppIdFlip.load(std::memory_order_relaxed)) {
-                    LOG_MISC_INFO("NetworkingSockets active: keeping real appid {}", g_OnlineFixRealAppId.load(std::memory_order_relaxed));
+        if (g_OnlineFixRealAppId.load(std::memory_order_acquire) != 0) {
+            if (!g_NetworkingSocketsActive.exchange(true, std::memory_order_acq_rel)) {
+                if (g_SuppressAppIdFlip.load(std::memory_order_acquire)) {
+                    LOG_MISC_INFO("NetworkingSockets active: keeping real appid {}", g_OnlineFixRealAppId.load(std::memory_order_acquire));
                 } else {
                     LOG_MISC_INFO("NetworkingSockets active: GetAppID now reports 480 for cert match");
                 }
@@ -260,22 +291,37 @@ namespace Hooks_Misc {
         //
         // Both behaviours are needed by different games, and the call itself
         // gives no way to tell them apart, so -p2pflip opts in per launch.
-        if (g_SuppressAppIdFlip.load(std::memory_order_relaxed)) return false;
-        return g_OnlineFixRealAppId.load(std::memory_order_relaxed) != 0 && g_NetworkingSocketsActive.load(std::memory_order_relaxed);
+        if (g_SuppressAppIdFlip.load(std::memory_order_acquire)) return false;
+        return g_OnlineFixRealAppId.load(std::memory_order_acquire) != 0 && g_NetworkingSocketsActive.load(std::memory_order_acquire);
     }
     
     bool EnsureBufferCapacity(CUtlBuffer* pWrite, uint32 newCapacity, bool updatePut)
     {
-        if (!pWrite) return false;
-        if (oCUtlBufferEnsureCapacity) {
+        if (!pWrite || newCapacity > static_cast<uint32>(INT32_MAX)) return false;
+        const int targetCapacity = static_cast<int>(newCapacity);
+        if (pWrite->m_Memory.m_pMemory == nullptr || pWrite->m_Memory.m_nAllocationCount < targetCapacity) {
+            if (pWrite->m_Memory.m_nGrowSize < 0) {
+                LOG_MISC_WARN("EnsureBufferCapacity: cannot grow external fixed buffer (alloc={}, requested={})",
+                              pWrite->m_Memory.m_nAllocationCount, targetCapacity);
+                return false;
+            }
+            if (!oCUtlBufferEnsureCapacity) {
+                LOG_MISC_WARN("EnsureBufferCapacity: oCUtlBufferEnsureCapacity not resolved");
+                return false;
+            }
             LOG_MISC_DEBUG("Before ensuring CUtlBuffer capacity: {}", pWrite->DebugString());
             oCUtlBufferEnsureCapacity(pWrite, newCapacity);
             LOG_MISC_DEBUG("After ensuring CUtlBuffer capacity: {}", pWrite->DebugString());
-            if (updatePut) pWrite->m_Put = newCapacity;
-            return true;
+            if (pWrite->m_Memory.m_pMemory == nullptr || pWrite->m_Memory.m_nAllocationCount < targetCapacity) {
+                LOG_MISC_WARN("EnsureBufferCapacity: buffer grow failed (alloc={}, requested={})",
+                              pWrite->m_Memory.m_nAllocationCount, targetCapacity);
+                return false;
+            }
         }
-        LOG_MISC_WARN("EnsureBufferCapacity: oCUtlBufferEnsureCapacity not resolved");
-        return false;
+        if (updatePut && pWrite->m_Put < targetCapacity) {
+            pWrite->m_Put = targetCapacity;
+        }
+        return true;
     }
 
     // ── Game name ────────────────────────────────────────────────

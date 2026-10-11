@@ -2,6 +2,7 @@
 #include "HookMacros.h"
 #include "Hook/Hooks_Package.h"
 #include "Utils/Config/Config.h"
+#include "Utils/Config/LuaConfig.h"
 #include "dllmain.h"
 #include <format>
 
@@ -60,8 +61,8 @@ namespace {
                 auto it = overrides.find(e.DepotId);
                 if (it != overrides.end()) {
                     AppId_t targetAppId = (e.DlcAppId != 0) ? e.DlcAppId : (e.AppId != 0 ? e.AppId : AppId);
-                    if (!lockOwned && Hooks_Package::IsAppTrulyOwned(targetAppId)) {
-                        LOG_MANIFEST_INFO("BuildDepotDependency: skipping manifest lock for owned targetAppId={} depot={}",
+                    if (!lockOwned && Hooks_Package::HasValidLicense(targetAppId)) {
+                        LOG_MANIFEST_INFO("BuildDepotDependency: skipping manifest lock for licensed targetAppId={} depot={}",
                             targetAppId, e.DepotId);
                         continue;
                     }
