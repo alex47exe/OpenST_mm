@@ -8,10 +8,38 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <mutex>
+#include <new>
 #include <unordered_map>
+#include <utility>
 
 namespace {
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
+
     // ── Resolve-only functions ─────────────────────────────────────
     RESOLVE_FUNC(CUtlBufferEnsureCapacity, void*, CUtlBuffer* pCUtlBuffer, uint32 newCapacity);
 
@@ -31,24 +59,7 @@ namespace {
     // Flipped to false only if user explicitly passes -p2pflip.
     std::atomic<bool>    g_SuppressAppIdFlip{true};
     std::mutex           g_GameNameMutex;
-    std::unordered_map<AppId_t, std::string> g_GameNameCache;
-
-
-    static bool HasCmdLineArg(const char* cmdLine, const char* arg) {
-        if (!cmdLine || !arg) return false;
-        const size_t argLen = strlen(arg);
-        for (const char* p = cmdLine; *p; ++p) {
-            if (_strnicmp(p, arg, argLen) == 0) {
-                if (p == cmdLine || *(p - 1) == ' ' || *(p - 1) == '\t' || *(p - 1) == '"') {
-                    const char next = p[argLen];
-                    if (next == '\0' || next == ' ' || next == '\t' || next == '"' || next == '=') {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
+    NoDestructor<std::unordered_map<AppId_t, std::string>> g_GameNameCache;
 
     // ── SpawnProcess interception ────────────────────────────────────────────
     // CUser_SpawnProcess(pCUser, pExePath, pCommandLine, pWorkingDir,
@@ -65,11 +76,11 @@ namespace {
         PipeManager::DenuvoAuth::OnSpawnProcess(appId, pExePath, cmdLine);
         LuaConfig::PrewarmStatSteamId(appId);
 
-        if (cmdLine && HasCmdLineArg(cmdLine, "-onlinefix"))
+        if (cmdLine && PipeManager::DenuvoAuth::HasCmdLineArg(cmdLine, "-onlinefix"))
         {
             // By default, keep real AppID so games can find their save files and authenticate.
             // Only flip GetAppID to 480 if user explicitly passes -p2pflip.
-            const bool explicitFlip = HasCmdLineArg(cmdLine, "-p2pflip");
+            const bool explicitFlip = PipeManager::DenuvoAuth::HasCmdLineArg(cmdLine, "-p2pflip");
             const bool suppress = !explicitFlip;
             g_OnlineFixRealAppId.store(appId, std::memory_order_release);
             g_NetworkingSocketsActive.store(false, std::memory_order_release);
@@ -272,8 +283,8 @@ namespace Hooks_Misc {
     {
         {
             std::scoped_lock lock(g_GameNameMutex);
-            auto it = g_GameNameCache.find(appId);
-            if (it != g_GameNameCache.end()) return it->second;
+            auto it = g_GameNameCache->find(appId);
+            if (it != g_GameNameCache->end()) return it->second;
         }
 
         std::string name;
@@ -297,10 +308,10 @@ namespace Hooks_Misc {
         // Only cache valid non-empty names so uninitialized/early calls don't poison the cache
         if (!name.empty()) {
             std::scoped_lock lock(g_GameNameMutex);
-            if (g_GameNameCache.size() >= 512) {
-                g_GameNameCache.clear();
+            if (g_GameNameCache->size() >= 512) {
+                g_GameNameCache->clear();
             }
-            g_GameNameCache.emplace(appId, name);
+            g_GameNameCache->emplace(appId, name);
         }
         return name;
     }

@@ -1,5 +1,6 @@
 #include "Hooks_IPC.h"
 #include "Hooks_IPC_ISteamUtils.h"
+#include "IPCMessages.gen.h"
 #include "Hooks_Misc.h"
 #include "PendingAPICalls.h"
 #include "Steam/Callback.h"
@@ -59,10 +60,6 @@ namespace {
         LOG_IPC_INFO("GetAppID: spoof response {} -> {}", current, realAppId);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  GetAPICallResult per-callback handlers
-    // ════════════════════════════════════════════════════════════════
-
     bool HandleCallback_EncryptedAppTicketResponse(CUtlBuffer* pWrite, uint64 hAsyncCall, uint32 cubCallback)
     {
         const auto appId = PendingAPICalls::TakeEncryptedTicket(hAsyncCall);
@@ -81,15 +78,6 @@ namespace {
         return true;
     }
 
-    struct APICallResultHandlerEntry {
-        uint32 callbackId;
-        bool (*handler)(CUtlBuffer* pWrite, uint64 hAsyncCall, uint32 cubCallback);
-    };
-
-    constexpr APICallResultHandlerEntry kAPICallResultHandlers[] = {
-        { EncryptedAppTicketResponse_t::k_iCallback, HandleCallback_EncryptedAppTicketResponse },
-    };
-
     // [Post-Handler]: IClientUtils::GetAPICallResult
     void HandlerPost_IClientUtils_GetAPICallResult(CPipeClient*, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
@@ -97,12 +85,9 @@ namespace {
         if (!req.ok()) return;
 
         AppId_t appId = Hooks_Misc::ResolveAppId();
-        LOG_IPC_DEBUG("{}, AppId={}", req.DebugString(),appId);
-        for (const auto& entry : kAPICallResultHandlers) {
-            if (entry.callbackId == req.iCallbackExpected()) {
-                entry.handler(pWrite, req.hSteamAPICall(), req.cubCallback());
-                return;
-            }
+        LOG_IPC_DEBUG("{}, AppId={}", req.DebugString(), appId);
+        if (req.iCallbackExpected() == EncryptedAppTicketResponse_t::k_iCallback) {
+            HandleCallback_EncryptedAppTicketResponse(pWrite, req.hSteamAPICall(), req.cubCallback());
         }
     }
 
@@ -110,7 +95,7 @@ namespace {
 
 namespace Hooks_IPC_ISteamUtils {
     void Register() {
-        IPCHandlerEntry UtilsEntries[] = {
+        constexpr IPCHandlerEntry UtilsEntries[] = {
             ADD_IPC_POST_HANDLER(IClientUtils, GetAppID),
             ADD_IPC_POST_HANDLER(IClientUtils, GetAPICallResult),
         };

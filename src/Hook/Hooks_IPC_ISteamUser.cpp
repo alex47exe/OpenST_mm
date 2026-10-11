@@ -1,5 +1,6 @@
 #include "Hooks_IPC.h"
 #include "Hooks_IPC_ISteamUser.h"
+#include "IPCMessages.gen.h"
 #include "PendingAPICalls.h"
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Tickets/EticketClient.h"
@@ -12,19 +13,47 @@
 #include "Hooks_Package.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <mutex>
+#include <new>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
     using namespace IPCMessages::IClientUser;
+
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
 
     // Fresh, nonce-bound etickets minted on-demand in RequestEncryptedAppTicket
     // (keyed by appId) and consumed by GetEncryptedAppTicket on the same launch.
     // Lets the strict-Denuvo path serve a ticket matching the launch nonce while
     // keeping GetEncryptedAppTicket's credential-store serve as the fallback.
     std::mutex g_freshEticketMutex;
-    std::unordered_map<AppId_t, std::vector<uint8_t>> g_freshEticket;
+    NoDestructor<std::unordered_map<AppId_t, std::vector<uint8_t>>> g_freshEticket;
 
     // [Post-Handler]: IClientUser::GetSteamID
     void HandlerPost_IClientUser_GetSteamID(CPipeClient* pipe,CUtlBuffer* pRead, CUtlBuffer* pWrite)
@@ -73,7 +102,7 @@ namespace {
         LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData:{}", req.DebugString());
         if (req.cbMaxTicket() < 0) return;
 
-        AppId_t appId = req.unAppID() == kOnlineFixAppId ? Hooks_Misc::ResolveAppId() : req.unAppID();
+        AppId_t appId = req.unAppID() == Hooks_Misc::kOnlineFixAppId ? Hooks_Misc::ResolveAppId() : req.unAppID();
         if (appId == 0) {
             appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
         }
@@ -207,15 +236,15 @@ namespace {
             if (existingSteamId != 0) {
                 if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce, existingSteamId)) {
                     std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                    g_freshEticket[appId] = std::move(*fresh);
+                    (*g_freshEticket)[appId] = std::move(*fresh);
                     haveFresh = true;
                 } else {
                     std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                    g_freshEticket.erase(appId);
+                    g_freshEticket->erase(appId);
                 }
             } else {
                 std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                g_freshEticket.erase(appId);
+                g_freshEticket->erase(appId);
             }
         }
 
@@ -258,8 +287,8 @@ namespace {
         std::vector<uint8_t> ticket;
         {
             std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-            auto it = g_freshEticket.find(appId);
-            if (it != g_freshEticket.end()) ticket = it->second;
+            auto it = g_freshEticket->find(appId);
+            if (it != g_freshEticket->end()) ticket = it->second;
         }
         const bool fromFresh = !ticket.empty();
         if (ticket.empty()) {
@@ -302,7 +331,7 @@ namespace {
 
 namespace Hooks_IPC_ISteamUser {
     void Register() {
-        IPCHandlerEntry UserEntries[] = {
+        constexpr IPCHandlerEntry UserEntries[] = {
             ADD_IPC_POST_HANDLER(IClientUser, GetSteamID),
             ADD_IPC_POST_HANDLER(IClientUser, GetAppOwnershipTicketExtendedData),
             ADD_IPC_POST_HANDLER(IClientUser, RequestEncryptedAppTicket),

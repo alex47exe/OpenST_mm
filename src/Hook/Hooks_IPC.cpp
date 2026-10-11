@@ -1,16 +1,45 @@
 #include "dllmain.h"
 #include "Hooks_IPC.h"
+#include "IPCMessages.gen.h"
 #include "Hooks_IPC_ISteamUser.h"
 #include "Hooks_IPC_ISteamUtils.h"
 #include "HookMacros.h"
 #include "Hooks_Misc.h"
 #include "Pipe/PipeManager.h"
-#include "Utils/Support/FnvHash.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <new>
+#include <utility>
+#include <vector>
 
 namespace {
+
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
 
     RESOLVE_FUNC(GetPipeClient, CPipeClient*, void* pEngine, HSteamPipe hSteamPipe);
 
@@ -20,35 +49,31 @@ namespace {
 
     //  Handler dispatch table
     struct ResolvedHandler {
-        uint64_t              key;        // (static_cast<uint64_t>(interfaceID) << 32) | funcHash
-        EIPCInterface         interfaceID;
-        uint32                funcHash;
-        std::string           name;       // "IClientUser::GetSteamID" — for logs
-        uint32                fencepost;
-        uint32                argc;
-        IPCHandlerFn          pre;
-        IPCHandlerFn          post;
+        uint64_t     key;           // (static_cast<uint64_t>(interfaceID) << 32) | funcHash
+        const char*  interfaceName;
+        const char*  methodName;
+        IPCHandlerFn pre;
+        IPCHandlerFn post;
 
-        ResolvedHandler(const IPCHandlerEntry& entry, const IPCLoader::Method& method)
+        ResolvedHandler(const IPCHandlerEntry& entry, const IPCLoader::Method& method) noexcept
             : key((static_cast<uint64_t>(method.interfaceID) << 32) | method.funcHash),
-              interfaceID(method.interfaceID),
-              funcHash(method.funcHash),
-              name(std::string(entry.interfaceName) + "::" + entry.methodName),
-              fencepost(method.fencepost),
-              argc(method.argc),
+              interfaceName(entry.interfaceName),
+              methodName(entry.methodName),
               pre(entry.pre),
               post(entry.post) {}
 
         std::string DebugString() const {
-            return std::format("{} -> hash=0x{:08X} fencepost=0x{:08X} argc={}",
-                name, funcHash, fencepost, argc);
+            return std::format("{}::{} -> key=0x{:016X}",
+                interfaceName ? interfaceName : "",
+                methodName ? methodName : "",
+                key);
         }
     };
-    std::vector<ResolvedHandler> g_Handlers;
+    NoDestructor<std::vector<ResolvedHandler>> g_Handlers;
 
     static const ResolvedHandler* FindHandler(EIPCInterface iface, uint32 funcHash) {
         const uint64_t targetKey = (static_cast<uint64_t>(iface) << 32) | funcHash;
-        for (const auto& e : g_Handlers) {
+        for (const auto& e : *g_Handlers) {
             if (e.key == targetKey) return &e;
         }
         return nullptr;
@@ -153,7 +178,7 @@ namespace Hooks_IPC {
         Hooks_IPC_ISteamUser::Register();
         Hooks_IPC_ISteamUtils::Register();
 
-        LOG_IPC_INFO("Hooks_IPC: {} handlers registered", g_Handlers.size());
+        LOG_IPC_INFO("Hooks_IPC: {} handlers registered", g_Handlers->size());
 
         HOOK_BEGIN();
         INSTALL_HOOK_C(IPCProcessMessage);
@@ -164,7 +189,7 @@ namespace Hooks_IPC {
         UNHOOK_BEGIN();
         UNINSTALL_HOOK_C(IPCProcessMessage);
         UNHOOK_END();
-        g_Handlers.clear();
+        g_Handlers->clear();
     }
 
     void RegisterHandlers(std::span<const IPCHandlerEntry> entries) {
@@ -175,12 +200,12 @@ namespace Hooks_IPC {
                 continue;
             }
             const uint64_t key = (static_cast<uint64_t>(m->interfaceID) << 32) | m->funcHash;
-            auto it = std::ranges::find_if(g_Handlers, [key](const ResolvedHandler& h) { return h.key == key; });
-            if (it != g_Handlers.end()) {
+            auto it = std::ranges::find_if(*g_Handlers, [key](const ResolvedHandler& h) { return h.key == key; });
+            if (it != g_Handlers->end()) {
                 *it = ResolvedHandler(e, *m);
                 LOG_IPC_DEBUG("Hooks_IPC: updated {}", it->DebugString());
             } else {
-                auto& handler = g_Handlers.emplace_back(e, *m);
+                auto& handler = g_Handlers->emplace_back(e, *m);
                 LOG_IPC_DEBUG("Hooks_IPC: resolved {}", handler.DebugString());
             }
         }
