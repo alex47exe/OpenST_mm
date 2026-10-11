@@ -4,6 +4,7 @@
 #include "Steam/Types.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +19,9 @@ namespace LuaConfig{
     std::vector<AppId_t> GetAllDepotIds();
     std::vector<uint8> GetDecryptionKey(AppId_t appId);
     uint64_t GetAccessToken(AppId_t appId);
+    // Legacy third-party CD key override for an app, if the user set one via
+    // setlegacycdkey(appid, "KEY"); nullopt when no override is configured.
+    std::optional<std::string> GetLegacyCDKey(AppId_t appId);
     uint64_t GetStatSteamId(AppId_t appId);
     void PrewarmStatSteamId(AppId_t appId);
     bool pinApp(AppId_t appId);

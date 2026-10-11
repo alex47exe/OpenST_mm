@@ -65,6 +65,9 @@
   - `-d+`: Steam launch option on genuine accounts to auto-generate `<AppId>.lua` and lock manifests
   - `-forcedenuvo`: Force treat game as Denuvo-protected (or `forcedenuvo(appid)`)
 
+### Third-party product keys ("Updating product key")
+- For titles that carry a Steam-issued third-party retail key (Ubisoft Connect, Rockstar, etc.), OpenSteamTool answers the client's legacy key request locally, so the "Updating product key" step completes for added games instead of failing. Supply a real key with `setlegacycdkey(appid, "KEY")`; when none is configured a deterministic synthetic key is generated. A synthetic key satisfies Steam's local step only — titles that validate the key online still require a real one.
+
 ### Extracting Tickets & Config with `extract_tickets`
 Extracts AppTicket, ETicket, DLC lists, depot keys, manifests, and generates a ready-to-use `<appid>.lua` on accounts owning the game.
 
