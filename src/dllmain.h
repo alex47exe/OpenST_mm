@@ -33,11 +33,11 @@ inline char DllDir[kRuntimePathCapacity]           = {};
 inline std::atomic<bool> g_IsPortableMode{false};
 
 inline bool IsPortableMode() noexcept {
-    return g_IsPortableMode.load(std::memory_order_relaxed);
+    return g_IsPortableMode.load(std::memory_order_acquire);
 }
 
 inline const char* GetStorageDirectory() noexcept {
-    if (IsPortableMode()) {
+    if (IsPortableMode() && DllDir[0] != '\0') {
         return DllDir;
     }
     if (SteamInstallPath[0] != '\0') {
