@@ -2,6 +2,13 @@
 #include "JsonHelper.h"
 #include "Log.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <bcrypt.h>
 #include <conio.h>
 #include <wincrypt.h>
@@ -260,8 +267,11 @@ std::string EncryptPasswordWithRSA(
     }
 
     struct AlgGuard {
-        BCRYPT_ALG_HANDLE handle;
-        ~AlgGuard() { if (handle) BCryptCloseAlgorithmProvider(handle, 0); }
+        BCRYPT_ALG_HANDLE handle{nullptr};
+        explicit AlgGuard(BCRYPT_ALG_HANDLE h) noexcept : handle(h) {}
+        ~AlgGuard() noexcept { if (handle) BCryptCloseAlgorithmProvider(handle, 0); }
+        AlgGuard(const AlgGuard&) = delete;
+        AlgGuard& operator=(const AlgGuard&) = delete;
     } algGuard{hAlg};
 
     // Construct BCRYPT_RSAKEY_BLOB:
@@ -298,8 +308,11 @@ std::string EncryptPasswordWithRSA(
     }
 
     struct KeyGuard {
-        BCRYPT_KEY_HANDLE handle;
-        ~KeyGuard() { if (handle) BCryptDestroyKey(handle); }
+        BCRYPT_KEY_HANDLE handle{nullptr};
+        explicit KeyGuard(BCRYPT_KEY_HANDLE h) noexcept : handle(h) {}
+        ~KeyGuard() noexcept { if (handle) BCryptDestroyKey(handle); }
+        KeyGuard(const KeyGuard&) = delete;
+        KeyGuard& operator=(const KeyGuard&) = delete;
     } keyGuard{hKey};
 
     // Encrypt password using PKCS#1 v1.5 padding (standard for Steam web authentication)

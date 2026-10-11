@@ -107,6 +107,42 @@ namespace {
         }
         return out;
     }
+
+    size_t FindMatchingBracket(std::string_view sv, size_t openPos, char openChar, char closeChar,
+                               size_t limitPos = std::string_view::npos) noexcept {
+        const size_t end = (limitPos == std::string_view::npos || limitPos > sv.size()) ? sv.size() : limitPos;
+        if (openPos >= end || sv[openPos] != openChar) return std::string_view::npos;
+
+        int depth = 0;
+        bool inStr = false;
+        bool escaped = false;
+        for (size_t i = openPos; i < end; ++i) {
+            const char c = sv[i];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inStr) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inStr = !inStr;
+                continue;
+            }
+            if (inStr) continue;
+
+            if (c == openChar) {
+                ++depth;
+            } else if (c == closeChar) {
+                --depth;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return std::string_view::npos;
+    }
 } // namespace
 
 std::optional<std::string> JsonHelper::GetString(std::string_view json, std::string_view key) {
@@ -234,28 +270,7 @@ std::vector<OwnedGameInfo> JsonHelper::ParseOwnedGames(std::string_view json) {
     size_t arrayStart = json.find('[', gamesPos);
     if (arrayStart == std::string_view::npos) return games;
 
-    // Track bracket depth to locate true end of games array
-    size_t arrayEnd = std::string_view::npos;
-    int bracketDepth = 0;
-    bool inStr = false;
-    bool escaped = false;
-    for (size_t i = arrayStart; i < json.size(); ++i) {
-        char c = json[i];
-        if (escaped) { escaped = false; continue; }
-        if (c == '\\' && inStr) { escaped = true; continue; }
-        if (c == '"') { inStr = !inStr; continue; }
-        if (inStr) continue;
-
-        if (c == '[') {
-            bracketDepth++;
-        } else if (c == ']') {
-            bracketDepth--;
-            if (bracketDepth == 0) {
-                arrayEnd = i;
-                break;
-            }
-        }
-    }
+    size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');
     if (arrayEnd == std::string_view::npos) {
         arrayEnd = json.size();
     }
@@ -265,28 +280,7 @@ std::vector<OwnedGameInfo> JsonHelper::ParseOwnedGames(std::string_view json) {
         size_t objStart = json.find('{', pos);
         if (objStart == std::string_view::npos || objStart >= arrayEnd) break;
 
-        size_t objEnd = std::string_view::npos;
-        int braceDepth = 0;
-        inStr = false;
-        escaped = false;
-        for (size_t i = objStart; i < arrayEnd; ++i) {
-            char c = json[i];
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inStr) { escaped = true; continue; }
-            if (c == '"') { inStr = !inStr; continue; }
-            if (inStr) continue;
-
-            if (c == '{') {
-                braceDepth++;
-            } else if (c == '}') {
-                braceDepth--;
-                if (braceDepth == 0) {
-                    objEnd = i;
-                    break;
-                }
-            }
-        }
-
+        size_t objEnd = FindMatchingBracket(json, objStart, '{', '}', arrayEnd);
         if (objEnd == std::string_view::npos || objEnd >= arrayEnd) break;
 
         std::string_view itemJson = json.substr(objStart, objEnd - objStart + 1);
@@ -316,28 +310,7 @@ std::vector<OwnedGameInfo> JsonHelper::ParseSharedLibraryApps(std::string_view j
     size_t arrayStart = json.find('[', appsPos);
     if (arrayStart == std::string_view::npos) return games;
 
-    // Track bracket depth to locate true end of apps array (skipping inner brackets like owner_steamids: [...])
-    size_t arrayEnd = std::string_view::npos;
-    int bracketDepth = 0;
-    bool inStr = false;
-    bool escaped = false;
-    for (size_t i = arrayStart; i < json.size(); ++i) {
-        char c = json[i];
-        if (escaped) { escaped = false; continue; }
-        if (c == '\\' && inStr) { escaped = true; continue; }
-        if (c == '"') { inStr = !inStr; continue; }
-        if (inStr) continue;
-
-        if (c == '[') {
-            bracketDepth++;
-        } else if (c == ']') {
-            bracketDepth--;
-            if (bracketDepth == 0) {
-                arrayEnd = i;
-                break;
-            }
-        }
-    }
+    size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');
     if (arrayEnd == std::string_view::npos) {
         arrayEnd = json.size();
     }
@@ -347,29 +320,7 @@ std::vector<OwnedGameInfo> JsonHelper::ParseSharedLibraryApps(std::string_view j
         size_t objStart = json.find('{', pos);
         if (objStart == std::string_view::npos || objStart >= arrayEnd) break;
 
-        // Track brace depth to find matching '}' for current game object
-        size_t objEnd = std::string_view::npos;
-        int braceDepth = 0;
-        inStr = false;
-        escaped = false;
-        for (size_t i = objStart; i < arrayEnd; ++i) {
-            char c = json[i];
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inStr) { escaped = true; continue; }
-            if (c == '"') { inStr = !inStr; continue; }
-            if (inStr) continue;
-
-            if (c == '{') {
-                braceDepth++;
-            } else if (c == '}') {
-                braceDepth--;
-                if (braceDepth == 0) {
-                    objEnd = i;
-                    break;
-                }
-            }
-        }
-
+        size_t objEnd = FindMatchingBracket(json, objStart, '{', '}', arrayEnd);
         if (objEnd == std::string_view::npos || objEnd >= arrayEnd) break;
 
         std::string_view itemJson = json.substr(objStart, objEnd - objStart + 1);

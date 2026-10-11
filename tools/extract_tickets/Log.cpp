@@ -1,5 +1,8 @@
 #include "Log.h"
+#include "Utils.h"
+#if EXTRACT_TICKETS_HAS_LOGGING
 #include "TuiEngine.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -74,8 +77,7 @@ namespace {
         }
 
         // 2. Windows User Path redaction
-        if (result.find("Users\\") != std::string::npos || result.find("Users/") != std::string::npos ||
-            result.find("users\\") != std::string::npos || result.find("users/") != std::string::npos) {
+        if (FindIgnoreCase(result, "users") != std::string_view::npos) {
             result = MaskPath(result);
         }
 
@@ -190,11 +192,9 @@ std::string MaskPicsToken(uint64_t picsToken) {
 std::string MaskPath(std::string_view path) {
     if (path.empty()) return {};
     std::string s{path};
-    std::string lowerS = s;
-    for (char& c : lowerS) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
     size_t pos = 0;
-    while ((pos = lowerS.find("users", pos)) != std::string::npos) {
+    while ((pos = FindIgnoreCase(s, "users", pos)) != std::string_view::npos) {
         size_t slashPos = pos + 5;
         if (slashPos < s.size() && (s[slashPos] == '\\' || s[slashPos] == '/')) {
             size_t userStart = slashPos + 1;
@@ -203,7 +203,6 @@ std::string MaskPath(std::string_view path) {
                 std::string_view userPart(s.data() + userStart, nextSlash - userStart);
                 std::string maskedUser = MaskAccount(userPart);
                 s.replace(userStart, nextSlash - userStart, maskedUser);
-                lowerS.replace(userStart, nextSlash - userStart, maskedUser);
                 pos = userStart + maskedUser.size();
                 continue;
             } else if (nextSlash == std::string::npos && userStart < s.size()) {

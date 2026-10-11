@@ -126,7 +126,7 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 		assert(lengths[i] <= 15);
 
 		if (lengths[i]) {
-			t->max_sym = i;
+			t->max_sym = (int) i;
 			t->counts[lengths[i]]++;
 		}
 	}
@@ -141,7 +141,7 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 		}
 		available = 2 * (available - used);
 
-		offs[i] = num_codes;
+		offs[i] = (unsigned short) num_codes;
 		num_codes += used;
 	}
 
@@ -157,7 +157,7 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 	/* Fill in symbols sorted by code */
 	for (i = 0; i < num; ++i) {
 		if (lengths[i]) {
-			t->symbols[offs[lengths[i]]++] = i;
+			t->symbols[offs[lengths[i]]++] = (unsigned short) i;
 		}
 	}
 
@@ -167,7 +167,7 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 	 */
 	if (num_codes == 1) {
 		t->counts[1] = 2;
-		t->symbols[1] = t->max_sym + 1;
+		t->symbols[1] = (unsigned short) (t->max_sym + 1);
 	}
 
 	return TINF_OK;
@@ -200,7 +200,7 @@ static unsigned int tinf_getbits_no_refill(struct tinf_data *d, int num)
 	assert(num >= 0 && num <= d->bitcount);
 
 	/* Get bits from tag */
-	bits = d->tag & ((1UL << num) - 1);
+	bits = (unsigned int) (d->tag & ((1ULL << num) - 1));
 
 	/* Remove bits from tag */
 	d->tag >>= num;
@@ -242,7 +242,7 @@ static int tinf_decode_symbol(struct tinf_data *d, const struct tinf_tree *t)
 	 * of offs and add one more bit to it.
 	 */
 	for (len = 1; ; ++len) {
-		offs = 2 * offs + tinf_getbits(d, 1);
+		offs = 2 * offs + (int) tinf_getbits(d, 1);
 
 		assert(len <= 15);
 
@@ -306,7 +306,7 @@ static int tinf_decode_trees(struct tinf_data *d, struct tinf_tree *lt,
 		/* Get 3 bits code length (0-7) */
 		unsigned int clen = tinf_getbits(d, 3);
 
-		lengths[clcidx[i]] = clen;
+		lengths[clcidx[i]] = (unsigned char) clen;
 	}
 
 	/* Build code length tree (in literal/length tree to save space) */
@@ -359,7 +359,7 @@ static int tinf_decode_trees(struct tinf_data *d, struct tinf_tree *lt,
 		}
 
 		while (length--) {
-			lengths[num++] = sym;
+			lengths[num++] = (unsigned char) sym;
 		}
 	}
 
@@ -428,7 +428,7 @@ static int tinf_inflate_block_data(struct tinf_data *d, struct tinf_tree *lt,
 			if (d->dest == d->dest_end) {
 				return TINF_BUF_ERROR;
 			}
-			*d->dest++ = sym;
+			*d->dest++ = (unsigned char) sym;
 		}
 		else {
 			int length, dist, offs;
@@ -447,8 +447,8 @@ static int tinf_inflate_block_data(struct tinf_data *d, struct tinf_tree *lt,
 			sym -= 257;
 
 			/* Possibly get more bits from length code */
-			length = tinf_getbits_base(d, length_bits[sym],
-			                           length_base[sym]);
+			length = (int) tinf_getbits_base(d, length_bits[sym],
+			                                 length_base[sym]);
 
 			dist = tinf_decode_symbol(d, dt);
 
@@ -458,8 +458,8 @@ static int tinf_inflate_block_data(struct tinf_data *d, struct tinf_tree *lt,
 			}
 
 			/* Possibly get more bits from distance code */
-			offs = tinf_getbits_base(d, dist_bits[dist],
-			                         dist_base[dist]);
+			offs = (int) tinf_getbits_base(d, dist_bits[dist],
+			                               dist_base[dist]);
 
 			if (offs > d->dest - d->dest_start) {
 				return TINF_DATA_ERROR;
@@ -501,11 +501,11 @@ static int tinf_inflate_uncompressed_block(struct tinf_data *d)
 
 	d->source += 4;
 
-	if (d->source_end - d->source < length) {
+	if ((unsigned int) (d->source_end - d->source) < length) {
 		return TINF_DATA_ERROR;
 	}
 
-	if (d->dest_end - d->dest < length) {
+	if ((unsigned int) (d->dest_end - d->dest) < length) {
 		return TINF_BUF_ERROR;
 	}
 
@@ -547,12 +547,6 @@ static int tinf_inflate_dynamic_block(struct tinf_data *d)
 
 /* -- Public functions -- */
 
-/* Initialize global (static) data */
-void tinf_init(void)
-{
-	return;
-}
-
 /* Inflate stream from source to dest */
 int tinf_uncompress(void *dest, unsigned int *destLen,
                     const void *source, unsigned int sourceLen)
@@ -576,7 +570,7 @@ int tinf_uncompress(void *dest, unsigned int *destLen,
 		int res;
 
 		/* Read final block flag */
-		bfinal = tinf_getbits(&d, 1);
+		bfinal = (int) tinf_getbits(&d, 1);
 
 		/* Read block type (2 bits) */
 		btype = tinf_getbits(&d, 2);
@@ -610,27 +604,7 @@ int tinf_uncompress(void *dest, unsigned int *destLen,
 		return TINF_DATA_ERROR;
 	}
 
-	*destLen = d.dest - d.dest_start;
+	*destLen = (unsigned int) (d.dest - d.dest_start);
 
 	return TINF_OK;
 }
-
-/* clang -g -O1 -fsanitize=fuzzer,address -DTINF_FUZZING tinflate.c */
-#if defined(TINF_FUZZING)
-#include <limits.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-
-unsigned char depacked[64 * 1024];
-
-extern int
-LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
-{
-	if (size > UINT_MAX / 2) { return 0; }
-	unsigned int destLen = sizeof(depacked);
-	tinf_uncompress(depacked, &destLen, data, size);
-	return 0;
-}
-#endif

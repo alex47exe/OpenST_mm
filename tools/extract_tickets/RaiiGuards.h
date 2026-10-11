@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -81,41 +84,6 @@ struct ScopedFileMappingView {
     [[nodiscard]] const T* As() const noexcept { return static_cast<const T*>(address); }
 
     explicit operator bool() const noexcept { return address != nullptr; }
-};
-
-// RAII wrapper for Windows HKEY
-struct ScopedHKey {
-    HKEY key{nullptr};
-
-    ScopedHKey() = default;
-    explicit ScopedHKey(HKEY k) noexcept : key(k) {}
-
-    ~ScopedHKey() noexcept {
-        if (key != nullptr) {
-            RegCloseKey(key);
-        }
-    }
-
-    ScopedHKey(const ScopedHKey&) = delete;
-    ScopedHKey& operator=(const ScopedHKey&) = delete;
-
-    ScopedHKey(ScopedHKey&& other) noexcept : key(other.key) {
-        other.key = nullptr;
-    }
-
-    ScopedHKey& operator=(ScopedHKey&& other) noexcept {
-        if (this != &other) {
-            if (key != nullptr) {
-                RegCloseKey(key);
-            }
-            key = other.key;
-            other.key = nullptr;
-        }
-        return *this;
-    }
-
-    operator HKEY() const noexcept { return key; }
-    [[nodiscard]] bool IsValid() const noexcept { return key != nullptr; }
 };
 
 // RAII guard for Steam client session, loaded module, and process environment

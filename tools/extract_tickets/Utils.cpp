@@ -1,7 +1,14 @@
 #include "Utils.h"
 #include "Log.h"
-#include "RaiiGuards.h"
 #include "TuiEngine.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #if __has_include(<OSTPlatform/SteamLocator.hpp>)
 #include <OSTPlatform/SteamLocator.hpp>
@@ -183,59 +190,6 @@ std::string WideToUtf8(std::wstring_view wide) {
     std::string s(len, '\0');
     WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), s.data(), len, nullptr, nullptr);
     return s;
-}
-
-std::optional<std::string> QueryRegistryString(HKEY root, const char* subKey, const char* valueName) {
-    std::wstring wSubKey = Utf8ToWide(subKey ? subKey : "");
-    std::wstring wValueName = Utf8ToWide(valueName ? valueName : "");
-
-    HKEY rawKey{nullptr};
-    LSTATUS status = RegOpenKeyExW(root, wSubKey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &rawKey);
-    if (status != ERROR_SUCCESS) {
-        status = RegOpenKeyExW(root, wSubKey.c_str(), 0, KEY_READ, &rawKey);
-    }
-    if (status != ERROR_SUCCESS) {
-        return std::nullopt;
-    }
-    ScopedHKey key{rawKey};
-
-    DWORD valueType{0};
-    DWORD byteSize{0};
-    status = RegQueryValueExW(key, wValueName.c_str(), nullptr, &valueType, nullptr, &byteSize);
-    if (status != ERROR_SUCCESS || (valueType != REG_SZ && valueType != REG_EXPAND_SZ) || byteSize == 0) {
-        return std::nullopt;
-    }
-
-    std::wstring wValue(byteSize / sizeof(wchar_t) + 1, L'\0');
-    status = RegQueryValueExW(
-        key,
-        wValueName.c_str(),
-        nullptr,
-        nullptr,
-        reinterpret_cast<LPBYTE>(wValue.data()),
-        &byteSize);
-
-    if (status != ERROR_SUCCESS) return std::nullopt;
-    wValue.resize(byteSize / sizeof(wchar_t));
-    while (!wValue.empty() && (wValue.back() == L'\0' || wValue.back() == L' ')) {
-        wValue.pop_back();
-    }
-
-    if (valueType == REG_EXPAND_SZ) {
-        DWORD reqSize = ExpandEnvironmentStringsW(wValue.c_str(), nullptr, 0);
-        if (reqSize > 0) {
-            std::wstring expanded(reqSize, L'\0');
-            DWORD expLen = ExpandEnvironmentStringsW(wValue.c_str(), expanded.data(), reqSize);
-            if (expLen > 0) {
-                while (!expanded.empty() && expanded.back() == L'\0') {
-                    expanded.pop_back();
-                }
-                wValue = std::move(expanded);
-            }
-        }
-    }
-
-    return WideToUtf8(wValue);
 }
 
 std::optional<std::string> FindSteamInstallPath() {

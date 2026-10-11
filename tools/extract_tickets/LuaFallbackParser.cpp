@@ -7,6 +7,13 @@
 #include <filesystem>
 #include <fstream>
 #include <string_view>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 namespace OST::ExtractTickets {
@@ -129,14 +136,8 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
             code = TrimWhitespace(line.substr(0, commentPos));
         }
 
-        std::string lowerCode;
-        lowerCode.reserve(code.size());
-        for (char ch : code) {
-            lowerCode.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-        }
-
         // 1. addappid(...)
-        if (size_t fPos = lowerCode.find("addappid"); fPos != std::string::npos) {
+        if (size_t fPos = FindIgnoreCase(code, "addappid"); fPos != std::string_view::npos) {
             size_t openP = code.find('(', fPos);
             size_t closeP = code.rfind(')');
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
@@ -166,7 +167,7 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
             }
         }
         // 2. setmanifestid(...)
-        else if (size_t fPos = lowerCode.find("setmanifestid"); fPos != std::string::npos) {
+        else if (size_t fPos = FindIgnoreCase(code, "setmanifestid"); fPos != std::string_view::npos) {
             size_t openP = code.find('(', fPos);
             size_t closeP = code.rfind(')');
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
@@ -184,7 +185,7 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
             }
         }
         // 3. addtoken(...)
-        else if (size_t fPos = lowerCode.find("addtoken"); fPos != std::string::npos) {
+        else if (size_t fPos = FindIgnoreCase(code, "addtoken"); fPos != std::string_view::npos) {
             size_t openP = code.find('(', fPos);
             size_t closeP = code.rfind(')');
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
@@ -260,9 +261,10 @@ std::vector<std::string> GetOstLuaSearchDirectories(const std::string& steamPath
     }
 
     // 2. Executable directory
-    wchar_t exeBuf[32768]{};
+    wchar_t exeBuf[MAX_PATH * 2]{};
     std::string exeDir;
-    if (GetModuleFileNameW(nullptr, exeBuf, static_cast<DWORD>(std::size(exeBuf))) > 0) {
+    DWORD exeLen = GetModuleFileNameW(nullptr, exeBuf, static_cast<DWORD>(std::size(exeBuf)));
+    if (exeLen > 0 && exeLen < std::size(exeBuf)) {
         std::filesystem::path p(exeBuf);
         exeDir = p.parent_path().string();
         if (!exeDir.empty()) {
@@ -288,7 +290,7 @@ std::vector<std::string> GetOstLuaSearchDirectories(const std::string& steamPath
     // 4. opensteamtool.toml configured lua paths
     std::vector<std::string> tomlLocations;
     if (!exeDir.empty()) tomlLocations.push_back(JoinPath(exeDir, "opensteamtool.toml"));
-    if (!cwd.empty() && _stricmp(cwd.c_str(), exeDir.c_str()) != 0) {
+    if (!cwd.empty() && !EqualIgnoreCase(cwd, exeDir)) {
         tomlLocations.push_back(JoinPath(cwd, "opensteamtool.toml"));
     }
     if (!steamPath.empty()) {

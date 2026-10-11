@@ -132,7 +132,7 @@ namespace {
 } // namespace
 
 std::filesystem::path TokenStorage::GetStorageFilePath() {
-    wchar_t localAppData[32768]{0};
+    wchar_t localAppData[MAX_PATH * 2]{0};
     DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, static_cast<DWORD>(std::size(localAppData)));
     if (len == 0 || len >= std::size(localAppData)) {
         PWSTR pPath = nullptr;

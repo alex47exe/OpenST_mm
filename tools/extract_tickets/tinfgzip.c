@@ -101,7 +101,7 @@ int tinf_gzip_uncompress(void *dest, unsigned int *destLen,
 	/* Skip file name if present */
 	if (flg & FNAME) {
 		do {
-			if (start - src >= sourceLen) {
+			if ((unsigned int) (start - src) >= sourceLen) {
 				return TINF_DATA_ERROR;
 			}
 		} while (*start++);
@@ -110,7 +110,7 @@ int tinf_gzip_uncompress(void *dest, unsigned int *destLen,
 	/* Skip file comment if present */
 	if (flg & FCOMMENT) {
 		do {
-			if (start - src >= sourceLen) {
+			if ((unsigned int) (start - src) >= sourceLen) {
 				return TINF_DATA_ERROR;
 			}
 		} while (*start++);
@@ -120,13 +120,13 @@ int tinf_gzip_uncompress(void *dest, unsigned int *destLen,
 	if (flg & FHCRC) {
 		unsigned int hcrc;
 
-		if (start - src > sourceLen - 2) {
+		if ((unsigned int) (start - src) > sourceLen - 2) {
 			return TINF_DATA_ERROR;
 		}
 
 		hcrc = read_le16(start);
 
-		if (hcrc != (tinf_crc32(src, start - src) & 0x0000FFFF)) {
+		if (hcrc != (tinf_crc32(src, (unsigned int) (start - src)) & 0x0000FFFF)) {
 			return TINF_DATA_ERROR;
 		}
 
@@ -152,7 +152,7 @@ int tinf_gzip_uncompress(void *dest, unsigned int *destLen,
 	}
 
 	res = tinf_uncompress(dst, destLen, start,
-	                      (src + sourceLen) - start - 8);
+	                      (unsigned int) ((src + sourceLen) - start - 8));
 
 	if (res != TINF_OK) {
 		return TINF_DATA_ERROR;

@@ -288,14 +288,12 @@ void ParseVdfRecurse(VdfReader& reader,
 
             uint32_t prevDepot = currentDepotId;
             if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack[pathStack.size() - 2], "depots")) {
-                uint32_t parsedId = 0;
-                auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), parsedId);
-                if (ec == std::errc() && parsedId > 0) {
-                    currentDepotId = parsedId;
+                if (auto parsedId = ParseAppId(key)) {
+                    currentDepotId = *parsedId;
                     if (std::none_of(outData.depots.begin(), outData.depots.end(),
-                                     [&](const AppDepotManifest& d) { return d.depotId == parsedId; })) {
-                        outData.depots.push_back({parsedId, "", 0});
-                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", parsedId);
+                                     [&](const AppDepotManifest& d) { return d.depotId == *parsedId; })) {
+                        outData.depots.push_back({*parsedId, "", 0});
+                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", *parsedId);
                     }
                 }
             }
@@ -316,11 +314,8 @@ void ParseVdfRecurse(VdfReader& reader,
                 while (start < val.size()) {
                     size_t comma = val.find(',', start);
                     std::string_view token = (comma == std::string_view::npos) ? val.substr(start) : val.substr(start, comma - start);
-                    token = TrimWhitespace(token);
-                    uint32_t dlcId = 0;
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), dlcId);
-                    if (ec == std::errc() && dlcId > 0) {
-                        recordDlcId(dlcId);
+                    if (auto dlcId = ParseAppId(token)) {
+                        recordDlcId(*dlcId);
                     }
                     if (comma == std::string_view::npos) break;
                     start = comma + 1;
@@ -329,18 +324,16 @@ void ParseVdfRecurse(VdfReader& reader,
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") &&
-                           (val.find("denuvo") != std::string_view::npos || val.find("Denuvo") != std::string_view::npos)) {
+                } else if (EqualIgnoreCase(key, "thirdpartydrm") && FindIgnoreCase(val, "denuvo") != std::string_view::npos) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", "检测到第三方 DRM Denuvo 标记: {}", val);
                 }
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0) {
-                uint32_t dlcId = 0;
-                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), dlcId);
-                if (ec == std::errc() && dlcId > 0) {
-                    recordDlcId(dlcId);
+                if (auto dlcId = ParseAppId(val)) {
+                    recordDlcId(*dlcId);
                 }
-            } else if (EqualIgnoreCase(key, "name") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
+            }
+ else if (EqualIgnoreCase(key, "name") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
                 if (outData.name.empty()) {
                     outData.name = std::string(val);
                     LOG_DEBUG("AppInfoParser", "解析到游戏官方名称: '{}'", outData.name);
@@ -585,14 +578,12 @@ void ParseTextVdfRecurse(
 
             uint32_t nextDepotId = currentDepotId;
             if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "depots")) {
-                uint32_t parsedId = 0;
-                auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), parsedId);
-                if (ec == std::errc() && parsedId > 0) {
-                    nextDepotId = parsedId;
+                if (auto parsedId = ParseAppId(key)) {
+                    nextDepotId = *parsedId;
                     if (std::none_of(outData.depots.begin(), outData.depots.end(),
-                                     [&](const AppDepotManifest& d) { return d.depotId == parsedId; })) {
-                        outData.depots.push_back({parsedId, "", 0});
-                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", parsedId);
+                                     [&](const AppDepotManifest& d) { return d.depotId == *parsedId; })) {
+                        outData.depots.push_back({*parsedId, "", 0});
+                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", *parsedId);
                     }
                 }
             }
@@ -625,11 +616,8 @@ void ParseTextVdfRecurse(
                     std::string_view token = (comma == std::string::npos) ?
                         std::string_view(val).substr(start) :
                         std::string_view(val).substr(start, comma - start);
-                    token = TrimWhitespace(token);
-                    uint32_t dlcId = 0;
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), dlcId);
-                    if (ec == std::errc() && dlcId > 0) {
-                        recordDlcId(currentDepotId, dlcId);
+                    if (auto dlcId = ParseAppId(token)) {
+                        recordDlcId(currentDepotId, *dlcId);
                     }
                     if (comma == std::string::npos) break;
                     start = comma + 1;
@@ -638,16 +626,13 @@ void ParseTextVdfRecurse(
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") &&
-                           (val.find("denuvo") != std::string_view::npos || val.find("Denuvo") != std::string_view::npos)) {
+                } else if (EqualIgnoreCase(key, "thirdpartydrm") && FindIgnoreCase(val, "denuvo") != std::string_view::npos) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", "检测到第三方 DRM Denuvo 标记: {}", val);
                 }
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0) {
-                uint32_t dlcId = 0;
-                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), dlcId);
-                if (ec == std::errc() && dlcId > 0) {
-                    recordDlcId(currentDepotId, dlcId);
+                if (auto dlcId = ParseAppId(val)) {
+                    recordDlcId(currentDepotId, *dlcId);
                 }
             } else if (EqualIgnoreCase(key, "name") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
                 if (outData.name.empty()) {
@@ -747,6 +732,7 @@ std::optional<ParsedAppInfoData> ParseBinaryVdfAppInfo(
 
     if (buffer.empty()) return std::nullopt;
 
+#if EXTRACT_TICKETS_HAS_LOGGING
     std::string hexDump;
     const size_t dumpLen = (std::min<size_t>)(32, buffer.size());
     hexDump.reserve(dumpLen * 3);
@@ -755,6 +741,7 @@ std::optional<ParsedAppInfoData> ParseBinaryVdfAppInfo(
     }
     LOG_DEBUG("AppInfoParser", "开始解析 PICS VDF 数据 (大小: {} 字节, AppID: {}, 前32字节Hex: {})",
               buffer.size(), appId, hexDump);
+#endif
 
     ParsedAppInfoData out;
     out.appId = appId;
