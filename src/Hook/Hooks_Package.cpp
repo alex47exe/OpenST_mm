@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
@@ -48,7 +49,7 @@ namespace {
         [[nodiscard]] const T* operator->() const noexcept { return get(); }
     };
 
-    RESOLVE_FUNC(CUtlMemoryGrow,               void*, CUtlVector<AppId_t>*, int);
+    RESOLVE_FUNC(CUtlMemoryGrow,               void,  CUtlVector<AppId_t>*, int);
     RESOLVE_FUNC(MarkLicenseAsChanged,         int64, void*, uint32, bool);
     RESOLVE_FUNC(ProcessPendingLicenseUpdates, bool,  void*);
 
@@ -69,30 +70,65 @@ namespace {
     constexpr uint64_t kInjectedPkgAccessToken = 10660652434190618804ull;
 
     bool MarkLicenseAsChangedAndProcessUpdates() {
-        void* pUser = g_pCUser.load(std::memory_order_relaxed);
-        if (!pUser || !oMarkLicenseAsChanged || !oProcessPendingLicenseUpdates) {
+        void* pUser = g_pCUser.load(std::memory_order_acquire);
+        const auto fnMark = oMarkLicenseAsChanged;
+        const auto fnProcess = oProcessPendingLicenseUpdates;
+        if (!pUser || !fnMark || !fnProcess) {
             LOG_PACKAGE_WARN("MarkLicenseAsChangedAndProcessUpdates: dependencies not ready, skipping");
             return false;
         }
-        oMarkLicenseAsChanged(pUser, kInjectedPackageId, true);
-        oProcessPendingLicenseUpdates(pUser);
+        fnMark(pUser, kInjectedPackageId, true);
+        fnProcess(pUser);
         LOG_PACKAGE_DEBUG("MarkLicenseAsChangedAndProcessUpdates: marked package {} as changed and processed updates", kInjectedPackageId);
         return true;
     }
 
-    void TryProcessPendingLicenseRefresh() {
-        if (!g_licenseRefreshPending.load(std::memory_order_relaxed))
-            return;
-        if (MarkLicenseAsChangedAndProcessUpdates())
-            g_licenseRefreshPending.store(false, std::memory_order_relaxed);
+    bool TryProcessPendingLicenseRefresh() {
+        if (!g_licenseRefreshPending.exchange(false, std::memory_order_acq_rel)) {
+            return false;
+        }
+        if (!MarkLicenseAsChangedAndProcessUpdates()) {
+            g_licenseRefreshPending.store(true, std::memory_order_release);
+            return false;
+        }
+        return true;
     }
 
-    bool CUtlMemoryGrowWrap(CUtlVector<AppId_t>* pVec, int grow_size) {
-        if (!oCUtlMemoryGrow) {
+    bool CUtlMemoryGrowWrap(CUtlVector<AppId_t>* pVec, uint32 numToAdd) {
+        if (!pVec || numToAdd == 0) {
+            return false;
+        }
+        if (static_cast<int32>(pVec->m_Memory.m_nGrowSize) < 0) {
+            LOG_PACKAGE_WARN("CUtlMemoryGrow: external buffer cannot grow (m_nGrowSize={})",
+                             static_cast<int32>(pVec->m_Memory.m_nGrowSize));
+            return false;
+        }
+        if (numToAdd > (std::numeric_limits<uint32>::max)() - pVec->m_Size) {
+            LOG_PACKAGE_WARN("CUtlMemoryGrow: capacity overflow (size={}, add={})", pVec->m_Size, numToAdd);
+            return false;
+        }
+
+        const uint32 requiredCapacity = pVec->m_Size + numToAdd;
+        if (requiredCapacity > static_cast<uint32>((std::numeric_limits<int>::max)())) {
+            LOG_PACKAGE_WARN("CUtlMemoryGrow: requiredCapacity {} exceeds int32 max", requiredCapacity);
+            return false;
+        }
+
+        const uint32 currentAlloc = pVec->m_Memory.m_pMemory ? pVec->m_Memory.m_nAllocationCount : 0u;
+        if (currentAlloc >= requiredCapacity) {
+            return true;
+        }
+
+        const auto fnGrow = oCUtlMemoryGrow;
+        if (!fnGrow) {
             LOG_PACKAGE_WARN("CUtlMemoryGrow: oCUtlMemoryGrow not ready, cannot grow");
             return false;
         }
-        return oCUtlMemoryGrow(pVec, grow_size);
+
+        const int growDelta = static_cast<int>(requiredCapacity - currentAlloc);
+        fnGrow(pVec, growDelta);
+        return pVec->m_Memory.m_pMemory != nullptr &&
+               pVec->m_Memory.m_nAllocationCount >= requiredCapacity;
     }
 
     [[nodiscard]] bool AppendUniqueAppIdsToPackage(PackageInfo* pPkg,
@@ -125,9 +161,9 @@ namespace {
             return true;
         }
 
-        const uint32 oldSize = pPkg->AppIdVec.m_Size;
+        const uint32 oldSize = existingSize;
         const uint32 numToAdd = static_cast<uint32>(toAdd.size());
-        if (!CUtlMemoryGrowWrap(&pPkg->AppIdVec, static_cast<int>(numToAdd))) {
+        if (!CUtlMemoryGrowWrap(&pPkg->AppIdVec, numToAdd)) {
             return false;
         }
 
@@ -142,45 +178,56 @@ namespace {
     }
 
     bool InitFakeLicenseOnce(PackageInfo* pPkg) {
-        std::lock_guard lock(g_packageInfoMutex);
-        if (g_licenseInitialized.load(std::memory_order_relaxed)) return true;
-
-        // check package status before injecting
-        if (pPkg->Status != EPackageStatus::Available) {
-            LOG_PACKAGE_WARN("InitFakeLicenseOnce: package status is not Available ({}), skipping injection", static_cast<int>(pPkg->Status));
+        if (!pPkg) {
             return false;
         }
 
-        // Inject all depots from config into the fake license. 
-        const std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
-        if (!appIds.empty()) {
-            const uint32 oldSize = pPkg->AppIdVec.m_Size;
-            uint32 addedCount = 0;
-            if (!AppendUniqueAppIdsToPackage(pPkg, appIds, &addedCount)) {
-                LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
+        {
+            std::lock_guard lock(g_packageInfoMutex);
+            if (g_licenseInitialized.load(std::memory_order_relaxed)) {
+                return true;
+            }
+
+            // check package status before injecting
+            if (pPkg->Status != EPackageStatus::Available) {
+                LOG_PACKAGE_WARN("InitFakeLicenseOnce: package status is not Available ({}), skipping injection", static_cast<int>(pPkg->Status));
                 return false;
             }
-            if (addedCount > 0) {
-                LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} apps, oldSize={}", kInjectedPackageId, addedCount, oldSize);
+
+            // Inject all depots from config into the fake license. 
+            const std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
+            if (!appIds.empty()) {
+                const uint32 oldSize = pPkg->AppIdVec.m_Memory.m_pMemory ? pPkg->AppIdVec.m_Size : 0u;
+                uint32 addedCount = 0;
+                if (!AppendUniqueAppIdsToPackage(pPkg, appIds, &addedCount)) {
+                    LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
+                    return false;
+                }
+                if (addedCount > 0) {
+                    LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} apps, oldSize={}", kInjectedPackageId, addedCount, oldSize);
+                }
             }
+
+            g_pInjectedPackageInfo.store(pPkg, std::memory_order_release);
+            g_licenseInitialized.store(true, std::memory_order_release);
+            g_licenseRefreshPending.store(true, std::memory_order_release);
         }
 
-        g_licenseInitialized.store(true, std::memory_order_release);
-        g_licenseRefreshPending.store(true, std::memory_order_relaxed);
         TryProcessPendingLicenseRefresh();
         return true;
     }
 
     bool TryInitFakeLicenseOnce() {
-        if (g_licenseInitialized.load(std::memory_order_relaxed)) return true;
-        if (CAPTURE_READY(GetPackageInfo)) {
-            PackageInfo* pPkg = oGetPackageInfo(g_pCPackageInfo, kInjectedPackageId, kInjectedPkgAccessToken);
+        if (g_licenseInitialized.load(std::memory_order_acquire)) {
+            return true;
+        }
+        void* pPackageMgr = g_pCPackageInfo;
+        const auto fnGetPackageInfo = oGetPackageInfo;
+        if (pPackageMgr && fnGetPackageInfo) {
+            PackageInfo* pPkg = fnGetPackageInfo(pPackageMgr, kInjectedPackageId, kInjectedPkgAccessToken);
             if (!pPkg) {
                 LOG_PACKAGE_WARN("TryInitFakeLicenseOnce: GetPackageInfo returned null for injected package");
                 return false;
-            }
-            if (!g_pInjectedPackageInfo.load(std::memory_order_relaxed)) {
-                g_pInjectedPackageInfo.store(pPkg, std::memory_order_release);
             }
             return InitFakeLicenseOnce(pPkg);
         }
@@ -193,9 +240,11 @@ namespace {
     };
 
     inline LicenseClassification EvaluateOwnership(bool result, const AppOwnership& own) {
+        const bool hasRealPackageId = (own.PackageId != 0) &&
+                                      (own.PackageId != kInjectedPackageId) &&
+                                      (own.PackageId != k_uPackageIdInvalid);
         const bool isSharedLicense = (own.bFamilyShared || own.bBorrowed) &&
-                                     (own.PackageId != 0) &&
-                                     (own.PackageId != kInjectedPackageId) &&
+                                     hasRealPackageId &&
                                      (own.ExistInPackageNums >= 1) &&
                                      !own.bLicenseExpired;
         if (isSharedLicense) {
@@ -203,8 +252,7 @@ namespace {
         }
 
         const bool isTrulyOwned = result &&
-                                  (own.PackageId != 0) &&
-                                  (own.PackageId != kInjectedPackageId) &&
+                                  hasRealPackageId &&
                                   (own.ExistInPackageNums >= 1) &&
                                   own.bOwnsLicense &&
                                   !own.bLicenseExpired &&
@@ -218,6 +266,10 @@ namespace {
     }
 
     inline void RecordLicenseClassification(AppId_t appId, const LicenseClassification& lc) {
+        if (appId == 0 || appId == k_uAppIdInvalid) {
+            return;
+        }
+
         if (lc.isShared) {
             if (g_hasSharedLicenses.load(std::memory_order_acquire)) {
                 std::shared_lock rlock(g_sharedLicensesMutex);
@@ -274,24 +326,31 @@ namespace {
     }
 
     HOOK_FUNC(CheckAppOwnership, bool, void* pObj, AppId_t appId, AppOwnership* pOwn) {
+        const auto origCheckAppOwnership = oCheckAppOwnership;
+        if (!origCheckAppOwnership) {
+            return false;
+        }
+
         void* currentCUser = g_pCUser.load(std::memory_order_acquire);
-        if (currentCUser != pObj) {
-            g_pCUser.store(pObj, std::memory_order_release);
-            LOG_PACKAGE_DEBUG("CheckAppOwnership: captured CUser {}", pObj);
-            if (currentCUser != nullptr) {
-                LuaConfig::ClearOwned();
-                std::unique_lock wlock(g_sharedLicensesMutex);
-                g_sharedLicenses->clear();
-                g_unlicensedApps->clear();
-                g_hasSharedLicenses.store(false, std::memory_order_release);
-                g_hasUnlicensedApps.store(false, std::memory_order_release);
+        if (pObj && currentCUser != pObj) {
+            void* prevCUser = g_pCUser.exchange(pObj, std::memory_order_acq_rel);
+            if (prevCUser != pObj) {
+                LOG_PACKAGE_DEBUG("CheckAppOwnership: captured CUser {}", pObj);
+                if (prevCUser != nullptr) {
+                    LuaConfig::ClearOwned();
+                    std::unique_lock wlock(g_sharedLicensesMutex);
+                    g_sharedLicenses->clear();
+                    g_unlicensedApps->clear();
+                    g_hasSharedLicenses.store(false, std::memory_order_release);
+                    g_hasUnlicensedApps.store(false, std::memory_order_release);
+                }
             }
         }
 
         AppOwnership localOwn{};
         AppOwnership* pEffectiveOwn = pOwn ? pOwn : &localOwn;
 
-        bool result = oCheckAppOwnership(pObj, appId, pEffectiveOwn);
+        bool result = origCheckAppOwnership(pObj, appId, pEffectiveOwn);
         TryInitFakeLicenseOnce();
         TryProcessPendingLicenseRefresh();
 
@@ -361,10 +420,11 @@ namespace {
         }
 
         void* pUser = g_pCUser.load(std::memory_order_acquire);
-        if (!pUser || !oCheckAppOwnership) return {};
+        const auto origCheckAppOwnership = oCheckAppOwnership;
+        if (!pUser || !origCheckAppOwnership) return {};
 
         AppOwnership own{};
-        bool result = oCheckAppOwnership(pUser, appId, &own);
+        bool result = origCheckAppOwnership(pUser, appId, &own);
         const auto lc = EvaluateOwnership(result, own);
         RecordLicenseClassification(appId, lc);
         return lc;
@@ -401,7 +461,7 @@ namespace Hooks_Package {
             return;
         }
 
-        // ── Remove depots that were unloaded ──
+        // ── Compute net additions & removals against current LuaConfig state ──
         std::vector<AppId_t> removals = LuaConfig::TakePendingRemovals();
         std::vector<AppId_t> additions = LuaConfig::TakePendingAdditions();
         uint32_t removedCount = 0;
@@ -412,26 +472,45 @@ namespace Hooks_Package {
             addedIds.reserve(additions.size());
             uniqueAdditions.reserve(additions.size());
             for (AppId_t id : additions) {
-                if (addedIds.insert(id).second) {
+                if (id != 0 && id != k_uAppIdInvalid &&
+                    !addedIds.contains(id) &&
+                    LuaConfig::HasDepot(id, false)) {
+                    addedIds.insert(id);
                     uniqueAdditions.push_back(id);
+                }
+            }
+        }
+
+        std::vector<AppId_t> netRemovals;
+        if (!removals.empty()) {
+            std::unordered_set<AppId_t> seenRemovals;
+            seenRemovals.reserve(removals.size());
+            netRemovals.reserve(removals.size());
+            for (AppId_t id : removals) {
+                if (id != 0 && id != k_uAppIdInvalid &&
+                    !addedIds.contains(id) &&
+                    seenRemovals.insert(id).second &&
+                    !LuaConfig::HasDepot(id, false)) {
+                    netRemovals.push_back(id);
                 }
             }
         }
 
         {
             std::lock_guard lock(g_packageInfoMutex);
-            LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} removals", removals.size());
-            for (AppId_t id : removals) {
-                while (pPkg->AppIdVec.FindAndFastRemove(id)) {
-                    ++removedCount;
-                    LOG_PACKAGE_DEBUG("NotifyLicenseChanged: removed AppId {}", id);
+            LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} net removals (from {} raw)", netRemovals.size(), removals.size());
+            if (pPkg->AppIdVec.m_Memory.m_pMemory) {
+                for (AppId_t id : netRemovals) {
+                    while (pPkg->AppIdVec.FindAndFastRemove(id)) {
+                        ++removedCount;
+                        LOG_PACKAGE_DEBUG("NotifyLicenseChanged: removed AppId {}", id);
+                    }
                 }
             }
 
             // ── Add depots that are newly loaded ──
-            LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} additions", additions.size());
+            LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} additions", uniqueAdditions.size());
             if (!uniqueAdditions.empty()) {
-                Hooks_SteamUI::QueueAdditions(uniqueAdditions);
                 uint32 addedToPkgCount = 0;
                 if (!AppendUniqueAppIdsToPackage(pPkg, uniqueAdditions, &addedToPkgCount)) {
                     LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow AppId vector for additions");
@@ -439,30 +518,35 @@ namespace Hooks_Package {
             }
         }
 
-        if (addedIds.empty() && removals.empty()) {
+        if (!uniqueAdditions.empty()) {
+            Hooks_SteamUI::QueueAdditions(uniqueAdditions);
+        }
+
+        if (uniqueAdditions.empty() && netRemovals.empty()) {
             LOG_PACKAGE_DEBUG("NotifyLicenseChanged: no changes");
             return;
         }
 
         // Mark package 0 as changed and trigger library refresh.
-        if (!MarkLicenseAsChangedAndProcessUpdates()) {
-            LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to mark license as changed");
+        g_licenseRefreshPending.store(true, std::memory_order_release);
+        if (!TryProcessPendingLicenseRefresh()) {
+            LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to mark license as changed, refresh pending");
         } else {
-            LOG_PACKAGE_INFO("NotifyLicenseChanged: {} added, {} removed", addedIds.size(), removedCount);
+            LOG_PACKAGE_INFO("NotifyLicenseChanged: {} added, {} removed", uniqueAdditions.size(), removedCount);
         }
 
         // Queue UI removals for the main-thread RunFrame hook to drain.
         // Never touch MarkAppChange from this (FileWatcher) thread.
-        std::unordered_set<AppId_t> queuedRemovals;
-        for (AppId_t id : removals) {
-            // ParseFile unloads the old file before parsing the replacement.
-            // Do not queue that transient removal when the id was added again.
-            if (!addedIds.contains(id) && !Hooks_Package::HasValidLicense(id) && queuedRemovals.insert(id).second) {
+        size_t queuedRemovalCount = 0;
+        for (AppId_t id : netRemovals) {
+            if (!Hooks_Package::HasValidLicense(id)) {
                 Hooks_SteamUI::QueueRemoval(id);
+                ++queuedRemovalCount;
             }
         }
+        (void)queuedRemovalCount;
         LOG_PACKAGE_DEBUG("NotifyLicenseChanged: queued {} UI removals, skipped {} transient removals",
-                          queuedRemovals.size(), removals.size() - queuedRemovals.size());
+                          queuedRemovalCount, removals.size() - queuedRemovalCount);
     }
 
     bool IsAppTrulyOwned(AppId_t appId) {
