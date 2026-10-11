@@ -70,30 +70,52 @@ public:
 
         ::DisableThreadLibraryCalls(hModule);
 
-        wchar_t exePath[MAX_PATH];
-        const DWORD len = ::GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        if (len > 0 && len < MAX_PATH) {
-            const std::wstring_view fullPath(exePath, len);
-            const auto lastSlash = fullPath.find_last_of(L"\\/");
-            const std::wstring_view exeName = (lastSlash != std::wstring_view::npos)
-                ? fullPath.substr(lastSlash + 1)
-                : fullPath;
+        if (targetHost.empty() || payloadDll.empty()) {
+            return TRUE;
+        }
 
-            // If not target host, allow the proxy DLL to load peacefully without injecting
-            if (!EqualIgnoreCase(exeName, targetHost)) {
-                return TRUE;
+        constexpr DWORD kPathBufCapacity = 1024;
+        wchar_t pathBuf[kPathBufCapacity];
+        const DWORD exeLen = ::GetModuleFileNameW(nullptr, pathBuf, kPathBufCapacity);
+        if (exeLen == 0 || exeLen >= kPathBufCapacity) {
+            return TRUE;
+        }
+
+        const std::wstring_view fullExePath(pathBuf, exeLen);
+        const auto lastSlash = fullExePath.find_last_of(L"\\/");
+        const std::wstring_view exeName = (lastSlash != std::wstring_view::npos)
+            ? fullExePath.substr(lastSlash + 1)
+            : fullExePath;
+
+        // If not target host, allow the proxy DLL to load peacefully without injecting
+        if (!EqualIgnoreCase(exeName, targetHost)) {
+            return TRUE;
+        }
+
+        // Host is verified: prefer loading payload from the proxy DLL's own directory
+        // to avoid CWD drift or DLL search-order hijacking.
+        HMODULE hPayload = nullptr;
+        const DWORD modLen = ::GetModuleFileNameW(hModule, pathBuf, kPathBufCapacity);
+        if (modLen > 0 && modLen < kPathBufCapacity) {
+            const std::wstring_view fullModPath(pathBuf, modLen);
+            const auto modSlash = fullModPath.find_last_of(L"\\/");
+            if (modSlash != std::wstring_view::npos) {
+                const size_t dirLen = modSlash + 1;
+                if (payloadDll.size() < kPathBufCapacity - dirLen) {
+                    std::char_traits<wchar_t>::copy(pathBuf + dirLen, payloadDll.data(), payloadDll.size());
+                    pathBuf[dirLen + payloadDll.size()] = L'\0';
+                    hPayload = ::LoadLibraryW(pathBuf);
+                }
             }
         }
 
-        // Host is verified: inject payload DLL
-        // Windows loader guarantees that LoadLibraryW on the same module in the same process
-        // runs DllMain only once, ensuring thread-safe idempotent injection.
-        if (payloadDll.empty() || payloadDll.size() >= MAX_PATH) {
-            return FALSE;
+        if (!hPayload && payloadDll.size() < kPathBufCapacity) {
+            std::char_traits<wchar_t>::copy(pathBuf, payloadDll.data(), payloadDll.size());
+            pathBuf[payloadDll.size()] = L'\0';
+            ::LoadLibraryW(pathBuf);
         }
-        std::char_traits<wchar_t>::copy(exePath, payloadDll.data(), payloadDll.size());
-        exePath[payloadDll.size()] = L'\0';
-        return ::LoadLibraryW(exePath) != nullptr ? TRUE : FALSE;
+
+        return TRUE;
     }
 };
 
