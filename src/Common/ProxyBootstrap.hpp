@@ -5,9 +5,6 @@
 #endif
 #include <windows.h>
 
-#include <cwctype>
-#include <filesystem>
-#include <string>
 #include <string_view>
 
 namespace OST::Proxy {
@@ -20,21 +17,29 @@ namespace OST::Proxy {
 class SystemDllLoader {
 public:
     [[nodiscard]] static HMODULE Load(std::wstring_view dllName) noexcept {
-        wchar_t sysDir[MAX_PATH];
-        const UINT len = ::GetSystemDirectoryW(sysDir, MAX_PATH);
+        if (dllName.empty()) {
+            return nullptr;
+        }
+
+        wchar_t fullPath[MAX_PATH];
+        const UINT len = ::GetSystemDirectoryW(fullPath, MAX_PATH);
         if (len == 0 || len >= MAX_PATH) {
             return nullptr;
         }
 
-        std::wstring fullPath;
-        fullPath.reserve(static_cast<size_t>(len) + 1 + dllName.size());
-        fullPath.append(sysDir, len);
-        if (fullPath.back() != L'\\') {
-            fullPath.push_back(L'\\');
+        size_t pos = static_cast<size_t>(len);
+        if (fullPath[pos - 1] != L'\\' && fullPath[pos - 1] != L'/') {
+            fullPath[pos++] = L'\\';
         }
-        fullPath.append(dllName);
 
-        return ::LoadLibraryExW(fullPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (dllName.size() >= MAX_PATH - pos) {
+            return nullptr;
+        }
+
+        std::char_traits<wchar_t>::copy(fullPath + pos, dllName.data(), dllName.size());
+        fullPath[pos + dllName.size()] = L'\0';
+
+        return ::LoadLibraryExW(fullPath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     }
 };
 
@@ -44,10 +49,14 @@ public:
  */
 class Bootstrap {
 public:
-    [[nodiscard]] static bool EqualIgnoreCase(std::wstring_view a, std::wstring_view b) noexcept {
+    [[nodiscard]] static constexpr wchar_t ToLowerAscii(wchar_t ch) noexcept {
+        return (ch >= L'A' && ch <= L'Z') ? static_cast<wchar_t>(ch + (L'a' - L'A')) : ch;
+    }
+
+    [[nodiscard]] static constexpr bool EqualIgnoreCase(std::wstring_view a, std::wstring_view b) noexcept {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); ++i) {
-            if (towlower(a[i]) != towlower(b[i])) {
+            if (ToLowerAscii(a[i]) != ToLowerAscii(b[i])) {
                 return false;
             }
         }
@@ -79,8 +88,12 @@ public:
         // Host is verified: inject payload DLL
         // Windows loader guarantees that LoadLibraryW on the same module in the same process
         // runs DllMain only once, ensuring thread-safe idempotent injection.
-        std::wstring payload(payloadDll);
-        return ::LoadLibraryW(payload.c_str()) != nullptr ? TRUE : FALSE;
+        if (payloadDll.empty() || payloadDll.size() >= MAX_PATH) {
+            return FALSE;
+        }
+        std::char_traits<wchar_t>::copy(exePath, payloadDll.data(), payloadDll.size());
+        exePath[payloadDll.size()] = L'\0';
+        return ::LoadLibraryW(exePath) != nullptr ? TRUE : FALSE;
     }
 };
 
