@@ -78,9 +78,6 @@ public:
     // Promotes a validated fast CDN server to the head of the cached server list
     static void PromoteWorkingCdnServer(std::string_view server);
 
-    // Queries official Steam Store API for drm_notice and caches the result
-    [[nodiscard]] static bool DetectDenuvoFromStore(uint32_t appId);
-
     using ProgressCallback = std::function<void(std::string_view stage, size_t current, size_t total, uint32_t depotId)>;
 
     // High-level extraction pipeline for a single target AppID
@@ -105,6 +102,15 @@ private:
         uint32_t timeoutMs = 8000,
         int32_t* outEResult = nullptr,
         uint64_t expectedJobId = 0);
+    [[nodiscard]] bool SendAndReceiveWithRetry(
+        ESteamMsg reqEMsg,
+        const ProtoWriter& reqBody,
+        uint32_t respEMsg,
+        std::vector<uint8_t>& outBody,
+        uint32_t timeoutMs = 8000,
+        int32_t* outEResult = nullptr,
+        std::string_view targetJobName = {},
+        uint64_t* outJobId = nullptr);
     void UnpackMultiMsg(std::span<const uint8_t> bodySpan);
 
     struct QueuedMsg {
@@ -157,8 +163,10 @@ private:
     uint64_t m_nextJobId{100};
     int32_t m_clientSessionId{0};
     uint32_t m_cellId{0};
+    uint32_t m_playingAppId{0};
     int32_t m_lastLogonEResult{1};
     bool m_isLoggedOn{false};
+    bool m_reconnecting{false};
 };
 
 } // namespace OST::ExtractTickets

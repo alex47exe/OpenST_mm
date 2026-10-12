@@ -40,6 +40,10 @@ namespace OST::ExtractTickets {
     return std::string_view::npos;
 }
 
+[[nodiscard]] constexpr bool ContainsIgnoreCase(std::string_view haystack, std::string_view needle) noexcept {
+    return FindIgnoreCase(haystack, needle) != std::string_view::npos;
+}
+
 [[nodiscard]] std::string_view TrimWhitespace(std::string_view str) noexcept;
 [[nodiscard]] bool IsDecimal(std::string_view value) noexcept;
 [[nodiscard]] bool IsValidManifestId(std::string_view value) noexcept;

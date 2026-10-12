@@ -80,6 +80,12 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(ExtractingOnlineTitle, "Extracting Online Credentials", "在线凭据提取中", "Extrayendo Credenciales En Línea") \
     M(ExtractingOnlineMsg1, "Requesting ownership tickets and decryption keys from Steam...", "正在向 Steam 请求所有权票据与解密密钥...", "Solicitando tickets de propiedad y claves a Steam...") \
     M(ExtractingOnlineMsg2, "Target App: {} ({})", "目标游戏: {} ({})", "Juego Objetivo: {} ({})") \
+    M(ExtractingStageTickets, "Requesting ownership & encrypted tickets (AppOwnershipTicket / eticket)...", "正在向 Steam 请求所有权与加密授权票据...", "Solicitando tickets de propiedad y autorización cifrada...") \
+    M(ExtractingStageMeta, "Querying product metadata & DLC list from Steam CM (PICS)...", "正在向 Steam CM 查询产品与 DLC 结构元数据 (PICS)...", "Consultando metadatos y lista de DLCs desde PICS...") \
+    M(ExtractingStageKeys, "Querying depot decryption keys and licenses from Steam CM...", "正在向 Steam CM 查询 Depot 解密密钥与授权...", "Consultando claves de descifrado y licencias de Depot...") \
+    M(ExtractingStageTokens, "Querying 64-bit PICS Access Tokens...", "正在查询 64 位 PICS 访问令牌 (Access Token)...", "Consultando tokens de acceso PICS de 64 bits...") \
+    M(ExtractingStageManifests, "Pulling official depot manifests (.manifest)...", "正在并发拉取官方清单文件 (.manifest)...", "Descargando manifiestos oficiales (.manifest)...") \
+    M(ExtractingStageComplete, "Online credential chain extraction completed!", "在线凭据链提取完成！", "¡Extracción de credenciales completada!") \
     M(ExtractingManifestProgress, "Downloading manifests: [{}/{}] (Depot {})", "正在下载官方清单: [{}/{}] (Depot {})", "Descargando manifiestos: [{}/{}] (Depot {})") \
     M(ExtractingManifestsDone, "All official manifests downloaded successfully", "官方清单文件已全部下载就绪", "Todos los manifiestos descargados con éxito") \
     M(ExtractSuccessTitle, "Extraction Complete", "提取完成", "Extracción Completada") \
@@ -326,6 +332,7 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(LogCmReconnectedResending, "Connection restored, resending eMsg: {} (jobId={})...", "连接已成功恢复，正在重发 eMsg: {} (jobId={})...", "Conexión restablecida, reenviando eMsg: {} (jobId={})...") \
     M(LogCmUnpackMultiFailed, "Failed to decompress CMsgMulti (res={}, size_unzipped={}, compressed_len={})", "解压 CMsgMulti 失败 (res={}, size_unzipped={}, compressed_len={})", "Error al descomprimir CMsgMulti (res={}, size_unzipped={}, compressed_len={})") \
     M(LogCmMultiSubMsg, "  -> CMsgMulti sub-message: eMsg {} (EResult: {}, targetJobId: {}, Body: {} bytes)", "  -> CMsgMulti 内部消息: eMsg {} (EResult: {}, targetJobId: {}, Body: {} 字节)", "  -> Submensaje CMsgMulti: eMsg {} (EResult: {}, targetJobId: {}, Body: {} bytes)") \
+    M(LogCmClientLoggedOff, "Steam CM notified client logged off (eMsg 757, EResult: {})", "Steam CM 下发客户端注销通知 (eMsg 757, EResult: {})", "Steam CM notificó desconexión del cliente (eMsg 757, EResult: {})") \
     M(LogCmWaitMsgTimeout, "Timed out waiting for eMsg {} (jobId={}) response ({}ms)", "等待 eMsg {} (jobId={}) 响应超时 ({}ms)", "Tiempo de espera agotado para respuesta eMsg {} (jobId={}) ({}ms)") \
     M(LogCmRecvEMsg, "Received eMsg: {} (EResult: {}, targetJobId: {}, Body: {} bytes)", "收到 eMsg: {} (EResult: {}, targetJobId: {}, Body: {} 字节)", "Recibido eMsg: {} (EResult: {}, targetJobId: {}, Body: {} bytes)") \
     M(LogCmMissingTokens, "Missing login tokens (both refreshToken and accessToken are empty)", "缺少登录令牌 (refreshToken / accessToken 均为空)", "Faltan tokens de inicio de sesión (refreshToken y accessToken están vacíos)") \

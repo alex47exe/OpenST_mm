@@ -700,6 +700,7 @@ void OnlineSession::RunInSessionExtraction(
         TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::ConnectingRefreshingMsg), innerW, "\x1b[1;33m");
         std::cout.flush();
         std::string newRefreshToken;
+        // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
         auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
         if (!accessOpt || accessOpt->empty()) {
             accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken, &newRefreshToken);
@@ -735,6 +736,7 @@ void OnlineSession::RunInSessionExtraction(
     auto games = authService.FetchOwnedGames(curSteamId, curAccessToken, &cmClient);
     if (games.empty() && !curRefreshToken.empty()) {
         std::string newRefreshToken;
+        // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
         auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
         if (!accessOpt || accessOpt->empty()) {
             accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken, &newRefreshToken);
@@ -995,15 +997,34 @@ void OnlineSession::RunInSessionExtraction(
                 std::cout.flush();
 
                 auto progressCallback = [&](std::string_view stage, size_t current, size_t total, uint32_t depotId) {
-                    if (stage == "manifest" && total > 0) {
+                    if (stage == "tickets") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageTickets), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "meta") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageMeta), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "keys") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageKeys), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "tokens") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageTokens), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "manifests_start") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageManifests), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "manifest" && total > 0) {
                         std::string progStr = TR_FMT(MsgKey::ExtractingManifestProgress, current, total, depotId);
                         TuiEngine::PrintBounded(eTop + 4, eLeft + 4, progStr, eInnerW, "\x1b[1;33m");
                         TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), current, total, std::format("Depot {}", depotId));
                         std::cout.flush();
                     } else if (stage == "done") {
-                        TuiEngine::PrintBounded(eTop + 4, eLeft + 4, TR(MsgKey::ExtractingManifestsDone), eInnerW, "\x1b[1;32m");
-                        TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), total, total, TR(MsgKey::ProgressDone));
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageComplete), eInnerW, "\x1b[1;32m");
+                        if (total > 0) {
+                            TuiEngine::PrintBounded(eTop + 4, eLeft + 4, TR(MsgKey::ExtractingManifestsDone), eInnerW, "\x1b[1;32m");
+                            TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), total, total, TR(MsgKey::ProgressDone));
+                        }
                         std::cout.flush();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                 };
 
@@ -1146,6 +1167,7 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
             int64_t exp = GetJwtExpiration(activeToken);
             if ((activeToken.empty() || (exp > 0 && exp <= std::time(nullptr) + 300)) && !activeRefreshToken.empty()) {
                 std::string newRefreshToken;
+                // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
                 auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
                 if (!accessOpt || accessOpt->empty()) {
                     accessOpt = authService.RefreshAccessToken(curSteamId, activeRefreshToken, &newRefreshToken);

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -33,16 +34,6 @@ namespace {
     std::vector<std::string> s_cachedCdnServers;
     std::mutex s_cdnMutex;
 
-    std::string FetchAppNameFromStore(uint32_t appId, WinHttpTransport* httpPtr = nullptr) {
-        WinHttpTransport localHttp;
-        WinHttpTransport& http = httpPtr ? *httpPtr : localHttp;
-        HttpResponse resp = http.Get(std::format("https://store.steampowered.com/api/appdetails?appids={}&filters=basic&l={}",
-                                                  appId, I18n::GetSteamLanguageCode()));
-        if (!resp.IsSuccess()) return "";
-        auto nameOpt = JsonHelper::GetString(resp.body, "name");
-        return nameOpt.value_or("");
-    }
-
     std::vector<std::string> s_cachedCmList;
     std::mutex s_cmListMutex;
 
@@ -64,7 +55,7 @@ namespace {
         std::vector<std::string> endpoints;
         WinHttpTransport http;
         LOG_DEBUG("SteamCM", MsgKey::LogCmQueryingCmList);
-        HttpResponse resp = http.Get("https://api.steampowered.com/ISteamDirectory/GetCMList/v1/?cellid=0");
+        HttpResponse resp = http.Get("https://api.steampowered.com/ISteamDirectory/GetCMList/v1/?cellid=0", {}, 6000);
         if (resp.IsSuccess()) {
             auto list = JsonHelper::GetStringArray(resp.body, "serverlist_websockets");
             for (const auto& item : list) {
@@ -114,6 +105,7 @@ void SteamCmClient::Disconnect() {
     }
     m_msgQueue.clear();
     m_clientSessionId = 0;
+    m_playingAppId = 0;
     m_isLoggedOn = false;
 }
 
@@ -129,7 +121,7 @@ bool SteamCmClient::SendProtoMsg(ESteamMsg eMsg, const ProtoWriter& body, uint64
 
     LOG_TRACE("SteamCM", MsgKey::LogCmSendingEMsg, static_cast<uint32_t>(eMsg), packet.size());
     if (!m_ws.Send(packet, true)) {
-        if (eMsg != ESteamMsg::ClientLogon) {
+        if (eMsg != ESteamMsg::ClientLogon && !m_reconnecting) {
             LOG_WARN("SteamCM", MsgKey::LogCmSendFailedReconnecting, static_cast<uint32_t>(eMsg));
             m_ws.Close();
             m_isLoggedOn = false;
@@ -161,6 +153,12 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
 
     if (messageBody.empty()) return;
 
+    constexpr uint32_t kMaxMultiUnzippedSize = 64 * 1024 * 1024;
+    if (sizeUnzipped > kMaxMultiUnzippedSize) {
+        LOG_ERROR("SteamCM", MsgKey::LogCmUnpackMultiFailed, -1, sizeUnzipped, messageBody.size());
+        return;
+    }
+
     std::vector<uint8_t> payload;
     ScopedBufferWiper payloadWiper{payload};
     if (sizeUnzipped > 0) {
@@ -175,8 +173,10 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
             destLen = sizeUnzipped;
             res = tinf_uncompress(payload.data(), &destLen, messageBody.data(), static_cast<unsigned int>(messageBody.size()));
         }
-        while (res == TINF_BUF_ERROR && payload.size() < 64 * 1024 * 1024) {
-            destLen = static_cast<unsigned int>(payload.size() * 2);
+        while (res == TINF_BUF_ERROR && payload.size() < kMaxMultiUnzippedSize) {
+            const size_t nextSize = std::min<size_t>(payload.size() * 2, kMaxMultiUnzippedSize);
+            if (nextSize <= payload.size()) break;
+            destLen = static_cast<unsigned int>(nextSize);
             SecureWipeBuffer(payload);
             payload.resize(destLen);
             if (messageBody.size() >= 2 && messageBody[0] == 0x1F && messageBody[1] == 0x8B) {
@@ -193,9 +193,14 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
         }
         payload.resize(destLen);
     } else {
+        if (messageBody.size() > kMaxMultiUnzippedSize) {
+            LOG_ERROR("SteamCM", MsgKey::LogCmUnpackMultiFailed, -1, 0, messageBody.size());
+            return;
+        }
         payload.assign(messageBody.begin(), messageBody.end());
     }
 
+    constexpr size_t kMaxMsgQueueDepth = 512;
     size_t offset = 0;
     while (offset + 4 <= payload.size()) {
         uint32_t subSize = 0;
@@ -220,12 +225,25 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
             LOG_TRACE("SteamCM", MsgKey::LogCmMultiSubMsg,
                       subEMsg, hdr.eresult, hdr.targetJobId, subBody.size());
 
+            if (subEMsg == static_cast<uint32_t>(ESteamMsg::ClientLoggedOff)) {
+                int32_t offEresult = 0;
+                ProtoReader offR(subBody);
+                ProtoField offF;
+                while (offR.ReadNext(offF)) {
+                    if (offF.fieldNumber == 1) offEresult = static_cast<int32_t>(offF.varintVal);
+                }
+                LOG_WARN("SteamCM", MsgKey::LogCmClientLoggedOff, offEresult);
+            }
+
             if (subEMsg == static_cast<uint32_t>(ESteamMsg::ClientHeartBeat)) {
                 ProtoWriter hb;
                 (void)SendProtoMsg(ESteamMsg::ClientHeartBeat, hb);
                 continue;
             }
 
+            if (m_msgQueue.size() >= kMaxMsgQueueDepth) {
+                m_msgQueue.erase(m_msgQueue.begin());
+            }
             m_msgQueue.emplace_back(subEMsg, hdr.targetJobId, hdr.eresult, std::vector<uint8_t>(subBody.begin(), subBody.end()));
         }
     }
@@ -246,6 +264,8 @@ bool SteamCmClient::ReadMatchingMsg(
         if (expectedJobId != 0 && targetJobId != 0 && targetJobId != expectedJobId) return false;
         return true;
     };
+
+    constexpr size_t kMaxMsgQueueDepth = 512;
 
     while (true) {
         // 1. Check if expected message already in queue
@@ -290,6 +310,16 @@ bool SteamCmClient::ReadMatchingMsg(
             LOG_TRACE("SteamCM", MsgKey::LogCmRecvEMsg,
                       eMsg, hdr.eresult, hdr.targetJobId, bodySpan.size());
 
+            if (eMsg == static_cast<uint32_t>(ESteamMsg::ClientLoggedOff)) {
+                int32_t offEresult = 0;
+                ProtoReader offR(bodySpan);
+                ProtoField offF;
+                while (offR.ReadNext(offF)) {
+                    if (offF.fieldNumber == 1) offEresult = static_cast<int32_t>(offF.varintVal);
+                }
+                LOG_WARN("SteamCM", MsgKey::LogCmClientLoggedOff, offEresult);
+            }
+
             // If heartbeat request from server, reply ClientHeartBeat
             if (eMsg == static_cast<uint32_t>(ESteamMsg::ClientHeartBeat)) {
                 ProtoWriter hb;
@@ -317,9 +347,45 @@ bool SteamCmClient::ReadMatchingMsg(
                 return true;
             }
 
+            if (m_msgQueue.size() >= kMaxMsgQueueDepth) {
+                m_msgQueue.erase(m_msgQueue.begin());
+            }
             m_msgQueue.emplace_back(eMsg, hdr.targetJobId, hdr.eresult, std::vector<uint8_t>(bodySpan.begin(), bodySpan.end()));
         }
     }
+}
+
+bool SteamCmClient::SendAndReceiveWithRetry(
+    ESteamMsg reqEMsg,
+    const ProtoWriter& reqBody,
+    uint32_t respEMsg,
+    std::vector<uint8_t>& outBody,
+    uint32_t timeoutMs,
+    int32_t* outEResult,
+    std::string_view targetJobName,
+    uint64_t* outJobId) {
+
+    uint64_t jobId = ++m_nextJobId;
+    if (outJobId) *outJobId = jobId;
+
+    if (SendProtoMsg(reqEMsg, reqBody, jobId, targetJobName)) {
+        if (ReadMatchingMsg(respEMsg, outBody, timeoutMs, outEResult, jobId)) {
+            return true;
+        }
+    }
+
+    // If the WebSocket closed during send or receive (e.g. half-closed idle keep-alive socket), reconnect and retry once
+    if (!m_ws.IsConnected() && !m_reconnecting) {
+        m_isLoggedOn = false;
+        if (EnsureConnected()) {
+            jobId = ++m_nextJobId;
+            if (outJobId) *outJobId = jobId;
+            if (SendProtoMsg(reqEMsg, reqBody, jobId, targetJobName)) {
+                return ReadMatchingMsg(respEMsg, outBody, timeoutMs, outEResult, jobId);
+            }
+        }
+    }
+    return false;
 }
 
 bool SteamCmClient::ConnectAndLogon(uint64_t steamId, std::string_view refreshToken, std::string_view accessToken) {
@@ -361,14 +427,16 @@ bool SteamCmClient::ConnectAndLogon(uint64_t steamId, std::string_view refreshTo
         LOG_DEBUG("SteamCM", MsgKey::LogCmConnectingNode, i + 1, tryLimit, wsUrl);
 
         if (TuiEngine::IsActive()) {
-            int w = 80, h = 25;
-            TuiEngine::GetScreenSize(w, h);
-            const int modalW = std::clamp(w - 12, 64, 84);
-            const int modalH = 6;
-            const int top = (h - modalH) / 2, left = (w - modalW) / 2;
-            std::string connMsg = TR_FMT(MsgKey::ConnectingNodeProgress, i + 1, tryLimit);
-            TuiEngine::PrintBounded(top + 2, left + 4, connMsg, static_cast<size_t>(modalW - 8), "\x1b[1;36m");
-            std::cout.flush();
+            if (!m_reconnecting) {
+                int w = 80, h = 25;
+                TuiEngine::GetScreenSize(w, h);
+                const int modalW = std::clamp(w - 12, 64, 84);
+                const int modalH = 6;
+                const int top = (h - modalH) / 2, left = (w - modalW) / 2;
+                std::string connMsg = TR_FMT(MsgKey::ConnectingNodeProgress, i + 1, tryLimit);
+                TuiEngine::PrintBounded(top + 2, left + 4, connMsg, static_cast<size_t>(modalW - 8), "\x1b[1;36m");
+                std::cout.flush();
+            }
         } else {
             std::cout << TR_FMT(MsgKey::CliConnectingServer, i + 1, tryLimit, endpoint) << "\n";
         }
@@ -402,6 +470,7 @@ bool SteamCmClient::ConnectAndLogon(uint64_t steamId, std::string_view refreshTo
         }
 
         std::vector<uint8_t> respBody;
+        ScopedBufferWiper respWiper{respBody};
         if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientLogonResponse), respBody, 5000)) {
             LOG_WARN("SteamCM", MsgKey::LogCmLogonTimeout, endpoint);
             Disconnect();
@@ -464,6 +533,10 @@ bool SteamCmClient::ConnectAndLogon(uint64_t steamId, std::string_view refreshTo
     }
 
     if (!logonSuccess) {
+        {
+            std::lock_guard lock(s_cmListMutex);
+            s_cachedCmList.clear();
+        }
         LOG_ERROR("SteamCM", MsgKey::LogCmAllNodesFailed);
         Disconnect();
         return false;
@@ -486,9 +559,20 @@ void SteamCmClient::SetRefreshToken(std::string_view token) {
 
 bool SteamCmClient::EnsureConnected() {
     if (IsConnected()) return true;
+    if (m_reconnecting) return false;
     if (m_refreshToken.empty() && m_accessToken.empty()) return false;
+
+    m_reconnecting = true;
+    struct ReconnectGuard {
+        bool& flag;
+        ~ReconnectGuard() noexcept { flag = false; }
+    } guard{m_reconnecting};
+
     LOG_INFO("SteamCM", MsgKey::LogCmAutoReconnecting);
-    return ConnectAndLogon(m_steamId, m_refreshToken, m_accessToken);
+    if (!ConnectAndLogon(m_steamId, m_refreshToken, m_accessToken)) {
+        return false;
+    }
+    return true;
 }
 
 std::optional<std::string> SteamCmClient::RefreshAccessTokenViaCm(std::string* outNewRefreshToken) {
@@ -526,8 +610,8 @@ std::optional<std::string> SteamCmClient::RefreshAccessTokenViaCm(std::string* o
     std::vector<uint8_t> respBody;
     ScopedBufferWiper respWiper{respBody};
     int32_t rpcResult = 2;
-    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodResponse), respBody, 5000, &rpcResult, jobId) &&
-        !ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodSendToClient), respBody, 2000, &rpcResult, jobId)) {
+    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodResponse), respBody, 1500, &rpcResult, jobId) &&
+        !ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodSendToClient), respBody, 500, &rpcResult, jobId)) {
         LOG_WARN("SteamCM", MsgKey::LogCmRefreshRpcTimeout);
         return std::nullopt;
     }
@@ -581,15 +665,15 @@ std::optional<std::vector<uint8_t>> SteamCmClient::RequestAppOwnershipTicket(uin
     ProtoWriter body;
     body.WriteUInt32(1, appId); // app_id = 1
 
-    const uint64_t jobId = ++m_nextJobId;
-    if (!SendProtoMsg(ESteamMsg::ClientGetAppOwnershipTicket, body, jobId)) {
-        return std::nullopt;
-    }
-
     std::vector<uint8_t> respBody;
     ScopedBufferWiper respWiper{respBody};
     // Expected response eMsg is 858 (CMsgClientGetAppOwnershipTicketResponse)
-    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientGetAppOwnershipTicketResponse), respBody, 8000, nullptr, jobId)) {
+    if (!SendAndReceiveWithRetry(
+            ESteamMsg::ClientGetAppOwnershipTicket,
+            body,
+            static_cast<uint32_t>(ESteamMsg::ClientGetAppOwnershipTicketResponse),
+            respBody,
+            8000)) {
         return std::nullopt;
     }
 
@@ -624,14 +708,14 @@ std::optional<std::vector<uint8_t>> SteamCmClient::RequestEncryptedAppTicket(uin
     ProtoWriter body;
     body.WriteUInt32(1, appId); // app_id = 1
 
-    const uint64_t jobId = ++m_nextJobId;
-    if (!SendProtoMsg(ESteamMsg::ClientRequestEncryptedAppTicket, body, jobId)) {
-        return std::nullopt;
-    }
-
     std::vector<uint8_t> respBody;
     ScopedBufferWiper respWiper{respBody};
-    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientRequestEncryptedAppTicketResponse), respBody, 8000, nullptr, jobId)) {
+    if (!SendAndReceiveWithRetry(
+            ESteamMsg::ClientRequestEncryptedAppTicket,
+            body,
+            static_cast<uint32_t>(ESteamMsg::ClientRequestEncryptedAppTicketResponse),
+            respBody,
+            2500)) {
         return std::nullopt;
     }
 
@@ -684,14 +768,14 @@ std::vector<DepotKeyInfo> SteamCmClient::RequestDepotKeys(uint32_t appId, const 
         body.WriteUInt32(1, depotId); // depot_id
         body.WriteUInt32(2, appId);   // app_id
 
-        const uint64_t jobId = ++m_nextJobId;
-        if (!SendProtoMsg(ESteamMsg::ClientGetDepotDecryptionKey, body, jobId)) {
-            continue;
-        }
-
         std::vector<uint8_t> respBody;
         ScopedBufferWiper respWiper{respBody};
-        if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientGetDepotDecryptionKeyResponse), respBody, 6000, nullptr, jobId)) {
+        if (!SendAndReceiveWithRetry(
+                ESteamMsg::ClientGetDepotDecryptionKey,
+                body,
+                static_cast<uint32_t>(ESteamMsg::ClientGetDepotDecryptionKeyResponse),
+                respBody,
+                6000)) {
             continue;
         }
 
@@ -739,13 +823,14 @@ std::unordered_map<uint32_t, uint64_t> SteamCmClient::RequestAppTokens(const std
         body.WriteUInt32(2, appId); // appids = 2 (repeated)
     }
 
-    const uint64_t jobId = ++m_nextJobId;
-    if (!SendProtoMsg(ESteamMsg::ClientPICSAccessTokenRequest, body, jobId)) {
-        return tokens;
-    }
-
     std::vector<uint8_t> respBody;
-    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSAccessTokenResponse), respBody, 8000, nullptr, jobId)) {
+    ScopedBufferWiper respWiper{respBody};
+    if (!SendAndReceiveWithRetry(
+            ESteamMsg::ClientPICSAccessTokenRequest,
+            body,
+            static_cast<uint32_t>(ESteamMsg::ClientPICSAccessTokenResponse),
+            respBody,
+            8000)) {
         return tokens;
     }
 
@@ -791,35 +876,55 @@ std::optional<ParsedAppInfoData> SteamCmClient::RequestPicsProductInfo(uint32_t 
     body.WriteBytes(2, appInfoWriter.Data()); // apps = 2
     body.WriteBool(3, false); // meta_data_only = 3
 
-    const uint64_t jobId = ++m_nextJobId;
-    if (!SendProtoMsg(ESteamMsg::ClientPICSProductInfoRequest, body, jobId)) {
-        return std::nullopt;
-    }
-
     std::vector<uint8_t> respBody;
-    if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse), respBody, 8000, nullptr, jobId)) {
+    ScopedBufferWiper respWiper{respBody};
+    uint64_t jobId = 0;
+    if (!SendAndReceiveWithRetry(
+            ESteamMsg::ClientPICSProductInfoRequest,
+            body,
+            static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse),
+            respBody,
+            8000,
+            nullptr,
+            {},
+            &jobId)) {
         return std::nullopt;
     }
 
-    ProtoReader reader(respBody);
-    ProtoField field;
-    while (reader.ReadNext(field)) {
-        if (field.fieldNumber == 1 || field.fieldNumber == 2) {
-            ProtoReader appReader(field.bytesVal);
-            ProtoField appField;
-            uint32_t rAppId = 0;
-            std::span<const uint8_t> buffer;
-            while (appReader.ReadNext(appField)) {
-                if (appField.fieldNumber == 1) { // appid
-                    rAppId = static_cast<uint32_t>(appField.varintVal);
-                } else if (appField.fieldNumber == 5) { // buffer
-                    buffer = appField.bytesVal;
+    for (int chunkIdx = 0; chunkIdx < 16; ++chunkIdx) {
+        if (chunkIdx > 0) {
+            if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse), respBody, 2000, nullptr, jobId)) {
+                break;
+            }
+        }
+
+        bool responsePending = false;
+        ProtoReader reader(respBody);
+        ProtoField field;
+        while (reader.ReadNext(field)) {
+            if (field.fieldNumber == 1 && !field.bytesVal.empty()) { // apps (repeated AppInfo)
+                ProtoReader appReader(field.bytesVal);
+                ProtoField appField;
+                uint32_t rAppId = 0;
+                std::span<const uint8_t> buffer;
+                while (appReader.ReadNext(appField)) {
+                    if (appField.fieldNumber == 1) { // appid
+                        rAppId = static_cast<uint32_t>(appField.varintVal);
+                    } else if (appField.fieldNumber == 5) { // buffer
+                        buffer = appField.bytesVal;
+                    }
                 }
+                if (rAppId == appId && !buffer.empty()) {
+                    LOG_DEBUG("SteamCM", MsgKey::LogCmRecvPicsAppInfo, buffer.size());
+                    return ParseBinaryVdfAppInfo(buffer, appId);
+                }
+            } else if (field.fieldNumber == 6) { // response_pending
+                responsePending = (field.varintVal != 0);
             }
-            if (rAppId == appId && !buffer.empty()) {
-                LOG_DEBUG("SteamCM", MsgKey::LogCmRecvPicsAppInfo, buffer.size());
-                return ParseBinaryVdfAppInfo(buffer, appId);
-            }
+        }
+
+        if (!responsePending) {
+            break;
         }
     }
 
@@ -845,37 +950,58 @@ std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
         }
         body.WriteBool(3, false); // meta_data_only = 3
 
-        const uint64_t jobId = ++m_nextJobId;
-        if (!SendProtoMsg(ESteamMsg::ClientPICSProductInfoRequest, body, jobId)) {
-            continue;
-        }
-
         std::vector<uint8_t> respBody;
-        if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse), respBody, 8000, nullptr, jobId)) {
+        ScopedBufferWiper respWiper{respBody};
+        uint64_t jobId = 0;
+        if (!SendAndReceiveWithRetry(
+                ESteamMsg::ClientPICSProductInfoRequest,
+                body,
+                static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse),
+                respBody,
+                8000,
+                nullptr,
+                {},
+                &jobId)) {
             continue;
         }
 
-        ProtoReader reader(respBody);
-        ProtoField field;
-        while (reader.ReadNext(field)) {
-            if (field.fieldNumber == 1 || field.fieldNumber == 2) {
-                ProtoReader appReader(field.bytesVal);
-                ProtoField appField;
-                uint32_t rAppId = 0;
-                std::span<const uint8_t> buffer;
-                while (appReader.ReadNext(appField)) {
-                    if (appField.fieldNumber == 1) { // appid
-                        rAppId = static_cast<uint32_t>(appField.varintVal);
-                    } else if (appField.fieldNumber == 5) { // buffer
-                        buffer = appField.bytesVal;
-                    }
+        for (int chunkIdx = 0; chunkIdx < 16; ++chunkIdx) {
+            if (chunkIdx > 0) {
+                if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse),
+                                     respBody, 2000, nullptr, jobId)) {
+                    break;
                 }
-                if (rAppId > 0 && !buffer.empty()) {
-                    auto appInfo = ParseBinaryVdfAppInfo(buffer, rAppId);
-                    if (appInfo && !appInfo->name.empty()) {
-                        outNames[rAppId] = std::move(appInfo->name);
+            }
+
+            bool responsePending = false;
+            ProtoReader reader(respBody);
+            ProtoField field;
+            while (reader.ReadNext(field)) {
+                if (field.fieldNumber == 1 && !field.bytesVal.empty()) { // apps (repeated AppInfo)
+                    ProtoReader appReader(field.bytesVal);
+                    ProtoField appField;
+                    uint32_t rAppId = 0;
+                    std::span<const uint8_t> buffer;
+                    while (appReader.ReadNext(appField)) {
+                        if (appField.fieldNumber == 1) { // appid
+                            rAppId = static_cast<uint32_t>(appField.varintVal);
+                        } else if (appField.fieldNumber == 5) { // buffer
+                            buffer = appField.bytesVal;
+                        }
                     }
+                    if (rAppId > 0 && !buffer.empty()) {
+                        auto appInfo = ParseBinaryVdfAppInfo(buffer, rAppId);
+                        if (appInfo && !appInfo->name.empty()) {
+                            outNames[rAppId] = std::move(appInfo->name);
+                        }
+                    }
+                } else if (field.fieldNumber == 6) { // response_pending
+                    responsePending = (field.varintVal != 0);
                 }
+            }
+
+            if (!responsePending) {
+                break;
             }
         }
     }
@@ -885,22 +1011,39 @@ std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
 
 bool SteamCmClient::SetGamePlayed(uint32_t appId) {
     if (!EnsureConnected()) return false;
+    // CMsgClientGamesPlayed (eMsg 742):
+    //   repeated GamePlayed games_played = 1;
+    //     optional fixed64 game_id = 2;
+    //     optional uint32 process_id = 9;
+    //   optional uint32 client_os_type = 2;
     ProtoWriter body;
     if (appId > 0) {
         ProtoWriter gamePlayed;
-        gamePlayed.WriteUInt64(1, appId); // game_id = 1
-        gamePlayed.WriteUInt32(4, GetCurrentProcessId()); // process_id = 4
-        body.WriteBytes(1, gamePlayed.Data()); // games_played = 1
+        gamePlayed.WriteFixed64(2, static_cast<uint64_t>(appId)); // game_id = 2 (fixed64)
+        gamePlayed.WriteUInt32(9, GetCurrentProcessId());          // process_id = 9 (uint32)
+        body.WriteSubMessage(1, gamePlayed);                       // games_played = 1
     }
-    const uint64_t jobId = ++m_nextJobId;
+    body.WriteUInt32(2, 16); // client_os_type = 2 (Windows 10/11)
+
     LOG_DEBUG("SteamCM", MsgKey::LogCmSendGamesPlayed, appId, GetCurrentProcessId());
-    return SendProtoMsg(ESteamMsg::ClientGamesPlayed, body, jobId);
+    if (SendProtoMsg(ESteamMsg::ClientGamesPlayed, body, 0)) {
+        m_playingAppId = appId;
+        return true;
+    }
+    return false;
 }
 
 std::string SteamCmClient::FetchManifestRequestCode(
     uint32_t appId, uint32_t depotId, const std::string& manifestId, bool* outAccessDenied) {
     if (outAccessDenied) *outAccessDenied = false;
     if (manifestId.empty() || !IsValidManifestId(manifestId)) return "";
+
+    uint64_t manifestGid = 0;
+    const auto [ptr, ec] = std::from_chars(
+        manifestId.data(), manifestId.data() + manifestId.size(), manifestGid);
+    if (ec != std::errc{} || ptr != manifestId.data() + manifestId.size()) {
+        return "";
+    }
 
     // 0. Ensure active CM connection
     (void)EnsureConnected();
@@ -910,7 +1053,7 @@ std::string SteamCmClient::FetchManifestRequestCode(
     ProtoWriter innerReq;
     innerReq.WriteUInt32(1, appId); // app_id
     innerReq.WriteUInt32(2, depotId); // depot_id
-    innerReq.WriteUInt64(3, std::strtoull(manifestId.c_str(), nullptr, 10)); // manifest_id
+    innerReq.WriteUInt64(3, manifestGid); // manifest_id
     innerReq.WriteString(4, "public"); // app_branch
     innerReq.WriteString(5, ""); // branch_password
 
@@ -918,11 +1061,12 @@ std::string SteamCmClient::FetchManifestRequestCode(
     bool gotReply = false;
 
     // Track 1: Unified RPC eMsg 151 (ServiceMethodCallFromClient)
-    if (m_ws.IsConnected() && m_isLoggedOn) {
+    for (int attempt = 0; attempt < 2 && !gotReply && m_ws.IsConnected() && m_isLoggedOn; ++attempt) {
         const uint64_t jobId = ++m_nextJobId;
         LOG_DEBUG("SteamCM", MsgKey::LogCmReqManifestCodeRpc, depotId, manifestId);
         if (SendProtoMsg(ESteamMsg::ServiceMethodCallFromClient, innerReq, jobId, "ContentServerDirectory.GetManifestRequestCode#1")) {
             std::vector<uint8_t> respBody;
+            ScopedBufferWiper respWiper{respBody};
             if (ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodResponse), respBody, 4000, &rpcResult, jobId) ||
                 ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ServiceMethodSendToClient), respBody, 2000, &rpcResult, jobId)) {
                 gotReply = true;
@@ -945,8 +1089,13 @@ std::string SteamCmClient::FetchManifestRequestCode(
                     if (outAccessDenied) *outAccessDenied = true;
                     return ""; // Short-circuit: definitively not owned, never do redundant Track 2 fallback
                 }
+            } else if (!m_ws.IsConnected() && attempt == 0 && !m_reconnecting) {
+                m_isLoggedOn = false;
+                (void)EnsureConnected();
+                continue;
             }
         }
+        break;
     }
 
     // Track 2: Legacy wrapper eMsg 5594 (ClientServiceMethod) fallback (only if Track 1 received no response from CM)
@@ -955,38 +1104,42 @@ std::string SteamCmClient::FetchManifestRequestCode(
         svcMsg.WriteString(1, "ContentServerDirectory.GetManifestRequestCode#1");
         svcMsg.WriteBytes(2, innerReq.Data());
 
-        const uint64_t jobId = ++m_nextJobId;
+        std::vector<uint8_t> respBody;
+        ScopedBufferWiper respWiper{respBody};
+        int32_t legacyResult = 0;
         LOG_DEBUG("SteamCM", MsgKey::LogCmReqManifestCodeLegacy, depotId, manifestId);
-        if (SendProtoMsg(ESteamMsg::ClientServiceMethod, svcMsg, jobId)) {
-            std::vector<uint8_t> respBody;
-            int32_t legacyResult = 0;
-            if (ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientServiceMethodResponse), respBody, 4000, &legacyResult, jobId)) {
-                if (legacyResult != 1) {
-                    if (outAccessDenied) *outAccessDenied = true;
-                    return "";
+        if (SendAndReceiveWithRetry(
+                ESteamMsg::ClientServiceMethod,
+                svcMsg,
+                static_cast<uint32_t>(ESteamMsg::ClientServiceMethodResponse),
+                respBody,
+                4000,
+                &legacyResult)) {
+            if (legacyResult != 1) {
+                if (outAccessDenied) *outAccessDenied = true;
+                return "";
+            }
+            ProtoReader respReader(respBody);
+            ProtoField field;
+            std::span<const uint8_t> innerBytes;
+            while (respReader.ReadNext(field)) {
+                if (field.fieldNumber == 2) { // serialized_method_response
+                    innerBytes = field.bytesVal;
                 }
-                ProtoReader respReader(respBody);
-                ProtoField field;
-                std::span<const uint8_t> innerBytes;
-                while (respReader.ReadNext(field)) {
-                    if (field.fieldNumber == 2) { // serialized_method_response
-                        innerBytes = field.bytesVal;
+            }
+            if (!innerBytes.empty()) {
+                ProtoReader innerReader(innerBytes);
+                ProtoField innerField;
+                uint64_t reqCodeNum = 0;
+                while (innerReader.ReadNext(innerField)) {
+                    if (innerField.fieldNumber == 1) { // manifest_request_code
+                        reqCodeNum = innerField.varintVal ? innerField.varintVal : innerField.fixed64Val;
                     }
                 }
-                if (!innerBytes.empty()) {
-                    ProtoReader innerReader(innerBytes);
-                    ProtoField innerField;
-                    uint64_t reqCodeNum = 0;
-                    while (innerReader.ReadNext(innerField)) {
-                        if (innerField.fieldNumber == 1) { // manifest_request_code
-                            reqCodeNum = innerField.varintVal ? innerField.varintVal : innerField.fixed64Val;
-                        }
-                    }
-                    if (reqCodeNum != 0) {
-                        reqCode = std::to_string(reqCodeNum);
-                        LOG_DEBUG("SteamCM", MsgKey::LogCmGotManifestCodeLegacy, reqCode);
-                        return reqCode;
-                    }
+                if (reqCodeNum != 0) {
+                    reqCode = std::to_string(reqCodeNum);
+                    LOG_DEBUG("SteamCM", MsgKey::LogCmGotManifestCodeLegacy, reqCode);
+                    return reqCode;
                 }
             }
         }
@@ -1061,11 +1214,12 @@ std::optional<std::string> SteamCmClient::DownloadManifestPayload(
 
     std::string fileName = std::format("{}_{}.manifest", depotId, manifestId);
     std::filesystem::path localPath = Utf8Path(destDir) / fileName;
+    const std::string localPathUtf8 = PathToUtf8(localPath);
 
     std::error_code checkEc;
     if (std::filesystem::is_regular_file(localPath, checkEc) && std::filesystem::file_size(localPath, checkEc) > 0) {
-        LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPath.string());
-        return localPath.string();
+        LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPathUtf8);
+        return localPathUtf8;
     }
 
     WinHttpTransport localHttp;
@@ -1107,18 +1261,19 @@ std::optional<std::string> SteamCmClient::DownloadManifestPayload(
 
     std::vector<uint8_t> uncompressed;
     if (payload.size() >= 2 && payload[0] == 0x1F && payload[1] == 0x8B) {
+        constexpr size_t kMaxManifestUncompressedSize = 256 * 1024 * 1024;
         uint32_t isize = 0;
         if (payload.size() >= 18) {
             std::memcpy(&isize, payload.data() + payload.size() - 4, sizeof(uint32_t));
         }
-        size_t bufSize = (isize > 0 && isize < 256 * 1024 * 1024)
+        size_t bufSize = (isize > 0 && isize < kMaxManifestUncompressedSize)
             ? (static_cast<size_t>(isize) + 4096)
             : (std::max<size_t>(payload.size() * 10, 1024 * 1024));
-        bufSize = (std::max<size_t>)(bufSize, 1024 * 1024);
+        bufSize = std::clamp<size_t>(bufSize, 1024 * 1024, kMaxManifestUncompressedSize);
         uncompressed.resize(bufSize);
 
         int res = TINF_DATA_ERROR;
-        while (bufSize <= 256 * 1024 * 1024) {
+        while (bufSize <= kMaxManifestUncompressedSize) {
             unsigned int destLen = static_cast<unsigned int>(bufSize);
             res = tinf_gzip_uncompress(uncompressed.data(), &destLen, payload.data(), static_cast<unsigned int>(payload.size()));
             if (res == TINF_OK) {
@@ -1127,12 +1282,12 @@ std::optional<std::string> SteamCmClient::DownloadManifestPayload(
                 LOG_DEBUG("SteamCM", MsgKey::LogCmManifestGzipOk, cdnResp.body.size(), destLen);
                 break;
             }
-            if (res == TINF_BUF_ERROR) {
-                bufSize *= 2;
+            if (res == TINF_BUF_ERROR && bufSize < kMaxManifestUncompressedSize) {
+                bufSize = std::min<size_t>(bufSize * 2, kMaxManifestUncompressedSize);
                 uncompressed.resize(bufSize);
                 continue;
             }
-            break; // Fatal format error
+            break; // Fatal format error or size cap exceeded
         }
 
         if (res != TINF_OK) {
@@ -1142,12 +1297,12 @@ std::optional<std::string> SteamCmClient::DownloadManifestPayload(
     }
 
     if (!WriteBinaryFile(localPath, payload)) {
-        LOG_WARN("SteamCM", MsgKey::LogCmSaveManifestFailed, localPath.string());
+        LOG_WARN("SteamCM", MsgKey::LogCmSaveManifestFailed, localPathUtf8);
         return std::nullopt;
     }
 
     LOG_INFO("SteamCM", MsgKey::LogCmManifestSaved, fileName, payload.size());
-    return localPath.string();
+    return localPathUtf8;
 }
 
 std::optional<std::string> SteamCmClient::DownloadManifestOnline(
@@ -1161,11 +1316,12 @@ std::optional<std::string> SteamCmClient::DownloadManifestOnline(
 
     std::string fileName = std::format("{}_{}.manifest", depotId, manifestId);
     std::filesystem::path localPath = Utf8Path(destDir) / fileName;
+    const std::string localPathUtf8 = PathToUtf8(localPath);
 
     std::error_code checkEc;
     if (std::filesystem::is_regular_file(localPath, checkEc) && std::filesystem::file_size(localPath, checkEc) > 0) {
-        LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPath.string());
-        return localPath.string();
+        LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPathUtf8);
+        return localPathUtf8;
     }
 
     std::string reqCode = FetchManifestRequestCode(appId, depotId, manifestId, outAccessDenied);
@@ -1180,35 +1336,8 @@ std::optional<std::string> SteamCmClient::DownloadManifestOnline(
     return DownloadManifestPayload(appId, depotId, manifestId, reqCode, destDir, cdnServers, sharedHttp);
 }
 
-bool SteamCmClient::DetectDenuvoFromStore(uint32_t appId) {
-    if (appId == 0) return false;
-
-    static std::unordered_map<uint32_t, bool> s_denuvoCache;
-    static std::mutex s_denuvoMutex;
-    {
-        std::lock_guard lock(s_denuvoMutex);
-        if (auto it = s_denuvoCache.find(appId); it != s_denuvoCache.end()) {
-            return it->second;
-        }
-    }
-
-    WinHttpTransport http;
-    HttpResponse resp = http.Get(std::format("https://store.steampowered.com/api/appdetails?appids={}&filters=basic", appId));
-    bool isDenuvo = false;
-    if (resp.IsSuccess()) {
-        auto drmNotice = JsonHelper::GetString(resp.body, "drm_notice");
-        if (drmNotice && FindIgnoreCase(*drmNotice, "denuvo")) {
-            isDenuvo = true;
-            LOG_INFO("SteamCM", MsgKey::LogCmDetectedDenuvoStore, appId, *drmNotice);
-        }
-        std::lock_guard lock(s_denuvoMutex);
-        s_denuvoCache[appId] = isDenuvo;
-    }
-
-    return isDenuvo;
-}
-
 ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bool forceEticket, ProgressCallback onProgress) {
+    (void)forceEticket;
     if (onProgress) {
         onProgress("tickets", 0, 0, 0);
     }
@@ -1231,46 +1360,36 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
     }
 
     // 2. 纯官方云端向 Steam CM PICS 请求完整产品元数据 (包含全部 Depots、清单号、所有 DLC 列表与 DRM 标记)
+    if (onProgress) {
+        onProgress("meta", 0, 0, 0);
+    }
     LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryPicsToken, appId);
     uint64_t appToken = 0;
     auto tokMap = RequestAppTokens({ appId });
     if (tokMap.contains(appId)) {
         appToken = tokMap[appId];
+        if (appToken != 0) {
+            creds.appTokens[appId] = appToken;
+        }
     }
 
     LOG_DEBUG("SteamCM", MsgKey::LogCmFullReqPicsMeta, appId, MaskPicsToken(appToken));
     auto appInfoData = RequestPicsProductInfo(appId, appToken);
 
-    // 3. EncryptedAppTicket (精准定向直达: 仅在检测到 Denuvo 保护或显式强制时激活游戏会话)
-    bool isDenuvoApp = (appInfoData && appInfoData->requiresDenuvo) || DetectDenuvoFromStore(appId);
-    if (appInfoData) {
-        appInfoData->requiresDenuvo = isDenuvoApp;
-    }
-    const bool needsETicket = isDenuvoApp || forceEticket;
-
-    if (needsETicket) {
-        LOG_INFO("SteamCM", MsgKey::LogCmFullNeedEticketSession, isDenuvoApp, forceEticket);
-        if (!TuiEngine::IsActive()) {
-            std::cout << TR(MsgKey::CliExtractDenuvoSession) << "\n";
-        }
-        SetGamePlayed(appId);
-        struct SessionGuard {
-            SteamCmClient* client;
-            ~SessionGuard() {
-                if (client) client->SetGamePlayed(0);
-            }
-        } sessionGuard{this};
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
+    // 3. EncryptedAppTicket (纯 CM 原生会话裁决: 无需外部网页爬虫或静态名单，直接向 Valve CM 原生索取)
+    {
         creds.encryptedAppTicket = RequestEncryptedAppTicket(appId);
         if (creds.encryptedAppTicket) {
             LOG_INFO("SteamCM", MsgKey::LogCmFullGotEticket, creds.encryptedAppTicket->size());
             if (!TuiEngine::IsActive()) {
                 std::cout << TR_FMT(MsgKey::CliExtractEticketGot, creds.encryptedAppTicket->size()) << "\n";
             }
+            if (appInfoData) {
+                appInfoData->requiresDenuvo = true;
+            }
         } else {
-            LOG_WARN("SteamCM", MsgKey::LogCmFullEticketFailed);
+            // 普通单机游戏或未配置加密票据密钥的游戏，CM 原生返回 Fail(2)，优雅静默跳过
+            LOG_DEBUG("SteamCM", MsgKey::LogCmFullSkipEticketSession);
         }
 
         // 极端边界兜底：若前置未拿到所有权票据，在会话中顺带重试一次
@@ -1283,8 +1402,6 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 }
             }
         }
-    } else {
-        LOG_DEBUG("SteamCM", MsgKey::LogCmFullSkipEticketSession);
     }
 
     std::vector<DepotKeyInfo> depotKeys;
@@ -1365,6 +1482,9 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             std::cout << TR(MsgKey::CliExtractQueryDepots) << "\n";
         }
 
+        if (onProgress) {
+            onProgress("keys", 0, 0, 0);
+        }
         std::vector<DepotKeyInfo> cmKeys = RequestDepotKeys(appId, queryDepotList);
         std::unordered_set<uint32_t> authorizedDepots;
         std::unordered_map<uint32_t, std::string> cmKeyMap;
@@ -1409,10 +1529,11 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 // 本地磁盘快速检查：若已存在则直接秒级复用，完全跳过网络查询
                 std::string fileName = std::format("{}_{}.manifest", dk.depotId, dk.manifestId);
                 std::filesystem::path localPath = Utf8Path(outDir) / fileName;
+                const std::string localPathUtf8 = PathToUtf8(localPath);
                 std::error_code checkEc;
                 if (std::filesystem::is_regular_file(localPath, checkEc) && std::filesystem::file_size(localPath, checkEc) > 0) {
-                    LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPath.string());
-                    dk.manifestFilePath = localPath.string();
+                    LOG_INFO("SteamCM", MsgKey::LogCmManifestAlreadyExists, localPathUtf8);
+                    dk.manifestFilePath = localPathUtf8;
                     ++downloadedManifests;
                     continue;
                 }
@@ -1431,6 +1552,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 std::vector<std::pair<uint32_t, std::string>> results(tasks.size());
                 std::atomic<size_t> nextIndex{0};
                 std::atomic<size_t> completedCount{0};
+                std::mutex progressMutex;
                 const size_t numWorkers = std::min<size_t>(tasks.size(), 4);
                 std::vector<std::thread> workers;
                 workers.reserve(numWorkers);
@@ -1450,6 +1572,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                             }
                             size_t done = completedCount.fetch_add(1, std::memory_order_relaxed) + 1;
                             if (onProgress) {
+                                std::lock_guard lock(progressMutex);
                                 onProgress("manifest", done, tasks.size(), t.depotId);
                             }
                         }
@@ -1463,7 +1586,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             });
         }
 
-        // 4.5 纯官方云端批量解析所有 DLC 名称 (Steam CM PICS 公开元数据查询 + Store WebAPI 补充兜底)
+        // 4.5 纯官方云端批量解析所有 DLC 名称 (Steam CM PICS 公开元数据查询)
         std::vector<uint32_t> missingDlcNames;
         for (const auto& d : creds.dlcs) {
             if (d.name.empty()) {
@@ -1481,22 +1604,51 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                     }
                 }
             }
+        }
+    }
 
-            // 官方 Store WebAPI 补充兜底 (针对极少数 CM PICS 未返回公共名称的 DLC)
-            WinHttpTransport storeHttp;
-            for (auto& d : creds.dlcs) {
-                if (d.name.empty()) {
-                    std::string storeName = FetchAppNameFromStore(d.dlcId, &storeHttp);
-                    if (!storeName.empty()) {
-                        d.name = std::move(storeName);
-                    }
-                }
+    // 5. 纯官方云端增量查询 64 位 PICS AccessTokens (AppID + 全部 DLC)
+    if (onProgress) {
+        onProgress("tokens", 0, 0, 0);
+    }
+    LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryingPicsTokens, appId);
+    if (!TuiEngine::IsActive()) {
+        std::cout << TR(MsgKey::CliExtractQueryAccessToken) << "\n";
+    }
+
+    std::unordered_set<uint32_t> targetAppIds;
+    if (!creds.appTokens.contains(appId)) {
+        targetAppIds.insert(appId);
+    }
+    for (const auto& dlc : creds.dlcs) {
+        if (!creds.appTokens.contains(dlc.dlcId)) {
+            targetAppIds.insert(dlc.dlcId);
+        }
+    }
+
+    if (!targetAppIds.empty()) {
+        std::vector<uint32_t> tokensToQuery(targetAppIds.begin(), targetAppIds.end());
+        std::sort(tokensToQuery.begin(), tokensToQuery.end());
+        auto cmTokens = RequestAppTokens(tokensToQuery);
+        for (const auto& [tApp, tVal] : cmTokens) {
+            if (tVal != 0) {
+                creds.appTokens[tApp] = tVal;
             }
         }
     }
 
-    // 5. 等待并发 CDN 清单拉取任务收尾并合并路径结果
+    if (!creds.appTokens.empty()) {
+        LOG_INFO("SteamCM", MsgKey::LogCmFullExtractedPicsTokens, creds.appTokens.size());
+        if (!TuiEngine::IsActive()) {
+            std::cout << TR(MsgKey::CliExtractAccessTokenGot) << "\n";
+        }
+    }
+
+    // 6. 等待并发 CDN 清单拉取任务收尾并合并路径结果
     if (manifestFuture.valid()) {
+        if (onProgress) {
+            onProgress("manifests_start", 0, downloadTasks.size(), 0);
+        }
         auto asyncResults = manifestFuture.get();
         for (const auto& [depotId, path] : asyncResults) {
             if (!path.empty()) {
@@ -1509,10 +1661,6 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 }
             }
         }
-    }
-
-    if (onProgress) {
-        onProgress("done", downloadedManifests, downloadedManifests, 0);
     }
 
     if (downloadedManifests > 0 && !TuiEngine::IsActive()) {
@@ -1537,35 +1685,9 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         }
     }
 
-    // 6. 纯官方云端查询 64 位 PICS AccessTokens (AppID + 全部 DLC)
-    LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryingPicsTokens, appId);
-    if (!TuiEngine::IsActive()) {
-        std::cout << TR(MsgKey::CliExtractQueryAccessToken) << "\n";
-    }
-
-    std::unordered_set<uint32_t> targetAppIds;
-    targetAppIds.insert(appId);
-    for (const auto& dlc : creds.dlcs) {
-        targetAppIds.insert(dlc.dlcId);
-    }
-
-    std::vector<uint32_t> tokensToQuery(targetAppIds.begin(), targetAppIds.end());
-    std::sort(tokensToQuery.begin(), tokensToQuery.end());
-
-    if (!tokensToQuery.empty()) {
-        auto cmTokens = RequestAppTokens(tokensToQuery);
-        for (const auto& [tApp, tVal] : cmTokens) {
-            if (tVal != 0) {
-                creds.appTokens[tApp] = tVal;
-            }
-        }
-    }
-
-    if (!creds.appTokens.empty()) {
-        LOG_INFO("SteamCM", MsgKey::LogCmFullExtractedPicsTokens, creds.appTokens.size());
-        if (!TuiEngine::IsActive()) {
-            std::cout << TR(MsgKey::CliExtractAccessTokenGot) << "\n";
-        }
+    // 7. 全部凭据与清单提取完成
+    if (onProgress) {
+        onProgress("done", downloadedManifests, downloadTasks.size(), 0);
     }
 
     return creds;

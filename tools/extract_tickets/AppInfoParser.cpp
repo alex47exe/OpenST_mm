@@ -330,7 +330,8 @@ void ParseVdfRecurse(VdfReader& reader,
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedDenuvoFlag, val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") && FindIgnoreCase(val, "denuvo") != std::string_view::npos) {
+                } else if ((EqualIgnoreCase(key, "thirdpartydrm") || EqualIgnoreCase(key, "drm_notice")) &&
+                           ContainsIgnoreCase(val, "denuvo")) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedThirdPartyDenuvo, val);
                 }
@@ -634,7 +635,8 @@ void ParseTextVdfRecurse(
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedDenuvoFlag, val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") && FindIgnoreCase(val, "denuvo") != std::string_view::npos) {
+                } else if ((EqualIgnoreCase(key, "thirdpartydrm") || EqualIgnoreCase(key, "drm_notice")) &&
+                           ContainsIgnoreCase(val, "denuvo")) {
                     outData.requiresDenuvo = true;
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedThirdPartyDenuvo, val);
                 }

@@ -1,6 +1,7 @@
 #include "GameListManager.h"
 #include "I18n.h"
 #include "Log.h"
+#include "Utils.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -11,13 +12,24 @@ namespace OST::ExtractTickets {
 
 namespace {
     std::string EscapeCsv(std::string_view str) {
-        bool needsQuotes = str.find_first_of(",\"\r\n") != std::string_view::npos;
+        std::string cleaned;
+        cleaned.reserve(str.size());
+        for (char c : str) {
+            const auto uc = static_cast<unsigned char>(c);
+            if (uc < 0x20 && c != '\r' && c != '\n' && c != '\t') {
+                continue;
+            }
+            cleaned.push_back(c);
+        }
+
+        const bool needsQuotes = cleaned.find_first_of(",\"\r\n\t") != std::string::npos;
         if (!needsQuotes) {
-            return std::string{str};
+            return cleaned;
         }
 
         std::string escaped = "\"";
-        for (char c : str) {
+        escaped.reserve(cleaned.size() + 4);
+        for (char c : cleaned) {
             if (c == '"') {
                 escaped += "\"\"";
             } else {
@@ -57,19 +69,29 @@ bool GameListManager::PrevPage() {
 bool GameListManager::ExportCsv(std::string_view accountName, std::string* outPath) const {
     std::string safeName{accountName};
     for (char& c : safeName) {
-        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+        const auto uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || c == '\\' || c == '/' || c == ':' || c == '*' ||
+            c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
             c = '_';
         }
     }
+    while (!safeName.empty() && (safeName.back() == '.' || safeName.back() == ' ')) {
+        safeName.pop_back();
+    }
+    if (safeName.empty()) {
+        safeName = "user";
+    }
+
     std::string filename = "gameslist-" + safeName + ".csv";
     if (outPath) {
         *outPath = filename;
     }
 
-    std::filesystem::path filePath(filename);
+    const std::filesystem::path filePath = Utf8Path(filename);
+    const std::string filePathUtf8 = PathToUtf8(filePath);
     std::ofstream ofs(filePath, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) {
-        LOG_ERROR("GameList", MsgKey::LogGameListCreateCsvFailed, filePath.string());
+        LOG_ERROR("GameList", MsgKey::LogGameListCreateCsvFailed, filePathUtf8);
         return false;
     }
 
@@ -87,6 +109,10 @@ bool GameListManager::ExportCsv(std::string_view accountName, std::string* outPa
     }
 
     ofs.flush();
+    if (!ofs.good()) {
+        LOG_ERROR("GameList", MsgKey::LogGameListCreateCsvFailed, filePathUtf8);
+        return false;
+    }
     ofs.close();
 
     LOG_INFO("GameList", MsgKey::LogGameListExportCsvSuccess, MaskAccount(accountName), m_games.size());

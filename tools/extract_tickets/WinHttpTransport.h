@@ -10,6 +10,7 @@ namespace OST::ExtractTickets {
 
 struct HttpResponse {
     int statusCode{0};
+    int32_t steamEResult{0};
     std::string body;
     std::string errorMessage;
 
@@ -46,7 +47,7 @@ private:
     uint16_t m_cachedConnectPort{0};
     void* m_hCachedConnect{nullptr};
 
-    void* GetOrCreateConnection(const std::wstring& host, uint16_t port);
+    void* GetOrCreateConnection(const std::wstring& host, uint16_t port, bool* outWasCached = nullptr);
     void InvalidateConnection();
     [[nodiscard]] HttpResponse ExecuteRequest(
         const wchar_t* verb,
