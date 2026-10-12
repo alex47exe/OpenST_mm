@@ -249,6 +249,22 @@ namespace {
         std::string boxContent = std::format("[ {:<16} ]", std::string{inputAppId} + "_");
         TuiEngine::PrintRaw(std::format("\x1b[1;30;47m{}\x1b[0m  \x1b[90m{}\x1b[0m   ", boxContent, TR(MsgKey::L1InputTip)));
     }
+
+    void PrintCliHelp() {
+        std::cout << "\x1b[1;36m" << TR(MsgKey::CliHelpBanner) << "\x1b[0m\n\n"
+                  << TR(MsgKey::CliHelpUsage) << "\n\n"
+                  << "\x1b[1;33m" << TR(MsgKey::CliHelpOptionsTitle) << "\x1b[0m\n"
+                  << TR(MsgKey::CliHelpOptAppId) << "\n"
+                  << TR(MsgKey::CliHelpOptAccount) << "\n"
+                  << TR(MsgKey::CliHelpOptOnline) << "\n"
+                  << TR(MsgKey::CliHelpOptForce) << "\n"
+                  << TR(MsgKey::CliHelpOptLang) << "\n"
+                  << TR(MsgKey::CliHelpOptHelp) << "\n\n"
+                  << "\x1b[1;33m" << TR(MsgKey::CliHelpNavTitle) << "\x1b[0m\n"
+                  << TR(MsgKey::CliHelpNavL1) << "\n"
+                  << TR(MsgKey::CliHelpNavL2) << "\n"
+                  << TR(MsgKey::CliHelpNavL3) << "\n";
+    }
 } // namespace
 
 int Run(int argc, char** argv) {
@@ -264,6 +280,14 @@ int Run(int argc, char** argv) {
             }
         } else if (arg.starts_with("--lang=")) {
             I18n::SetLanguageFromString(arg.substr(7));
+        }
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg{argv[i]};
+        if (arg == "--help" || arg == "-h" || arg == "/?" || arg == "-?") {
+            PrintCliHelp();
+            return 0;
         }
     }
 

@@ -37,8 +37,8 @@ HMODULE LoadSteamClient64(const std::string& steamPath, std::string& loadedPath)
             SetDllDirectoryW(nullptr);
         }
     } dllDirGuard;
-    SetDllDirectoryW(std::filesystem::path(steamDir).c_str());
-    HMODULE module{LoadLibraryExW(std::filesystem::path(loadedPath).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)};
+    SetDllDirectoryW(Utf8Path(steamDir).c_str());
+    HMODULE module{LoadLibraryExW(Utf8Path(loadedPath).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)};
     if (!module) {
         if (!TuiEngine::IsActive()) {
             std::cerr << TR_FMT(MsgKey::SessionLoadClientFailed, loadedPath, GetLastError()) << "\n";

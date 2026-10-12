@@ -739,7 +739,10 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
         if (isPassword) {
             std::string promptStr = std::string(prompt);
             SecureString pwd = ReadPasswordFromConsole(promptStr.c_str());
-            return pwd.Empty() ? std::nullopt : std::optional<std::string>(std::string(pwd.Data()));
+            if (pwd.Empty()) return std::nullopt;
+            std::string result(pwd.Data());
+            pwd.Clear();
+            return result;
         }
         std::cout << "\n" << prompt;
         if (!defaultValue.empty()) {
@@ -783,6 +786,16 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
     OutputToTerminal(std::format("\x1b[90m{}\x1b[0m", TR(MsgKey::HintInputEnterEsc)));
 
     std::string value{defaultValue};
+    struct PasswordWiper {
+        std::string& s;
+        bool isPwd;
+        ~PasswordWiper() noexcept {
+            if (isPwd) {
+                SecureWipeString(s);
+            }
+        }
+    } wiper{value, isPassword};
+
     const int inputTop = top + 4;
     const int inputLeft = left + 4;
     const int inputWidth = modalW - 8;
@@ -804,16 +817,16 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
 
         KeyEvent ev = ReadKey();
         if (ev.code == KeyCode::Escape) {
-            if (isPassword && !value.empty()) {
-                SecureZeroMemory(value.data(), value.size());
+            if (isPassword) {
+                SecureWipeString(value);
             }
             FlushInputBuffer();
             return std::nullopt;
         }
         if (ev.code == KeyCode::Enter && !HasInputPending()) {
-            std::string result = std::move(value);
-            if (isPassword && !value.empty()) {
-                SecureZeroMemory(value.data(), value.size());
+            std::string result = value;
+            if (isPassword) {
+                SecureWipeString(value);
             }
             FlushInputBuffer();
             return result;
@@ -849,15 +862,15 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
                     if (!chunk.empty() && value.size() + chunk.size() <= 256) {
                         value += chunk;
                     }
-                    std::string result = std::move(value);
-                    if (isPassword && !value.empty()) {
-                        SecureZeroMemory(value.data(), value.size());
+                    std::string result = value;
+                    if (isPassword) {
+                        SecureWipeString(value);
                     }
                     FlushInputBuffer();
                     return result;
                 } else if (nextEv.code == KeyCode::Escape) {
-                    if (isPassword && !value.empty()) {
-                        SecureZeroMemory(value.data(), value.size());
+                    if (isPassword) {
+                        SecureWipeString(value);
                     }
                     FlushInputBuffer();
                     return std::nullopt;

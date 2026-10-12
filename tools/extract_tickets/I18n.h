@@ -252,7 +252,20 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(HttpErrConnectHostFailed, "Failed to connect to host {} (GetLastError={})", "无法连接主机 {} (GetLastError={})", "No se pudo conectar al host {} (GetLastError={})") \
     M(HttpErrSendGetFailed, "Failed to send GET request (GetLastError={})", "发送 GET 请求失败 (GetLastError={})", "Error al enviar solicitud GET (GetLastError={})") \
     M(HttpErrSendPostFailed, "Failed to create or send POST request (GetLastError={})", "创建或发送 POST 请求失败 (GetLastError={})", "Error al crear o enviar solicitud POST (GetLastError={})") \
-    M(HttpErrRecvHeadersFailed, "Failed to receive response headers (GetLastError={})", "接收响应头失败 (GetLastError={})", "Error al recibir encabezados de respuesta (GetLastError={})")
+    M(HttpErrRecvHeadersFailed, "Failed to receive response headers (GetLastError={})", "接收响应头失败 (GetLastError={})", "Error al recibir encabezados de respuesta (GetLastError={})") \
+    M(CliHelpBanner, "OpenSteamTool extract_tickets - Steam Credentials Extractor & Configuration Generator", "OpenSteamTool extract_tickets - Steam 游戏凭据提取与配方生成工具", "OpenSteamTool extract_tickets - Extractor de Credenciales de Steam y Generador de Configuración") \
+    M(CliHelpUsage, "Usage:\n  extract_tickets [options] [AppID]", "用法:\n  extract_tickets [选项] [AppID]", "Uso:\n  extract_tickets [opciones] [AppID]") \
+    M(CliHelpOptionsTitle, "Options:", "选项:", "Opciones:") \
+    M(CliHelpOptAppId, "  --appid <id>           Target Steam AppID to extract credentials for", "  --appid <id>           目标游戏 AppID", "  --appid <id>           AppID del juego de Steam objetivo") \
+    M(CliHelpOptAccount, "  -a, --account <name>   Specify saved Steam account for online extraction", "  -a, --account <name>   指定用于在线提取的已保存 Steam 账号", "  -a, --account <name>   Especificar cuenta de Steam guardada para extracción en línea") \
+    M(CliHelpOptOnline, "  -o, --online           Enter Online Mode (Steam CM cloud extraction without client)", "  -o, --online           进入在线模式 (免客户端直连 Steam CM 云端提取)", "  -o, --online           Modo En Línea (extracción en la nube de Steam CM sin cliente)") \
+    M(CliHelpOptForce, "  -f, --force-eticket    Force requesting encrypted app ticket (eticket.bin)", "  -f, --force-eticket    强制请求加密应用票据 (eticket.bin)", "  -f, --force-eticket    Forzar solicitud de ticket cifrado (eticket.bin)") \
+    M(CliHelpOptLang, "  -l, --lang <en|zh|es>  Specify user interface and output language", "  -l, --lang <en|zh|es>  指定界面与日志语言 (en: 英文, zh: 中文, es: 西班牙语)", "  -l, --lang <en|zh|es>  Especificar idioma de interfaz (en: inglés, zh: chino, es: español)") \
+    M(CliHelpOptHelp, "  -h, --help, /?         Display this help manual and exit", "  -h, --help, /?         显示此命令行帮助手册并退出", "  -h, --help, /?         Mostrar este manual de ayuda y salir") \
+    M(CliHelpNavTitle, "Interactive Shortcuts:", "交互快捷键:", "Atajos Interactivos:") \
+    M(CliHelpNavL1, "  Level 1 (Main Menu):   [Digits] AppID   [Enter] Extract   [E] Force   [O] Online   [ESC] Clear   [Q] Exit", "  一级 (主界面):         [数字] 输入 AppID  [Enter] 提取凭据  [E] 强提加密  [O] 在线模式  [ESC] 清空  [Q] 退出", "  Nivel 1 (Principal):   [Dígitos] AppID    [Enter] Extraer   [E] Forzar    [O] En Línea  [ESC] Borrar  [Q] Salir") \
+    M(CliHelpNavL2, "  Level 2 (Accounts):    [↑/↓] Select    [Enter] Login/Go   [R] Remark  [D] Delete   [-] Wipe      [ESC/Q] Back", "  二级 (账号管理):       [↑/↓] 选择账号     [Enter] 登录/进入 [R] 修改备注  [D] 删除账号  [-] 清空全部 [ESC/Q] 返回", "  Nivel 2 (Cuentas):     [↑/↓] Seleccionar  [Enter] Iniciar   [R] Nota      [D] Eliminar  [-] Borrar    [ESC/Q] Volver") \
+    M(CliHelpNavL3, "  Level 3 (Game Library):[↑/↓] Select    [←/→] Page         [Enter] Extract          [A] Batch     [L] CSV       [ESC/Q] Back", "  三级 (在线游戏库):     [↑/↓] 选择游戏     [←/→] 翻页浏览    [Enter] 提取凭据         [A] 批量全提  [L] 导出CSV   [ESC/Q] 返回", "  Nivel 3 (Biblioteca):  [↑/↓] Seleccionar  [←/→] Páginas     [Enter] Extraer          [A] Todo      [L] CSV       [ESC/Q] Volver")
 
 #if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
 #define OST_I18N_LOG_MESSAGES(M) \
