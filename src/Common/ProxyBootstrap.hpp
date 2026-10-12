@@ -47,6 +47,14 @@ public:
  * @brief Unified proxy DLL bootstrap and process filtering anchor.
  * Manages thread library call disabling, host process inspection, and guarded payload injection.
  */
+/**
+ * @brief Static ASCII ecosystem signature anchored into the binary image.
+ * Third-party ecosystem tools (such as CloudRedirect's ThirdPartyDetector) scan proxy DLLs
+ * (dwmapi.dll, xinput1_4.dll) for exact ASCII string markers ("OpenSteamTool") to recognize
+ * compatible loaders and authorize automated deployment.
+ */
+inline constexpr char kEcosystemSignature[] = "OpenSteamTool";
+
 class Bootstrap {
 public:
     [[nodiscard]] static constexpr wchar_t ToLowerAscii(wchar_t ch) noexcept {
@@ -67,6 +75,11 @@ public:
         HMODULE hModule,
         std::wstring_view targetHost = L"steam.exe",
         std::wstring_view payloadDll = L"OpenSteamTool.dll") noexcept {
+
+        // Anchor the ASCII ecosystem signature so third-party detectors (e.g. CloudRedirect)
+        // find the "OpenSteamTool" marker in the compiled binary image even under /O2 and /OPT:REF.
+        static volatile const char* volatile s_ecosystemSignature = kEcosystemSignature;
+        (void)s_ecosystemSignature;
 
         ::DisableThreadLibraryCalls(hModule);
 
