@@ -207,12 +207,256 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(SessionNoOwnershipTicket, "[INFO] Failed to retrieve ownership ticket for AppID {} (account may not own it or not cached locally).", "[INFO] 未能获取 AppID {} 的所有权票据 (账号可能未拥有或本地未缓存)。", "[INFO] No se pudo obtener el ticket de propiedad para AppID {} (puede no poseerlo o no estar en caché).") \
     M(SessionEncryptedTicketDenied, "[INFO] RequestEncryptedAppTicket returned AccessDenied (account does not own this app or lacks permission).", "[INFO] 请求 EncryptedAppTicket 被拒绝 (当前登录账号未拥有该游戏或无权获取其凭据)。", "[INFO] RequestEncryptedAppTicket denegado (la cuenta no posee esta app o carece de permisos).") \
     M(SessionEncryptedTicketEmpty, "[WARN] Encrypted app ticket is empty.", "[WARN] 加载的加密票据为空。", "[AVISO] El ticket de aplicación cifrado está vacío.") \
-    M(SessionEncryptedTicketFailed, "[WARN] GetEncryptedAppTicket failed.", "[WARN] 获取 EncryptedAppTicket 数据失败。", "[AVISO] Falló GetEncryptedAppTicket.")
+    M(SessionEncryptedTicketFailed, "[WARN] GetEncryptedAppTicket failed.", "[WARN] 获取 EncryptedAppTicket 数据失败。", "[AVISO] Falló GetEncryptedAppTicket.") \
+    M(Guard2FaFooter, "[Enter] Submit / Check   [ESC] Cancel Login", "[Enter] 提交验证码   [ESC] 取消登录", "[Enter] Enviar / Verificar   [ESC] Cancelar") \
+    M(Guard2FaWaitingMobile, "Waiting for mobile confirmation... ({}/{}s)", "正在等待手机确认... ({}/{}s)", "Esperando confirmación móvil... ({}/{}s)") \
+    M(Guard2FaEnterCodeHint, "Enter 5-character code and press Enter to submit", "请输入 5 位验证码后按回车提交", "Ingrese el código de 5 caracteres y presione Enter") \
+    M(Guard2FaSubmitting, "Verifying and submitting...", "正在验证并提交...", "Verificando y enviando...") \
+    M(Guard2FaCheckingMobile, "Checking mobile confirmation status...", "正在检查手机确认状态...", "Verificando estado de confirmación móvil...") \
+    M(Guard2FaNotApprovedYet, "Not approved on phone yet; tap [Confirm] in app then press Enter, or enter 5-digit code", "手机端尚未批准，请在手机点击【确认登录】后再按回车，或直接输入 5 位动态码", "Aún no aprobado en el móvil; confirme en la app y presione Enter, o ingrese el código") \
+    M(TermTooSmallWarn1, "[!] Terminal window too small (Current: {}x{}, Minimum: {}x{})", "[!] 终端窗口尺寸过小 (当前: {}x{}, 推荐最低: {}x{})", "[!] Ventana de terminal muy pequeña (Actual: {}x{}, Mínimo: {}x{})") \
+    M(TermTooSmallWarn2, "Please enlarge the terminal window to restore display...", "请拉大终端窗口以恢复界面显示...", "Por favor amplíe la ventana de la terminal para restaurar la vista...") \
+    M(CliConfirmPrompt, "Confirm? [{}]: ", "确认? [{}]: ", "¿Confirmar? [{}]: ") \
+    M(CliPressEnterContinue, "Press Enter to continue...", "按 Enter 键继续...", "Presione Enter para continuar...") \
+    M(CliDefaultPasswordPrompt, "Steam Password: ", "Steam 密码: ", "Contraseña de Steam: ") \
+    M(CliInputInterrupted, "[INFO] Input interrupted by user.", "[INFO] 用户中断输入。", "[INFO] Entrada interrumpida por el usuario.") \
+    M(ProgressDone, "Done", "完成", "Listo") \
+    M(CmErrGenericFail, "Generic failure (Fail)", "通用失败 (Fail)", "Fallo general (Fail)") \
+    M(CmErrAccessDenied, "Access denied (AccessDenied)", "访问被拒绝 / 权限不足 (AccessDenied)", "Acceso denegado (AccessDenied)") \
+    M(CmErrLoggedInElsewhere, "Account logged in elsewhere (LoggedInElsewhere)", "账号已在其他位置登录 (LoggedInElsewhere)", "Cuenta conectada en otro lugar (LoggedInElsewhere)") \
+    M(CmErrInvalidToken, "Invalid or expired token (InvalidToken)", "无效或过期的授权令牌 (InvalidToken)", "Token inválido o expirado (InvalidToken)") \
+    M(CmErrNoPermission, "Insufficient privilege (AccessDenied)", "无权限 (AccessDenied)", "Sin permisos (AccessDenied)") \
+    M(CmErrLimitExceeded, "Rate limit exceeded (LimitExceeded)", "登录频率受限 (LimitExceeded)", "Límite de intentos excedido (LimitExceeded)") \
+    M(CmErrUnknownCode, "Error code {}", "错误代码 {}", "Código de error {}") \
+    M(CliCmLogonFailed, "[ERROR] CM logon failed (EResult={}, {}), authorization may have expired.", "[ERROR] CM 登录失败 (EResult={}, {})，可能授权已过期。", "[ERROR] Falló el inicio de sesión CM (EResult={}, {}), la autorización puede haber expirado.") \
+    M(OutCopyManifestFailed, "[WARN] Failed to copy manifest {}: {}", "[WARN] 复制清单文件 {} 失败: {}", "[AVISO] Error al copiar manifiesto {}: {}") \
+    M(OutWroteSummary, "[INFO] Wrote {}\\ ({})", "[INFO] 已写入 {}\\ ({})", "[INFO] Escrito {}\\ ({})") \
+    M(OutCreateFileFailed, "[ERROR] Failed to create {}.", "[ERROR] 创建文件 {} 失败。", "[ERROR] Fallo al crear {}.") \
+    M(SessionCreateClientFailed, "[WARN] CreateInterface({}) failed (returnCode={}).", "[WARN] CreateInterface({}) 失败 (returnCode={})。", "[AVISO] CreateInterface({}) falló (returnCode={}).") \
+    M(SessionGetInterfaceNull, "[WARN] GetISteamGenericInterface({}) returned null.", "[WARN] GetISteamGenericInterface({}) 返回空。", "[AVISO] GetISteamGenericInterface({}) devolvió null.") \
+    M(SessionOwnershipTicketInfo, "[INFO] Ownership ticket {} bytes (appIdOffset={} steamIdOffset={} signatureOffset={} signatureSize={})", "[INFO] 所有权票据 {} 字节 (appIdOffset={} steamIdOffset={} signatureOffset={} signatureSize={})", "[INFO] Ticket de propiedad {} bytes (appIdOffset={} steamIdOffset={} signatureOffset={} signatureSize={})") \
+    M(SessionGetUtilsUserNull, "[WARN] GetISteamUtils/GetISteamUser returned null.", "[WARN] GetISteamUtils/GetISteamUser 返回空。", "[AVISO] GetISteamUtils/GetISteamUser devolvió null.") \
+    M(SessionReqEticketStartFailed, "[WARN] RequestEncryptedAppTicket failed to start for AppID {}.", "[WARN] 请求 EncryptedAppTicket 启动失败 (AppID {})。", "[AVISO] RequestEncryptedAppTicket no pudo iniciar para AppID {}.") \
+    M(SessionReqEticketTimeout, "[WARN] Timed out waiting for EncryptedAppTicketResponse_t.", "[WARN] 等待 EncryptedAppTicket 响应超时。", "[AVISO] Tiempo de espera agotado para EncryptedAppTicketResponse_t.") \
+    M(SessionReqEticketResultFailed, "[WARN] GetAPICallResult failed for EncryptedAppTicketResponse_t (failureReason={}).", "[WARN] 获取 EncryptedAppTicket 结果失败 (failureReason={})。", "[AVISO] GetAPICallResult falló para EncryptedAppTicketResponse_t (failureReason={}).") \
+    M(SessionReqEticketEResult, "[INFO] RequestEncryptedAppTicket EResult: {}.", "[INFO] RequestEncryptedAppTicket 返回状态码 EResult: {}。", "[INFO] RequestEncryptedAppTicket EResult: {}.") \
+    M(SessionEncryptedTicketInfo, "[INFO] Encrypted ticket {} bytes", "[INFO] 加密票据 {} 字节", "[INFO] Ticket cifrado {} bytes") \
+    M(HttpErrSessionNotReady, "WinHTTP session not ready", "WinHTTP 会话未就绪", "Sesión WinHTTP no está lista") \
+    M(HttpErrInvalidUrl, "Invalid URL address", "无效的 URL 地址", "Dirección URL no válida") \
+    M(HttpErrConnectHostFailed, "Failed to connect to host {} (GetLastError={})", "无法连接主机 {} (GetLastError={})", "No se pudo conectar al host {} (GetLastError={})") \
+    M(HttpErrSendGetFailed, "Failed to send GET request (GetLastError={})", "发送 GET 请求失败 (GetLastError={})", "Error al enviar solicitud GET (GetLastError={})") \
+    M(HttpErrSendPostFailed, "Failed to create or send POST request (GetLastError={})", "创建或发送 POST 请求失败 (GetLastError={})", "Error al crear o enviar solicitud POST (GetLastError={})") \
+    M(HttpErrRecvHeadersFailed, "Failed to receive response headers (GetLastError={})", "接收响应头失败 (GetLastError={})", "Error al recibir encabezados de respuesta (GetLastError={})")
+
+#if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
+#define OST_I18N_LOG_MESSAGES(M) \
+    M(LogSessionStartedHeader, "extract_tickets Debug Session Started at {}", "extract_tickets 调试会话启动于 {}", "Sesión de depuración de extract_tickets iniciada en {}") \
+    M(LogVdfPicsRootWrapper, "Detected PICS binary stream root wrapper: '{}'", "检测到 PICS 二进制流包含 Root 包裹名: '{}'", "Se detectó envoltorio raíz en flujo binario PICS: '{}'") \
+    M(LogVdfRecordManifestGid, "Depot {} recorded manifest GID: {} (branch: {})", "Depot {} 记录清单 GID: {} (分支: {})", "Depot {} registró GID de manifiesto: {} (rama: {})") \
+    M(LogVdfFoundDlcAppId, "Found associated DLC AppID: {}", "发现关联 DLC AppID: {}", "Se encontró AppID de DLC asociado: {}") \
+    M(LogVdfFoundDepotId, "Found Depot ID: {}", "发现 Depot ID: {}", "Se encontró ID de Depot: {}") \
+    M(LogVdfDetectedDenuvoFlag, "Detected Denuvo anti-tamper flag (gamerequiresdenuvo={})", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", "Se detectó indicador anti-manipulación Denuvo (gamerequiresdenuvo={})") \
+    M(LogVdfDetectedThirdPartyDenuvo, "Detected third-party DRM Denuvo tag: {}", "检测到第三方 DRM Denuvo 标记: {}", "Se detectó etiqueta DRM de terceros Denuvo: {}") \
+    M(LogVdfParsedAppName, "Parsed official game name: '{}'", "解析到游戏官方名称: '{}'", "Nombre oficial del juego analizado: '{}'") \
+    M(LogVdfParsedLocalizedName, "Parsed localized official name for current language: '{}' ({})", "解析到匹配语言的官方本地化名称: '{}' ({})", "Nombre oficial localizado analizado para el idioma actual: '{}' ({})") \
+    M(LogVdfUnsupportedType, "Encountered unsupported VDF type code 0x{:02X} (key='{}'), aborting current node", "遇到未支持的 VDF 类型码 0x{:02X} (key='{}')，终止当前节点解析", "Se encontró código de tipo VDF no admitido 0x{:02X} (key='{}'), abortando nodo actual") \
+    M(LogVdfStartParsePics, "Starting PICS VDF parse (size: {} bytes, AppID: {}, first 32 bytes hex: {})", "开始解析 PICS VDF 数据 (大小: {} 字节, AppID: {}, 前32字节Hex: {})", "Iniciando análisis VDF PICS (tamaño: {} bytes, AppID: {}, primeros 32 bytes hex: {})") \
+    M(LogVdfDetectedTextFormat, "Detected PICS response in text VDF (KeyValues) format, starting text parser...", "检测到 PICS 响应为文本 VDF (KeyValues) 格式，启动文本解析引擎...", "Se detectó respuesta PICS en formato VDF de texto (KeyValues), iniciando analizador de texto...") \
+    M(LogVdfDetectedBinaryFormat, "Detected PICS response in binary VDF format, starting binary parser...", "检测到 PICS 响应为二进制 VDF 格式，启动二进制解析引擎...", "Se detectó respuesta PICS en formato VDF binario, iniciando analizador binario...") \
+    M(LogVdfParseComplete, "PICS VDF parse complete (AppID: {}, extracted {} Depot(s), {} DLC(s))", "PICS VDF 解析完成 (AppID: {}, 提取到 {} 个 Depot, {} 个 DLC)", "Análisis VDF PICS completado (AppID: {}, extraídos {} Depot(s), {} DLC(s))") \
+    M(LogCryptoRsaEmptyParam, "Empty parameter for RSA encryption", "RSA 加密入参为空", "Parámetro vacío para cifrado RSA") \
+    M(LogCryptoRsaInvalidModExp, "Invalid RSA modulus or exponent format", "RSA 公钥 Modulus 或 Exponent 格式无效", "Formato de módulo o exponente RSA no válido") \
+    M(LogCryptoOpenAlgFailed, "BCryptOpenAlgorithmProvider failed (status=0x{:08X})", "BCryptOpenAlgorithmProvider 失败 (status=0x{:08X})", "BCryptOpenAlgorithmProvider falló (status=0x{:08X})") \
+    M(LogCryptoImportKeyFailed, "BCryptImportKeyPair failed (status=0x{:08X})", "BCryptImportKeyPair 失败 (status=0x{:08X})", "BCryptImportKeyPair falló (status=0x{:08X})") \
+    M(LogCryptoCalcSizeFailed, "BCryptEncrypt size query failed (status=0x{:08X})", "BCryptEncrypt 测算大小失败 (status=0x{:08X})", "BCryptEncrypt falló al calcular tamaño (status=0x{:08X})") \
+    M(LogCryptoEncryptFailed, "BCryptEncrypt execution failed (status=0x{:08X})", "BCryptEncrypt 加密执行失败 (status=0x{:08X})", "BCryptEncrypt falló al cifrar (status=0x{:08X})") \
+    M(LogCryptoRsaSuccess, "Password RSA encryption succeeded, ciphertext size: {} bytes", "密码 RSA 加密成功，密文大小: {} 字节", "Cifrado RSA de contraseña exitoso, tamaño del texto cifrado: {} bytes") \
+    M(LogGameListCreateCsvFailed, "Failed to create CSV file: {}", "无法创建表格文件: {}", "No se pudo crear el archivo CSV: {}") \
+    M(LogGameListExportCsvSuccess, "Exported games list to: gameslist-{}.csv (total {} games)", "成功导出表格至: gameslist-{}.csv (共 {} 款游戏)", "Lista de juegos exportada a: gameslist-{}.csv (total {} juegos)") \
+    M(LogMainInjectedSteamAppId, "Injected runtime environment variable for AppID {} (SteamAppId={})", "已为游戏 AppID {} 注入运行环境变量 (SteamAppId={})", "Variable de entorno inyectada para AppID {} (SteamAppId={})") \
+    M(LogMainExtractedOwnership, "Successfully extracted OwnershipTicket ({} bytes)", "成功提取 OwnershipTicket ({} 字节)", "OwnershipTicket extraído con éxito ({} bytes)") \
+    M(LogMainExtractedEncrypted, "Successfully extracted EncryptedAppTicket ({} bytes)", "成功提取 EncryptedAppTicket ({} 字节)", "EncryptedAppTicket extraído con éxito ({} bytes)") \
+    M(LogMainCreateWorkerFailed, "Failed to create worker child process (GetLastError={})", "创建 Worker 子进程失败 (GetLastError={})", "Error al crear proceso secundario worker (GetLastError={})") \
+    M(LogMainWorkerTimeout, "Worker child process timed out, terminating forcibly", "Worker 子进程执行超时，强制终止", "Tiempo de espera agotado para proceso worker, terminando forzosamente") \
+    M(LogMainSessionStart, "=== extract_tickets session started (PID: {}) ===", "=== extract_tickets 会话启动 (PID: {}) ===", "=== Sesión de extract_tickets iniciada (PID: {}) ===") \
+    M(LogMainSessionExit, "=== extract_tickets session exited normally ===", "=== extract_tickets 会话正常退出 ===", "=== Sesión de extract_tickets finalizada normalmente ===") \
+    M(LogOutCreateDirFailed, "Failed to create output directory: {} ({})", "创建输出目录失败: {} ({})", "Error al crear directorio de salida: {} ({})") \
+    M(LogOutCopyManifestFailed, "Failed to copy manifest file: {} ({})", "复制清单文件失败: {} ({})", "Error al copiar archivo de manifiesto: {} ({})") \
+    M(LogOutWriteTicketsTxtFailed, "Failed to write tickets.txt: {}", "写入 tickets.txt 失败: {}", "Error al escribir tickets.txt: {}") \
+    M(LogOutWriteLuaFailed, "Failed to write Lua script: {}", "写入 Lua 脚本失败: {}", "Error al escribir script Lua: {}") \
+    M(LogOutFilesWritten, "Output files written: {}/ (DLCs={}, DepotKeys={}, Manifests={}, Tokens={})", "输出文件已写入: {}/ (DLCs={}, DepotKeys={}, Manifests={}, Tokens={})", "Archivos de salida escritos: {}/ (DLCs={}, DepotKeys={}, Manifests={}, Tokens={})") \
+    M(LogOutLuaSaved, "Lua configuration saved to: {}", "Lua 配置文件已保存至: {}", "Configuración Lua guardada en: {}") \
+    M(LogAuthEscCancel2Fa, "User pressed ESC in 2FA modal to cancel login", "用户在 2FA 界面按下 ESC 取消登录", "El usuario presionó ESC en la ventana 2FA para cancelar el inicio de sesión") \
+    M(LogAuth2FaCodeVerified, "2FA code verified and login tokens obtained!", "2FA 动态码验证通过并成功取得登录 Token！", "¡Código 2FA verificado y tokens de inicio de sesión obtenidos!") \
+    M(LogAuthMobileApprovedEnter, "Steam Mobile App confirmation approved (on Enter poll)!", "手机 Steam App 确认批准 (按回车即时轮询通过)！", "¡Confirmación aprobada en la app móvil de Steam (sondeo al presionar Enter)!") \
+    M(LogAuthMobileApprovedZeroKey, "Steam Mobile App confirmation approved (Zero-Keypress auto poll)!", "手机 Steam App 确认批准 (Zero-Keypress 零按键通过)！", "¡Confirmación aprobada en la app móvil de Steam (sondeo automático sin teclas)!") \
+    M(LogAuthRequestingRsa, "Requesting RSA public key: {}", "正在请求 RSA 公钥: {}", "Solicitando clave pública RSA: {}") \
+    M(LogAuthGetRsaFailed, "Failed to get RSA public key (HTTP {}): {}", "获取 RSA 公钥失败 (HTTP {}): {}", "Error al obtener clave pública RSA (HTTP {}): {}") \
+    M(LogAuthParseRsaFailed, "Failed to parse RSA public key response", "RSA 公钥响应解析失败", "Error al analizar respuesta de clave pública RSA") \
+    M(LogAuthGetRsaSuccess, "Successfully obtained RSA public key (timestamp={})", "成功获取 RSA 公钥 (timestamp={})", "Clave pública RSA obtenida con éxito (timestamp={})") \
+    M(LogAuthRsaEncryptFailed, "Password RSA encryption failed", "密码 RSA 加密失败", "Falló el cifrado RSA de la contraseña") \
+    M(LogAuthBeginSession, "Beginning authentication session: {}", "发起身份认证会话: {}", "Iniciando sesión de autenticación: {}") \
+    M(LogAuthBeginSessionHttpFailed, "Failed to begin Steam auth session (HTTP {}): {}", "发起到 Steam 认证会话失败 (HTTP {}): {}", "Error al iniciar sesión de autenticación en Steam (HTTP {}): {}") \
+    M(LogAuthMissingClientOrReqId, "Auth response missing client_id or request_id (HTTP {})", "认证响应缺少 client_id 或 request_id (HTTP {})", "Falta client_id o request_id en respuesta de autenticación (HTTP {})") \
+    M(LogAuthSessionCreated, "Auth session created (steamId={}, confirmations_count={})", "会话已创建 (steamId={}, confirmations_count={})", "Sesión de autenticación creada (steamId={}, confirmations_count={})") \
+    M(LogAuthSubmitting2Fa, "Submitting 2FA code (codeType={})", "正在提交 2FA 动态码 (codeType={})", "Enviando código 2FA (codeType={})") \
+    M(LogAuthSubmit2FaHttpFailed, "Submit 2FA code returned non-success (HTTP {}): {}", "提交 2FA 动态码响应非成功 (HTTP {}): {}", "El envío del código 2FA devolvió error (HTTP {}): {}") \
+    M(LogAuthSubmit2FaSuccess, "Successfully submitted 2FA code to Valve server", "已成功提交动态码至 Valve 服务器", "Código 2FA enviado con éxito al servidor de Valve") \
+    M(LogAuthEscCancelPoll, "User pressed ESC to cancel auth polling", "用户按下 ESC 取消认证轮询", "El usuario presionó ESC para cancelar el sondeo de autenticación") \
+    M(LogAuthPollSuccess, "Auth status poll succeeded! Obtained tokens (refresh={}, access={})", "授权状态轮询成功！获取到 Token (refresh={}, access={})", "¡Sondeo de autorización exitoso! Tokens obtenidos (refresh={}, access={})") \
+    M(LogAuthRefreshingAccess, "Refreshing access_token using cached refresh_token (SteamID={})", "使用本地缓存 refresh_token 刷新 access_token (SteamID={})", "Renovando access_token con refresh_token en caché (SteamID={})") \
+    M(LogAuthRefreshHttpFailed, "Failed to refresh AccessToken (HTTP {}): {}", "刷新 AccessToken 失败 (HTTP {}): {}", "Error al renovar AccessToken (HTTP {}): {}") \
+    M(LogAuthGenAccessHttpOk, "GenerateAccessTokenForApp responded OK (HTTP {})", "GenerateAccessTokenForApp 响应成功 (HTTP {})", "GenerateAccessTokenForApp respondió con éxito (HTTP {})") \
+    M(LogAuthRefreshSuccess, "AccessToken refreshed successfully: {}", "AccessToken 刷新成功: {}", "AccessToken renovado con éxito: {}") \
+    M(LogAuthNoAccessInResp, "Response body did not contain access_token (HTTP {})", "响应体中未包含 access_token (HTTP {})", "El cuerpo de la respuesta no contiene access_token (HTTP {})") \
+    M(LogAuthFetchingOwnedGames, "Fetching owned games list via official WebAPI...", "正在通过官方 WebAPI 拉取拥有的游戏列表...", "Obteniendo lista de juegos propios vía WebAPI oficial...") \
+    M(LogAuthFetchedOwnedGames, "Successfully fetched {} owned game(s)", "成功拉取到 {} 款个人游戏", "Se obtuvieron con éxito {} juego(s) propio(s)") \
+    M(LogAuthFetchOwnedGamesFailed, "Failed to fetch owned games list (HTTP {}): {}", "拉取个人游戏列表失败 (HTTP {}): {}", "Error al obtener lista de juegos propios (HTTP {}): {}") \
+    M(LogAuthDetectedFamilyGroup, "Detected Steam Family Group membership (GroupID={})", "检测到当前账号加入的 Steam 家庭群组 (GroupID={})", "Se detectó pertenencia a grupo familiar de Steam (GroupID={})") \
+    M(LogAuthFoundSharedGames, "Found {} game(s) in Steam Family Sharing library", "从 Steam 家庭共享库中发现 {} 款游戏", "Se encontraron {} juego(s) en la biblioteca familiar compartida") \
+    M(LogAuthBatchResolvingSharedNames, "Batch resolving {} shared game official name(s) via Steam CM PICS...", "正在通过 Steam CM PICS 批量解析 {} 款家庭共享游戏官方名称...", "Resolviendo por lotes {} nombre(s) oficial(es) de juegos compartidos vía Steam CM PICS...") \
+    M(LogAuthFetchSharedGamesFailed, "Failed to query family shared games list (HTTP {}): {}", "查询家庭共享游戏列表未成功 (HTTP {}): {}", "Error al consultar lista de juegos compartidos familiares (HTTP {}): {}") \
+    M(LogAuth2FaRequired, "2FA confirmation required: type={}, message={}", "检测到需要二次验证: type={}, message={}", "Se requiere confirmación 2FA: type={}, message={}") \
+    M(LogCmQueryingCmList, "Querying available CM server list from official Steam API (GetCMList)...", "正在从 Steam 官方 API 查询可用 CM 服务器列表 (GetCMList)...", "Consultando lista de servidores CM disponibles en la API oficial de Steam (GetCMList)...") \
+    M(LogCmGotWsEndpoints, "Obtained {} WebSocket CM endpoint(s) from Steam Directory", "从 Steam Directory 获取到 {} 个 WebSocket CM 节点", "Se obtuvieron {} nodo(s) CM WebSocket de Steam Directory") \
+    M(LogCmQueryCmListFailed, "GetCMList query failed (HTTP {}): {}", "查询 GetCMList 失败 (HTTP {}): {}", "Falló la consulta GetCMList (HTTP {}): {}") \
+    M(LogCmUsingFallbackCluster, "Using built-in high-availability CM server cluster (total {})", "使用预置的高可用 CM 服务器集群 (共 {} 个)", "Usando clúster de servidores CM de alta disponibilidad predefinido (total {})") \
+    M(LogCmSendingEMsg, "Sending eMsg: {} ({} bytes)", "发送 eMsg: {} ({} 字节)", "Enviando eMsg: {} ({} bytes)") \
+    M(LogCmSendFailedReconnecting, "Failed to send eMsg: {}, connection may have dropped; re-establishing session and retrying...", "发送 eMsg: {} 失败，连接可能已失效，尝试重新建立安全会话并重试...", "Error al enviar eMsg: {}, la conexión puede haberse caído; restableciendo sesión y reintentando...") \
+    M(LogCmReconnectedResending, "Connection restored, resending eMsg: {} (jobId={})...", "连接已成功恢复，正在重发 eMsg: {} (jobId={})...", "Conexión restablecida, reenviando eMsg: {} (jobId={})...") \
+    M(LogCmUnpackMultiFailed, "Failed to decompress CMsgMulti (res={}, size_unzipped={}, compressed_len={})", "解压 CMsgMulti 失败 (res={}, size_unzipped={}, compressed_len={})", "Error al descomprimir CMsgMulti (res={}, size_unzipped={}, compressed_len={})") \
+    M(LogCmMultiSubMsg, "  -> CMsgMulti sub-message: eMsg {} (EResult: {}, targetJobId: {}, Body: {} bytes)", "  -> CMsgMulti 内部消息: eMsg {} (EResult: {}, targetJobId: {}, Body: {} 字节)", "  -> Submensaje CMsgMulti: eMsg {} (EResult: {}, targetJobId: {}, Body: {} bytes)") \
+    M(LogCmWaitMsgTimeout, "Timed out waiting for eMsg {} (jobId={}) response ({}ms)", "等待 eMsg {} (jobId={}) 响应超时 ({}ms)", "Tiempo de espera agotado para respuesta eMsg {} (jobId={}) ({}ms)") \
+    M(LogCmRecvEMsg, "Received eMsg: {} (EResult: {}, targetJobId: {}, Body: {} bytes)", "收到 eMsg: {} (EResult: {}, targetJobId: {}, Body: {} 字节)", "Recibido eMsg: {} (EResult: {}, targetJobId: {}, Body: {} bytes)") \
+    M(LogCmMissingTokens, "Missing login tokens (both refreshToken and accessToken are empty)", "缺少登录令牌 (refreshToken / accessToken 均为空)", "Faltan tokens de inicio de sesión (refreshToken y accessToken están vacíos)") \
+    M(LogCmEmptyCmList, "Failed to obtain Steam CM WebSocket endpoint list", "获取 Steam CM WebSocket 节点列表失败", "Error al obtener la lista de nodos WebSocket de Steam CM") \
+    M(LogCmConnectingNode, "Connecting WebSocket channel to CM node [{}/{}]: {}", "正在建立 WebSocket 通道连接 CM 节点 [{}/{}]: {}", "Conectando canal WebSocket al nodo CM [{}/{}]: {}") \
+    M(LogCmConnectNodeFailed, "Failed/timed out connecting to CM node {}, trying next node", "连接 CM 节点 {} 失败/超时，尝试下一个节点", "Fallo/tiempo agotado al conectar al nodo CM {}, probando siguiente nodo") \
+    M(LogCmChannelReadyLoggingIn, "Channel established ({}), performing session logon handshake (steamId={}, token={})...", "通信信道已建立 ({})，正在执行会话握手登录 (steamId={}, token={})...", "Canal establecido ({}), realizando saludo de inicio de sesión (steamId={}, token={})...") \
+    M(LogCmSendLogonFailed, "Failed to send CMsgClientLogon to node {}", "向节点 {} 发送 CMsgClientLogon 失败", "Error al enviar CMsgClientLogon al nodo {}") \
+    M(LogCmLogonTimeout, "Node {} did not respond with CMsgClientLogonResponse within 5000ms, switching to next node", "节点 {} 未在 5000ms 内响应 CMsgClientLogonResponse，切换下一个节点", "El nodo {} no respondió con CMsgClientLogonResponse en 5000ms, cambiando al siguiente nodo") \
+    M(LogCmLogonSuccess, "CM WebSocket logon succeeded! Node: {}, SteamID: {}, SessionID: {}, CellID: {}", "CM WebSocket 登录成功！节点: {}, SteamID: {}, SessionID: {}, CellID: {}", "¡Inicio de sesión WebSocket CM exitoso! Nodo: {}, SteamID: {}, SessionID: {}, CellID: {}") \
+    M(LogCmNodeSwitchEResult, "Node {} returned eresult={} ({}), switching to next CM node...", "节点 {} 返回 eresult={} ({})，自动切换下一个 CM 节点...", "El nodo {} devolvió eresult={} ({}), cambiando al siguiente nodo CM...") \
+    M(LogCmLogonRejected, "CM logon rejected (eresult={}, {})", "CM 登录被拒绝 (eresult={}, {})", "Inicio de sesión CM rechazado (eresult={}, {})") \
+    M(LogCmAllNodesFailed, "All candidate CM nodes tried, logon failed", "尝试了所有候选 CM 节点，登录均未成功", "Se probaron todos los nodos CM candidatos, falló el inicio de sesión") \
+    M(LogCmAutoReconnecting, "Detected CM disconnection, automatically restoring session...", "检测到 CM 连接已断开，正在自动恢复会话...", "Desconexión CM detectada, restaurando sesión automáticamente...") \
+    M(LogCmRefreshNoSteamId, "RefreshAccessTokenViaCm could not extract valid 64-bit SteamID from credentials", "RefreshAccessTokenViaCm 无法从凭据中提取有效的 64 位 SteamID", "RefreshAccessTokenViaCm no pudo extraer un SteamID de 64 bits válido de las credenciales") \
+    M(LogCmRequestingTokenRefresh, "Requesting AccessToken refresh over authenticated CM channel (SteamID={})...", "正在通过已认证 CM 通道请求刷新 AccessToken (SteamID={})...", "Solicitando renovación de AccessToken por canal CM autenticado (SteamID={})...") \
+    M(LogCmRefreshRpcTimeout, "CM channel Authentication.GenerateAccessTokenForApp#1 response timed out", "CM 通道 Authentication.GenerateAccessTokenForApp#1 响应超时", "Tiempo de espera agotado en canal CM para Authentication.GenerateAccessTokenForApp#1") \
+    M(LogCmRefreshRpcFailed, "CM channel Authentication.GenerateAccessTokenForApp#1 returned non-success (eresult={})", "CM 通道 Authentication.GenerateAccessTokenForApp#1 返回非成功 (eresult={})", "Authentication.GenerateAccessTokenForApp#1 por canal CM devolvió error (eresult={})") \
+    M(LogCmRefreshTokenRotated, "Steam server automatically renewed and rotated persistent refresh_token (SteamID={})", "Steam 服务端已自动续期并轮换持久化 refresh_token (SteamID={})", "El servidor de Steam renovó y rotó automáticamente el refresh_token persistente (SteamID={})") \
+    M(LogCmAccessTokenRefreshed, "Successfully refreshed 24h access_token via CM channel: {}", "通过 CM 通道成功刷新 24h access_token: {}", "access_token de 24h renovado con éxito por canal CM: {}") \
+    M(LogCmReqOwnershipTicket, "Requesting AppOwnershipTicket (AppID={})", "正在请求 AppOwnershipTicket (AppID={})", "Solicitando AppOwnershipTicket (AppID={})") \
+    M(LogCmGotOwnershipTicket, "Extracted AppOwnershipTicket (AppID={}, size={} bytes, {})", "成功提取 AppOwnershipTicket (AppID={}, 大小={} 字节, {})", "AppOwnershipTicket extraído con éxito (AppID={}, tamaño={} bytes, {})") \
+    M(LogCmOwnershipTicketFailed, "Failed to extract AppOwnershipTicket (AppID={}, eresult={})", "提取 AppOwnershipTicket 失败 (AppID={}, eresult={})", "Error al extraer AppOwnershipTicket (AppID={}, eresult={})") \
+    M(LogCmReqEncryptedTicket, "Requesting EncryptedAppTicket (AppID={})", "正在请求 EncryptedAppTicket (AppID={})", "Solicitando EncryptedAppTicket (AppID={})") \
+    M(LogCmGotEncryptedTicket, "Extracted EncryptedAppTicket (AppID={}, size={} bytes, {})", "成功提取 EncryptedAppTicket (AppID={}, 大小={} 字节, {})", "EncryptedAppTicket extraído con éxito (AppID={}, tamaño={} bytes, {})") \
+    M(LogCmEncryptedTicketDenied, "Current account not authorized for EncryptedAppTicket on this App (eresult={})", "当前账号无该 App 的 EncryptedAppTicket 授权 (eresult={})", "La cuenta actual no tiene autorización de EncryptedAppTicket para esta App (eresult={})") \
+    M(LogCmReqDepotKey, "Requesting Depot key: DepotID={}, AppID={}", "正在请求 Depot 密钥: DepotID={}, AppID={}", "Solicitando clave de Depot: DepotID={}, AppID={}") \
+    M(LogCmGotDepotKey, "Obtained Depot {} decryption key: {}", "获取到 Depot {} 解密密钥: {}", "Clave de descifrado obtenida para Depot {}: {}") \
+    M(LogCmPublicUnencryptedDepot, "Depot {} is public/unencrypted (eresult=1)", "Depot {} 为免密/公共 Depot (eresult=1)", "El Depot {} es público/sin cifrar (eresult=1)") \
+    M(LogCmDepotKeyDenied, "Depot {} has no key or is unauthorized (eresult={})", "Depot {} 无密钥或未授权 (eresult={})", "El Depot {} no tiene clave o no está autorizado (eresult={})") \
+    M(LogCmGotPicsToken, "Obtained PICS AccessToken for AppID {}: {}", "获得 AppID {} 的 PICS AccessToken: {}", "Obtenido AccessToken PICS para AppID {}: {}") \
+    M(LogCmPublicAppZeroToken, "AppID {} is a public product, no independent AccessToken needed (token=0)", "AppID {} 属于公开产品，无需独立 AccessToken，使用公开模式 token=0 即可", "AppID {} es un producto público, no requiere AccessToken independiente (token=0)") \
+    M(LogCmReqPicsProductInfo, "Requesting PICS product metadata from Steam CM (AppID={}, token={})...", "正在向 Steam CM 请求 PICS 产品元数据 (AppID={}, token={})...", "Solicitando metadatos de producto PICS a Steam CM (AppID={}, token={})...") \
+    M(LogCmRecvPicsAppInfo, "Received PICS AppInfo data (size: {} bytes)", "收到 PICS AppInfo 数据 (大小: {} 字节)", "Datos PICS AppInfo recibidos (tamaño: {} bytes)") \
+    M(LogCmSendGamesPlayed, "Sending ClientGamesPlayed (AppID={}, process_id={})", "发送 ClientGamesPlayed (AppID={}, process_id={})", "Enviando ClientGamesPlayed (AppID={}, process_id={})") \
+    M(LogCmReqManifestCodeRpc, "Sending unified RPC request for ManifestRequestCode to Steam CM: Depot={}, Manifest={}", "向 Steam CM 发送统一 RPC 请求 ManifestRequestCode: Depot={}, Manifest={}", "Enviando solicitud RPC unificada para ManifestRequestCode a Steam CM: Depot={}, Manifest={}") \
+    M(LogCmGotManifestCodeRpc, "Unified RPC eMsg 151 returned manifest_request_code: {}", "统一 RPC eMsg 151 成功返回 manifest_request_code: {}", "RPC unificado eMsg 151 devolvió manifest_request_code: {}") \
+    M(LogCmManifestCodeRpcDenied, "Unified RPC eMsg 151 returned non-success (eresult={}), account lacks license for Depot {}", "统一 RPC eMsg 151 返回非成功结果 (eresult={})，账号未拥有 Depot {} 授权", "RPC unificado eMsg 151 devolvió error (eresult={}), la cuenta no posee licencia para el Depot {}") \
+    M(LogCmReqManifestCodeLegacy, "Falling back to legacy eMsg 5594 for ManifestRequestCode: Depot={}, Manifest={}", "回退尝试传统 eMsg 5594 请求 ManifestRequestCode: Depot={}, Manifest={}", "Recurriendo a eMsg 5594 heredado para ManifestRequestCode: Depot={}, Manifest={}") \
+    M(LogCmGotManifestCodeLegacy, "Legacy RPC eMsg 5594 returned manifest_request_code: {}", "传统 RPC eMsg 5594 成功返回 manifest_request_code: {}", "RPC heredado eMsg 5594 devolvió manifest_request_code: {}") \
+    M(LogCmPromotedCdnServer, "Promoted verified active CDN server to top: {}", "已将验证成功的活跃 CDN 节点置顶: {}", "Servidor CDN activo verificado promovido al inicio: {}") \
+    M(LogCmManifestAlreadyExists, "Manifest file already exists in target directory, reusing immediately: {}", "清单文件已存在于目标目录，直接秒级复用: {}", "El archivo de manifiesto ya existe en el directorio de destino, reutilizando: {}") \
+    M(LogCmDownloadingManifestCdn, "Downloading manifest from Steam CDN: {}", "正在从 Steam CDN 下载清单: {}", "Descargando manifiesto desde CDN de Steam: {}") \
+    M(LogCmDownloadedManifestCdn, "Successfully fetched manifest data from Steam CDN ({}) ({} bytes)", "成功从 Steam CDN ({}) 获取清单数据 ({} 字节)", "Datos de manifiesto obtenidos con éxito desde CDN de Steam ({}) ({} bytes)") \
+    M(LogCmDownloadManifestFailed, "Failed to download manifest from Steam CDN (Depot={}, Manifest={}): HTTP {} {}", "从 Steam CDN 下载清单失败 (Depot={}, Manifest={}): HTTP {} {}", "Error al descargar manifiesto desde CDN de Steam (Depot={}, Manifest={}): HTTP {} {}") \
+    M(LogCmCreateDirFailed, "Failed to create directory: {} ({})", "创建目录失败: {} ({})", "Error al crear directorio: {} ({})") \
+    M(LogCmManifestGzipOk, "Manifest GZIP decompression succeeded ({} compressed -> {} raw bytes)", "清单 GZIP 解压成功 ({} 压缩 -> {} 原始字节)", "Descompresión GZIP de manifiesto exitosa ({} comprimidos -> {} bytes sin procesar)") \
+    M(LogCmManifestGzipFailed, "Manifest GZIP decompression failed (res={}), discarding corrupted data", "清单 GZIP 解压失败 (res={}), 丢弃损坏数据", "Falló la descompresión GZIP del manifiesto (res={}), descartando datos dañados") \
+    M(LogCmSaveManifestFailed, "Failed to save manifest file: {}", "保存清单文件失败: {}", "Error al guardar archivo de manifiesto: {}") \
+    M(LogCmManifestSaved, "Successfully downloaded and saved manifest file online: {} ({} bytes)", "成功直接在线下载并保存清单文件: {} ({} 字节)", "Archivo de manifiesto descargado y guardado en línea con éxito: {} ({} bytes)") \
+    M(LogCmNoManifestReqCode, "Failed to obtain manifest_request_code (Depot={}, Manifest={})", "未能获得 manifest_request_code (Depot={}, Manifest={})", "No se pudo obtener manifest_request_code (Depot={}, Manifest={})") \
+    M(LogCmDetectedDenuvoStore, "Detected Denuvo protection from official Steam Store metadata (AppID={}, drm_notice='{}')", "从 Steam Store 官方元数据检测到 Denuvo 保护 (AppID={}, drm_notice='{}')", "Se detectó protección Denuvo en metadatos oficiales de la tienda Steam (AppID={}, drm_notice='{}')") \
+    M(LogCmFullReqOwnership, "Requesting AppOwnershipTicket from Steam CM (AppID={})...", "正在向 Steam CM 请求 AppOwnershipTicket (AppID={})...", "Solicitando AppOwnershipTicket a Steam CM (AppID={})...") \
+    M(LogCmFullGotOwnership, "Extracted ownership ticket ({} bytes)", "提取到所有权票据 ({} 字节)", "Ticket de propiedad extraído ({} bytes)") \
+    M(LogCmFullNoOwnershipFallback, "Could not obtain ownership ticket (not directly owned or family shared; OpenSteamTool will fall back to AppID 7 spoofing at runtime)", "未能获取所有权票据 (账号未直接拥有或属于共享借用；OpenSteamTool 将在运行时自动执行 AppID 7 伪造兜底)", "No se pudo obtener ticket de propiedad (no poseído directamente o compartido; OpenSteamTool usará suplantación de AppID 7 en ejecución)") \
+    M(LogCmFullQueryPicsToken, "Querying 64-bit PICS access token for AppID {} from Steam CM...", "正在向 Steam CM 查询 AppID {} 的 64 位 PICS 访问令牌...", "Consultando token de acceso PICS de 64 bits para AppID {} en Steam CM...") \
+    M(LogCmFullReqPicsMeta, "Requesting official product metadata from Steam CM PICS (AppID={}, token={})...", "正在向 Steam CM PICS 请求官方产品元数据 (AppID={}, token={})...", "Solicitando metadatos oficiales del producto a Steam CM PICS (AppID={}, token={})...") \
+    M(LogCmFullNeedEticketSession, "Detected game requires encrypted ticket (Denuvo={}, Force={}), establishing targeted session...", "检测到游戏需要加密票据 (Denuvo={}, 强制={})，建立定向会话授权...", "El juego requiere ticket cifrado (Denuvo={}, Forzar={}), estableciendo sesión dirigida...") \
+    M(LogCmFullGotEticket, "Extracted encrypted ticket from targeted session ({} bytes)", "定向会话提取到加密票据 ({} 字节)", "Ticket cifrado extraído de la sesión dirigida ({} bytes)") \
+    M(LogCmFullEticketFailed, "Targeted session still could not obtain encrypted ticket (account may lack access)", "定向会话仍未能获取加密票据 (可能账号无权访问该产品)", "La sesión dirigida no pudo obtener el ticket cifrado (la cuenta puede carecer de acceso)") \
+    M(LogCmFullGotOwnershipAfterSession, "Successfully extracted ownership ticket after session activation ({} bytes)", "会话激活后成功提取到所有权票据 ({} 字节)", "Ticket de propiedad extraído con éxito tras activar la sesión ({} bytes)") \
+    M(LogCmFullSkipEticketSession, "Standard game does not require Denuvo encrypted ticket (eticket), skipping session activation", "普通游戏无需 Denuvo 加密票据 (eticket)，已优雅跳过会话激活", "El juego estándar no requiere ticket cifrado Denuvo (eticket), omitiendo activación de sesión") \
+    M(LogCmFullGotAppInfoSummary, "Obtained official AppInfo data (total {} Depot(s), {} DLC(s))", "获得官方 AppInfo 数据 (共 {} 个 Depot, {} 个 DLC)", "Datos oficiales AppInfo obtenidos (total {} Depot(s), {} DLC(s))") \
+    M(LogCmFullQueryingDepotKeys, "Querying Depot decryption keys from Steam CM (AppID={}, {} candidate physical Depot(s))...", "正在向 Steam CM 查询 Depot 解密密钥 (AppID={}, 共 {} 个候选物理 Depot)...", "Consultando claves de descifrado de Depot en Steam CM (AppID={}, {} Depot(s) físicos candidatos)...") \
+    M(LogCmFullPullingManifests, "Pulling official manifest files from cloud (authorized Depots: {}/{})...", "正在云端拉取官方清单文件 (已授权 Depot: {}/{})...", "Descargando manifiestos oficiales de la nube (Depots autorizados: {}/{})...") \
+    M(LogCmFullSkipUnauthorizedDepot, "Depot {} unlicensed or unauthorized, skipping manifest request", "Depot {} 未获许可或未授权，优雅跳过清单请求", "Depot {} sin licencia o no autorizado, omitiendo solicitud de manifiesto") \
+    M(LogCmFullBatchQueryDlcNames, "Batch querying {} official DLC name(s) from Steam CM PICS...", "正在向 Steam CM PICS 批量查询 {} 个 DLC 官方名称...", "Consultando por lotes {} nombre(s) oficial(es) de DLC en Steam CM PICS...") \
+    M(LogCmFullExtractedDepotKeys, "Extracted {} Depot decryption key(s)/manifest(s)", "提取到 {} 个 Depot 解密密钥/清单", "Se extrajeron {} clave(s)/manifiesto(s) de Depot") \
+    M(LogCmFullQueryingPicsTokens, "Querying 64-bit PICS AccessToken (AppID={})...", "正在查询 64 位 PICS AccessToken (AppID={})...", "Consultando AccessToken PICS de 64 bits (AppID={})...") \
+    M(LogCmFullExtractedPicsTokens, "Extracted PICS access token(s) (total {})", "提取到 PICS 访问令牌 (共 {} 个)", "Token(s) de acceso PICS extraído(s) (total {})") \
+    M(LogSessionNoSteamPath, "Failed to find Steam install path in registry", "未在注册表中找到 Steam 安装路径", "No se encontró la ruta de instalación de Steam en el registro") \
+    M(LogSessionLoadClientFailed, "Failed to load steamclient64.dll: {} (GetLastError={})", "加载 steamclient64.dll 失败: {} (GetLastError={})", "Error al cargar steamclient64.dll: {} (GetLastError={})") \
+    M(LogSessionNoCreateInterface, "steamclient64.dll is missing CreateInterface export", "steamclient64.dll 缺少 CreateInterface 导出", "steamclient64.dll no tiene la exportación CreateInterface") \
+    M(LogSessionCreateInterfaceFailed, "CreateInterface({}) failed (returnCode={})", "CreateInterface({}) 失败 (returnCode={})", "CreateInterface({}) falló (returnCode={})") \
+    M(LogSessionGetGenericNull, "GetISteamGenericInterface({}) returned null", "GetISteamGenericInterface({}) 返回空", "GetISteamGenericInterface({}) devolvió null") \
+    M(LogSessionNoOwnershipTicket, "Failed to obtain ownership ticket for AppID {}", "未能获取 AppID {} 的所有权票据", "No se pudo obtener el ticket de propiedad para AppID {}") \
+    M(LogSessionGotOwnershipTicket, "Ownership ticket: {} bytes", "所有权票据: {} 字节", "Ticket de propiedad: {} bytes") \
+    M(LogSessionGetUtilsUserNull, "GetISteamUtils/GetISteamUser returned null", "GetISteamUtils/GetISteamUser 返回空", "GetISteamUtils/GetISteamUser devolvió null") \
+    M(LogSessionReqEticketStartFailed, "RequestEncryptedAppTicket failed to start (AppID={})", "请求 EncryptedAppTicket 启动失败 (AppID={})", "RequestEncryptedAppTicket no pudo iniciar (AppID={})") \
+    M(LogSessionReqEticketTimeout, "Timed out waiting for EncryptedAppTicket", "等待 EncryptedAppTicket 超时", "Tiempo de espera agotado para EncryptedAppTicket") \
+    M(LogSessionReqEticketResultFailed, "Failed to get EncryptedAppTicket result (failureReason={})", "获取 EncryptedAppTicket 结果失败 (failureReason={})", "Error al obtener resultado de EncryptedAppTicket (failureReason={})") \
+    M(LogSessionReqEticketEResult, "RequestEncryptedAppTicket returned EResult {} (app has no encrypted ticket key configured or unauthorized; standard single-player games usually do not require this)", "请求 EncryptedAppTicket 返回状态码 EResult {} (游戏未配置加密票据密钥或未授权，通常单机游戏无需此票据)", "RequestEncryptedAppTicket devolvió EResult {} (el juego no tiene clave de ticket cifrado o no está autorizado; los juegos estándar no suelen requerirlo)") \
+    M(LogSessionEticketEmpty, "Encrypted ticket is empty", "加密票据为空", "El ticket cifrado está vacío") \
+    M(LogSessionGetEticketDataFailed, "Failed to get EncryptedAppTicket data", "获取 EncryptedAppTicket 数据失败", "Error al obtener datos de EncryptedAppTicket") \
+    M(LogSessionGotEncryptedTicket, "Encrypted ticket: {} bytes", "加密票据: {} 字节", "Ticket cifrado: {} bytes") \
+    M(LogStoreQuarantineAbnormal, "Quarantined abnormal credential entry to avoid overwrite loss", "暂存解析异常的凭据条目至隔离区，避免覆盖丢失", "Entrada de credencial anormal puesta en cuarentena para evitar pérdida por sobrescritura") \
+    M(LogStoreSkipMalformed, "Skipping severely malformed credential entry (columns={})", "跳过格式严重缺损的凭据条目 (列数={})", "Omitiendo entrada de credencial gravemente malformada (columnas={})") \
+    M(LogStoreOpenFileFailed, "Failed to open credential cache file: {}", "无法打开凭据缓存文件: {}", "No se pudo abrir el archivo de caché de credenciales: {}") \
+    M(LogStoreHeaderCorrupt, "Credential file header validation failed or file is corrupted", "凭据文件头部校验失败或文件已损坏", "Falló la validación del encabezado del archivo de credenciales o el archivo está dañado") \
+    M(LogStoreIncompleteRead, "Incomplete read of credential ciphertext", "凭据密文读取不完整", "Lectura incompleta del texto cifrado de credenciales") \
+    M(LogStoreDpapiDecryptFailed, "DPAPI decryption failed (GetLastError={})", "DPAPI 解密失败 (GetLastError={})", "Falló el descifrado DPAPI (GetLastError={})") \
+    M(LogStoreLoadedAccounts, "Successfully loaded {} cached account(s)", "成功加载 {} 个缓存账号", "Se cargaron con éxito {} cuenta(s) en caché") \
+    M(LogStoreDpapiEncryptFailed, "DPAPI encryption save failed (GetLastError={})", "DPAPI 加密保存失败 (GetLastError={})", "Falló el guardado con cifrado DPAPI (GetLastError={})") \
+    M(LogStoreCreateTempFailed, "Failed to create temporary credential file: {}", "无法创建临时凭据文件: {}", "No se pudo crear el archivo temporal de credenciales: {}") \
+    M(LogStoreWriteTempFailed, "Failed to write or flush temporary credential file (GetLastError={}): {}", "写入或刷新临时凭据文件失败 (GetLastError={}): {}", "Error al escribir o vaciar el archivo temporal de credenciales (GetLastError={}): {}") \
+    M(LogStoreInitMoveFailed, "Failed to create initial credential file (MoveFileExW GetLastError={})", "首次建立凭据文件失败 (MoveFileExW GetLastError={})", "Error al crear el archivo inicial de credenciales (MoveFileExW GetLastError={})") \
+    M(LogStoreAtomicReplaceFailed, "Atomic replacement of credential file failed (ReplaceFileW GetLastError={})", "原子替换凭据文件失败 (ReplaceFileW GetLastError={})", "Falló el reemplazo atómico del archivo de credenciales (ReplaceFileW GetLastError={})") \
+    M(LogStorePersistedAccounts, "Successfully persisted {} account(s) atomically to DPAPI storage", "成功原子持久化 {} 个账号到 DPAPI 存储", "Se persistieron atómicamente con éxito {} cuenta(s) en el almacenamiento DPAPI") \
+    M(LogStoreDeletedSteamId, "Securely deleted local credential cache for SteamID {}", "已安全删除 SteamID {} 的本地凭据缓存", "Caché local de credenciales eliminada de forma segura para SteamID {}") \
+    M(LogStoreDeletedAccount, "Securely deleted local credential cache for account {}", "已安全删除账号 {} 的本地凭据缓存", "Caché local de credenciales eliminada de forma segura para la cuenta {}") \
+    M(LogStoreWipedAll, "Securely shredded and wiped all local credential cache files", "已彻底粉碎并清理全部本地凭据缓存文件", "Todos los archivos de caché de credenciales locales fueron triturados y eliminados de forma segura") \
+    M(LogUtilsCreateFileFailed, "Failed to create file: {}", "创建文件失败: {}", "Error al crear archivo: {}") \
+    M(LogUtilsWriteFileFailed, "Failed to write file: {}", "写入文件失败: {}", "Error al escribir archivo: {}") \
+    M(LogUtilsFoundSteamPath, "Found Steam install path via SteamLocator: {}", "通过 SteamLocator 找到 Steam 安装路径: {}", "Ruta de instalación de Steam encontrada vía SteamLocator: {}") \
+    M(LogHttpCrackUrlFailed, "WinHttpCrackUrl failed: {} (GetLastError={})", "WinHttpCrackUrl 失败: {} (GetLastError={})", "WinHttpCrackUrl falló: {} (GetLastError={})") \
+    M(LogHttpOpenFailed, "WinHttpOpen failed (GetLastError={})", "WinHttpOpen 失败 (GetLastError={})", "WinHttpOpen falló (GetLastError={})") \
+    M(LogHttpGetDone, "GET completed (HTTP {}, size: {} bytes, elapsed: {}ms)", "GET 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", "GET completado (HTTP {}, tamaño: {} bytes, tiempo: {}ms)") \
+    M(LogHttpPostDone, "POST completed (HTTP {}, size: {} bytes, elapsed: {}ms)", "POST 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", "POST completado (HTTP {}, tamaño: {} bytes, tiempo: {}ms)") \
+    M(LogWsSessionInvalid, "Invalid WinHTTP session", "WinHTTP 会话无效", "Sesión WinHTTP no válida") \
+    M(LogWsInvalidUrl, "Invalid WebSocket URL: {}", "无效的 WebSocket URL: {}", "URL de WebSocket no válida: {}") \
+    M(LogWsConnecting, "Connecting -> {}:{} (Path: {}, SSL: {})", "正在建立连接 -> {}:{} (Path: {}, SSL: {})", "Conectando -> {}:{} (Ruta: {}, SSL: {})") \
+    M(LogWsConnectHostFailed, "Failed to connect to WebSocket host: {} (GetLastError={})", "无法连接 WebSocket 主机: {} (GetLastError={})", "No se pudo conectar al host WebSocket: {} (GetLastError={})") \
+    M(LogWsOpenReqFailed, "Failed to create WebSocket handshake request (GetLastError={})", "创建 WebSocket 握手请求失败 (GetLastError={})", "Error al crear solicitud de saludo WebSocket (GetLastError={})") \
+    M(LogWsUpgradeOptFailed, "Failed to set WebSocket upgrade option (GetLastError={})", "请求升级 WebSocket 选项失败 (GetLastError={})", "Error al configurar opción de actualización WebSocket (GetLastError={})") \
+    M(LogWsSendHandshakeFailed, "Failed to send WebSocket upgrade handshake request (GetLastError={})", "发送 WebSocket 升级握手请求失败 (GetLastError={})", "Error al enviar solicitud de saludo de actualización WebSocket (GetLastError={})") \
+    M(LogWsRecvHandshakeFailed, "Failed to receive WebSocket handshake response (GetLastError={})", "接收 WebSocket 握手响应失败 (GetLastError={})", "Error al recibir respuesta de saludo WebSocket (GetLastError={})") \
+    M(LogWsHandshakeRejected, "WebSocket handshake rejected (HTTP status: {})", "WebSocket 握手被拒绝 (HTTP 状态码: {})", "Saludo WebSocket rechazado (estado HTTP: {})") \
+    M(LogWsCompleteUpgradeFailed, "WinHttpWebSocketCompleteUpgrade failed (GetLastError={})", "WinHttpWebSocketCompleteUpgrade 失败 (GetLastError={})", "WinHttpWebSocketCompleteUpgrade falló (GetLastError={})") \
+    M(LogWsConnected, "Successfully established secure WebSocket connection: {} (elapsed: {}ms)", "已成功建立安全 WebSocket 连接: {} (耗时: {}ms)", "Conexión WebSocket segura establecida con éxito: {} (tiempo: {}ms)") \
+    M(LogWsSendFailed, "WinHttpWebSocketSend failed (error={})", "WinHttpWebSocketSend 失败 (error={})", "WinHttpWebSocketSend falló (error={})") \
+    M(LogWsRecvError, "WinHttpWebSocketReceive error (error={})", "WinHttpWebSocketReceive 错误 (error={})", "Error en WinHttpWebSocketReceive (error={})") \
+    M(LogWsPeerClosed, "Received WebSocket close frame from peer", "收到对端 WebSocket 关闭帧", "Se recibió trama de cierre WebSocket del par")
+#else
+#define OST_I18N_LOG_MESSAGES(M)
+#endif
 
 #define OST_I18N_ENUM_DEF(key, en, zh, es) key,
 
 enum class MsgKey : size_t {
     OST_I18N_MESSAGES(OST_I18N_ENUM_DEF)
+    OST_I18N_LOG_MESSAGES(OST_I18N_ENUM_DEF)
     COUNT
 };
 
@@ -225,6 +469,7 @@ public:
     static Language DetectSystemLanguage() noexcept;
     static Language GetCurrentLanguage() noexcept;
     static void SetLanguage(Language lang) noexcept;
+    static bool SetLanguageFromString(std::string_view langStr) noexcept;
     static void InitLanguage() noexcept;
     [[nodiscard]] static std::string_view GetLanguageCode(Language lang = GetCurrentLanguage()) noexcept;
     [[nodiscard]] static const char* GetSteamLanguageCode(Language lang = GetCurrentLanguage()) noexcept;

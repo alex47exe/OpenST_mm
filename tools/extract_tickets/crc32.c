@@ -43,7 +43,7 @@ unsigned int tinf_crc32(const void *data, unsigned int length)
 	unsigned int crc = 0xFFFFFFFF;
 	unsigned int i;
 
-	if (length == 0) {
+	if (data == 0 || length == 0) {
 		return 0;
 	}
 

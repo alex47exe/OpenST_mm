@@ -59,6 +59,10 @@ int tinf_gzip_uncompress(void *dest, unsigned int *destLen,
 
 	/* -- Check header -- */
 
+	if (dest == 0 || destLen == 0 || source == 0) {
+		return TINF_DATA_ERROR;
+	}
+
 	/* Check room for at least 10 byte header and 8 byte trailer */
 	if (sourceLen < 18) {
 		return TINF_DATA_ERROR;

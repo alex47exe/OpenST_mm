@@ -45,6 +45,20 @@ public:
         m_buf.reserve(128);
     }
 
+    ~ProtoWriter() noexcept {
+        if (!m_buf.empty()) {
+            volatile uint8_t* p = m_buf.data();
+            for (size_t i = 0; i < m_buf.size(); ++i) {
+                p[i] = 0;
+            }
+        }
+    }
+
+    ProtoWriter(const ProtoWriter&) = delete;
+    ProtoWriter& operator=(const ProtoWriter&) = delete;
+    ProtoWriter(ProtoWriter&&) = delete;
+    ProtoWriter& operator=(ProtoWriter&&) = delete;
+
     void WriteVarint(uint64_t val) {
         while (val >= 0x80) {
             m_buf.push_back(static_cast<uint8_t>((val & 0x7F) | 0x80));
@@ -201,6 +215,7 @@ inline std::vector<uint8_t> PackSteamMsg(
     }
     if (!targetJobName.empty()) {
         hdrWriter.WriteString(12, targetJobName);
+        hdrWriter.WriteInt32(23, 1); // realm = 1 (steamglobal)
     }
 
     const auto& hdrBytes = hdrWriter.Data();
@@ -240,6 +255,32 @@ inline bool UnpackSteamMsg(
     outHdr = packet.subspan(8, hdrLen);
     outBody = packet.subspan(8 + hdrLen);
     return true;
+}
+
+// Extracts steamid (field 1) from CMsgProtoBufHeader
+inline uint64_t ExtractHeaderSteamId(std::span<const uint8_t> hdrBytes) {
+    if (hdrBytes.empty()) return 0;
+    ProtoReader r(hdrBytes);
+    ProtoField f;
+    while (r.ReadNext(f)) {
+        if (f.fieldNumber == 1) { // steamid (fixed64)
+            return (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+        }
+    }
+    return 0;
+}
+
+// Extracts client_sessionid (field 2) from CMsgProtoBufHeader
+inline int32_t ExtractHeaderClientSessionId(std::span<const uint8_t> hdrBytes) {
+    if (hdrBytes.empty()) return 0;
+    ProtoReader r(hdrBytes);
+    ProtoField f;
+    while (r.ReadNext(f)) {
+        if (f.fieldNumber == 2) { // client_sessionid (int32)
+            return static_cast<int32_t>(f.varintVal);
+        }
+    }
+    return 0;
 }
 
 // Extracts EResult (field 13) from CMsgProtoBufHeader

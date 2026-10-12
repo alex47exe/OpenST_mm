@@ -2,39 +2,47 @@
 
 #include <cctype>
 #include <charconv>
+#include <limits>
 
 namespace OST::ExtractTickets {
 
 namespace {
-    std::string_view SkipWhitespace(std::string_view sv) {
+    std::string_view SkipWhitespace(std::string_view sv) noexcept {
         while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) {
             sv.remove_prefix(1);
         }
         return sv;
     }
 
-    size_t FindKeyPosition(std::string_view json, std::string_view key) {
-        char stackBuf[128];
-        std::string heapBuf;
-        std::string_view pattern;
-        if (key.size() + 2 <= sizeof(stackBuf)) {
-            stackBuf[0] = '"';
-            std::memcpy(stackBuf + 1, key.data(), key.size());
-            stackBuf[key.size() + 1] = '"';
-            pattern = std::string_view(stackBuf, key.size() + 2);
-        } else {
-            heapBuf = "\"" + std::string(key) + "\"";
-            pattern = heapBuf;
-        }
+    // State-aware JSON key search: only matches `"key"` tokens when not inside a string value
+    size_t FindKeyPosition(std::string_view json, std::string_view key) noexcept {
+        bool inStr = false;
+        bool escaped = false;
+        size_t strStart = 0;
 
-        size_t pos = 0;
-        while ((pos = json.find(pattern, pos)) != std::string_view::npos) {
-            size_t afterKey = pos + pattern.size();
-            afterKey = json.find_first_not_of(" \t\r\n", afterKey);
-            if (afterKey != std::string_view::npos && json[afterKey] == ':') {
-                return afterKey + 1; // Position immediately after ':'
+        for (size_t i = 0; i < json.size(); ++i) {
+            const char c = json[i];
+            if (escaped) {
+                escaped = false;
+                continue;
             }
-            pos += pattern.size();
+            if (c == '\\' && inStr) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                if (!inStr) {
+                    inStr = true;
+                    strStart = i + 1;
+                } else {
+                    inStr = false;
+                    const std::string_view token = json.substr(strStart, i - strStart);
+                    size_t afterQuote = json.find_first_not_of(" \t\r\n", i + 1);
+                    if (afterQuote != std::string_view::npos && json[afterQuote] == ':' && token == key) {
+                        return afterQuote + 1; // Position immediately after ':'
+                    }
+                }
+            }
         }
         return std::string_view::npos;
     }
@@ -61,18 +69,30 @@ namespace {
                             unsigned int codepoint = 0;
                             auto hexChunk = input.substr(i + 1, 4);
                             auto [ptr, ec] = std::from_chars(hexChunk.data(), hexChunk.data() + 4, codepoint, 16);
-                            if (ec == std::errc()) {
+                            if (ec == std::errc() && ptr == hexChunk.data() + 4) {
                                 i += 4;
                                 // Handle UTF-16 surrogate pairs (RFC 8259)
-                                if (codepoint >= 0xD800 && codepoint <= 0xDBFF &&
-                                    i + 6 < input.size() && input[i + 1] == '\\' && input[i + 2] == 'u') {
-                                    unsigned int lowSurrogate = 0;
-                                    auto lowChunk = input.substr(i + 3, 4);
-                                    auto [ptr2, ec2] = std::from_chars(lowChunk.data(), lowChunk.data() + 4, lowSurrogate, 16);
-                                    if (ec2 == std::errc() && lowSurrogate >= 0xDC00 && lowSurrogate <= 0xDFFF) {
-                                        i += 6;
-                                        codepoint = 0x10000 + (((codepoint - 0xD800) << 10) | (lowSurrogate - 0xDC00));
+                                if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+                                    if (i + 6 < input.size() && input[i + 1] == '\\' && input[i + 2] == 'u') {
+                                        unsigned int lowSurrogate = 0;
+                                        auto lowChunk = input.substr(i + 3, 4);
+                                        auto [ptr2, ec2] = std::from_chars(lowChunk.data(), lowChunk.data() + 4, lowSurrogate, 16);
+                                        if (ec2 == std::errc() && ptr2 == lowChunk.data() + 4 &&
+                                            lowSurrogate >= 0xDC00 && lowSurrogate <= 0xDFFF) {
+                                            i += 6;
+                                            codepoint = 0x10000 + (((codepoint - 0xD800) << 10) | (lowSurrogate - 0xDC00));
+                                        } else {
+                                            out.push_back('?');
+                                            break;
+                                        }
+                                    } else {
+                                        out.push_back('?');
+                                        break;
                                     }
+                                } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+                                    // Unpaired low surrogate is invalid Unicode
+                                    out.push_back('?');
+                                    break;
                                 }
                                 if (codepoint <= 0x7F) {
                                     out.push_back(static_cast<char>(codepoint));
@@ -143,6 +163,16 @@ namespace {
         }
         return std::string_view::npos;
     }
+
+    size_t FindArrayStartForKey(std::string_view json, std::string_view key) noexcept {
+        const size_t valPos = FindKeyPosition(json, key);
+        if (valPos == std::string_view::npos) return std::string_view::npos;
+        const size_t arrayStart = json.find_first_not_of(" \t\r\n", valPos);
+        if (arrayStart == std::string_view::npos || json[arrayStart] != '[') {
+            return std::string_view::npos;
+        }
+        return arrayStart;
+    }
 } // namespace
 
 std::optional<std::string> JsonHelper::GetString(std::string_view json, std::string_view key) {
@@ -153,7 +183,6 @@ std::optional<std::string> JsonHelper::GetString(std::string_view json, std::str
     if (sv.empty() || sv.front() != '"') return std::nullopt;
 
     sv.remove_prefix(1); // skip opening quote
-    size_t endQuote = 0;
     bool escaped = false;
     for (size_t i = 0; i < sv.size(); ++i) {
         if (escaped) {
@@ -161,8 +190,7 @@ std::optional<std::string> JsonHelper::GetString(std::string_view json, std::str
         } else if (sv[i] == '\\') {
             escaped = true;
         } else if (sv[i] == '"') {
-            endQuote = i;
-            return UnescapeJsonString(sv.substr(0, endQuote));
+            return UnescapeJsonString(sv.substr(0, i));
         }
     }
     return std::nullopt;
@@ -187,9 +215,10 @@ std::optional<uint64_t> JsonHelper::GetUInt64(std::string_view json, std::string
         }
     }
 
+    if (sv.empty()) return std::nullopt;
     uint64_t val = 0;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
-    if (ec == std::errc()) {
+    if (ec == std::errc() && ptr == sv.data() + sv.size()) {
         return val;
     }
     return std::nullopt;
@@ -197,7 +226,7 @@ std::optional<uint64_t> JsonHelper::GetUInt64(std::string_view json, std::string
 
 std::optional<uint32_t> JsonHelper::GetUInt32(std::string_view json, std::string_view key) {
     auto val64 = GetUInt64(json, key);
-    if (val64.has_value()) {
+    if (val64.has_value() && *val64 <= (std::numeric_limits<uint32_t>::max)()) {
         return static_cast<uint32_t>(*val64);
     }
     return std::nullopt;
@@ -205,13 +234,10 @@ std::optional<uint32_t> JsonHelper::GetUInt32(std::string_view json, std::string
 
 std::vector<AllowedConfirmation> JsonHelper::GetConfirmations(std::string_view json) {
     std::vector<AllowedConfirmation> list;
-    size_t targetPos = json.find("\"allowed_confirmations\"");
-    if (targetPos == std::string_view::npos) return list;
-
-    size_t arrayStart = json.find('[', targetPos);
+    size_t arrayStart = FindArrayStartForKey(json, "allowed_confirmations");
     if (arrayStart == std::string_view::npos) return list;
 
-    size_t arrayEnd = json.find(']', arrayStart);
+    size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');
     if (arrayEnd == std::string_view::npos) return list;
 
     size_t pos = arrayStart + 1;
@@ -219,12 +245,12 @@ std::vector<AllowedConfirmation> JsonHelper::GetConfirmations(std::string_view j
         size_t objStart = json.find('{', pos);
         if (objStart == std::string_view::npos || objStart >= arrayEnd) break;
 
-        size_t objEnd = json.find('}', objStart);
-        if (objEnd == std::string_view::npos || objEnd > arrayEnd) break;
+        size_t objEnd = FindMatchingBracket(json, objStart, '{', '}', arrayEnd);
+        if (objEnd == std::string_view::npos || objEnd >= arrayEnd) break;
 
         std::string_view itemJson = json.substr(objStart, objEnd - objStart + 1);
         auto cTypeOpt = GetUInt32(itemJson, "confirmation_type");
-        if (cTypeOpt) {
+        if (cTypeOpt && *cTypeOpt <= static_cast<uint32_t>((std::numeric_limits<int>::max)())) {
             AllowedConfirmation conf;
             conf.type = static_cast<int>(*cTypeOpt);
             conf.associatedMessage = GetString(itemJson, "associated_message").value_or("");
@@ -238,13 +264,10 @@ std::vector<AllowedConfirmation> JsonHelper::GetConfirmations(std::string_view j
 
 std::vector<std::string> JsonHelper::GetStringArray(std::string_view json, std::string_view key) {
     std::vector<std::string> items;
-    size_t keyPos = FindKeyPosition(json, key);
-    if (keyPos == std::string_view::npos) return items;
-
-    size_t arrayStart = json.find('[', keyPos);
+    size_t arrayStart = FindArrayStartForKey(json, key);
     if (arrayStart == std::string_view::npos) return items;
 
-    size_t arrayEnd = json.find(']', arrayStart);
+    size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');
     if (arrayEnd == std::string_view::npos) return items;
 
     size_t pos = arrayStart + 1;
@@ -252,10 +275,21 @@ std::vector<std::string> JsonHelper::GetStringArray(std::string_view json, std::
         size_t strStart = json.find('"', pos);
         if (strStart == std::string_view::npos || strStart >= arrayEnd) break;
 
-        size_t strEnd = json.find('"', strStart + 1);
-        if (strEnd == std::string_view::npos || strEnd > arrayEnd) break;
+        size_t strEnd = std::string_view::npos;
+        bool escaped = false;
+        for (size_t i = strStart + 1; i < arrayEnd; ++i) {
+            if (escaped) {
+                escaped = false;
+            } else if (json[i] == '\\') {
+                escaped = true;
+            } else if (json[i] == '"') {
+                strEnd = i;
+                break;
+            }
+        }
+        if (strEnd == std::string_view::npos) break;
 
-        items.emplace_back(json.substr(strStart + 1, strEnd - strStart - 1));
+        items.push_back(UnescapeJsonString(json.substr(strStart + 1, strEnd - strStart - 1)));
         pos = strEnd + 1;
     }
     return items;
@@ -264,10 +298,7 @@ std::vector<std::string> JsonHelper::GetStringArray(std::string_view json, std::
 std::vector<OwnedGameInfo> JsonHelper::ParseOwnedGames(std::string_view json) {
     std::vector<OwnedGameInfo> games;
 
-    size_t gamesPos = json.find("\"games\"");
-    if (gamesPos == std::string_view::npos) return games;
-
-    size_t arrayStart = json.find('[', gamesPos);
+    size_t arrayStart = FindArrayStartForKey(json, "games");
     if (arrayStart == std::string_view::npos) return games;
 
     size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');
@@ -304,10 +335,7 @@ std::vector<OwnedGameInfo> JsonHelper::ParseOwnedGames(std::string_view json) {
 std::vector<OwnedGameInfo> JsonHelper::ParseSharedLibraryApps(std::string_view json) {
     std::vector<OwnedGameInfo> games;
 
-    size_t appsPos = json.find("\"apps\"");
-    if (appsPos == std::string_view::npos) return games;
-
-    size_t arrayStart = json.find('[', appsPos);
+    size_t arrayStart = FindArrayStartForKey(json, "apps");
     if (arrayStart == std::string_view::npos) return games;
 
     size_t arrayEnd = FindMatchingBracket(json, arrayStart, '[', ']');

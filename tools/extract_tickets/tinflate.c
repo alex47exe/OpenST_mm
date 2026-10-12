@@ -114,6 +114,9 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 	unsigned int i, num_codes, available;
 
 	assert(num <= 288);
+	if (num > 288) {
+		return TINF_DATA_ERROR;
+	}
 
 	for (i = 0; i < 16; ++i) {
 		t->counts[i] = 0;
@@ -124,6 +127,9 @@ static int tinf_build_tree(struct tinf_tree *t, const unsigned char *lengths,
 	/* Count number of codes for each non-zero length */
 	for (i = 0; i < num; ++i) {
 		assert(lengths[i] <= 15);
+		if (lengths[i] > 15) {
+			return TINF_DATA_ERROR;
+		}
 
 		if (lengths[i]) {
 			t->max_sym = (int) i;
@@ -242,6 +248,10 @@ static int tinf_decode_symbol(struct tinf_data *d, const struct tinf_tree *t)
 	 * of offs and add one more bit to it.
 	 */
 	for (len = 1; ; ++len) {
+		if (len > 15) {
+			return TINF_DATA_ERROR;
+		}
+
 		offs = 2 * offs + (int) tinf_getbits(d, 1);
 
 		assert(len <= 15);
@@ -255,6 +265,9 @@ static int tinf_decode_symbol(struct tinf_data *d, const struct tinf_tree *t)
 	}
 
 	assert(base + offs >= 0 && base + offs < 288);
+	if (base + offs < 0 || base + offs >= 288) {
+		return TINF_DATA_ERROR;
+	}
 
 	return t->symbols[base + offs];
 }
@@ -325,7 +338,7 @@ static int tinf_decode_trees(struct tinf_data *d, struct tinf_tree *lt,
 	for (num = 0; num < hlit + hdist; ) {
 		int sym = tinf_decode_symbol(d, lt);
 
-		if (sym > lt->max_sym) {
+		if (sym < 0 || sym > lt->max_sym) {
 			return TINF_DATA_ERROR;
 		}
 
@@ -419,8 +432,8 @@ static int tinf_inflate_block_data(struct tinf_data *d, struct tinf_tree *lt,
 	for (;;) {
 		int sym = tinf_decode_symbol(d, lt);
 
-		/* Check for overflow in bit reader */
-		if (d->overflow) {
+		/* Check for overflow in bit reader or invalid symbol */
+		if (d->overflow || sym < 0) {
 			return TINF_DATA_ERROR;
 		}
 
@@ -453,7 +466,7 @@ static int tinf_inflate_block_data(struct tinf_data *d, struct tinf_tree *lt,
 			dist = tinf_decode_symbol(d, dt);
 
 			/* Check dist is within range */
-			if (dist > dt->max_sym || dist > 29) {
+			if (dist < 0 || dist > dt->max_sym || dist > 29) {
 				return TINF_DATA_ERROR;
 			}
 
@@ -553,6 +566,10 @@ int tinf_uncompress(void *dest, unsigned int *destLen,
 {
 	struct tinf_data d;
 	int bfinal;
+
+	if (dest == 0 || destLen == 0 || source == 0) {
+		return TINF_DATA_ERROR;
+	}
 
 	/* Initialise data */
 	d.source = (const unsigned char *) source;

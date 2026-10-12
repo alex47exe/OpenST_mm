@@ -185,8 +185,8 @@ bool TuiEngine::EnsureMinTerminalSize(int minW, int minH) {
         ClearScreen();
         int midY = (std::max)(1, h / 2 - 1);
         MoveCursor(midY, 1);
-        std::string warn1 = std::format("[!] 终端窗口尺寸过小 (当前: {}x{}, 推荐最低: {}x{})", w, h, minW, minH);
-        std::string warn2 = "请拉大终端窗口以恢复界面显示... (Please enlarge terminal window)";
+        std::string warn1 = TR_FMT(MsgKey::TermTooSmallWarn1, w, h, minW, minH);
+        std::string warn2{TR(MsgKey::TermTooSmallWarn2)};
         const size_t safeW = static_cast<size_t>(w > 1 ? w - 1 : 1);
         std::cout << "\x1b[1;33m" << Pad(warn1, safeW, true) << "\x1b[0m";
         MoveCursor(midY + 1, 1);
@@ -556,7 +556,7 @@ bool TuiEngine::ShowConfirmModal(std::string_view title,
     if (!g_tuiActive) {
         std::cout << "\n[" << title << "] " << question;
         if (!detail.empty()) std::cout << "\n" << detail;
-        std::cout << "\n确认? [" << (defaultYes ? "Y/n" : "y/N") << "]: ";
+        std::cout << "\n" << TR_FMT(MsgKey::CliConfirmPrompt, defaultYes ? "Y/n" : "y/N");
         std::cout.flush();
         std::string s;
         if (std::getline(std::cin, s)) {
@@ -657,7 +657,7 @@ bool TuiEngine::ShowMessageModal(std::string_view title,
     if (!g_tuiActive) {
         std::cout << "\n[" << title << "] " << message;
         if (!detail.empty()) std::cout << "\n" << detail;
-        std::cout << "\n按 Enter 键继续...";
+        std::cout << "\n" << TR(MsgKey::CliPressEnterContinue);
         std::cout.flush();
         std::string s;
         std::getline(std::cin, s);

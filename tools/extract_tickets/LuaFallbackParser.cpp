@@ -20,6 +20,74 @@ namespace OST::ExtractTickets {
 
 namespace {
 
+std::string_view StripUnquotedComment(std::string_view line, std::string_view commentMarker, std::string* outComment = nullptr) {
+    char quoteChar = '\0';
+    bool escaped = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\' && quoteChar == '"') {
+            escaped = true;
+            continue;
+        }
+        if (quoteChar != '\0') {
+            if (c == quoteChar) {
+                quoteChar = '\0';
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quoteChar = c;
+            continue;
+        }
+        if (line.substr(i).starts_with(commentMarker)) {
+            if (outComment) {
+                *outComment = SanitizeComment(TrimWhitespace(line.substr(i + commentMarker.size())));
+            }
+            return TrimWhitespace(line.substr(0, i));
+        }
+    }
+    return line;
+}
+
+size_t FindClosingParen(std::string_view sv, size_t openPos) noexcept {
+    if (openPos >= sv.size() || sv[openPos] != '(') return std::string_view::npos;
+    int depth = 0;
+    char quoteChar = '\0';
+    bool escaped = false;
+    for (size_t i = openPos; i < sv.size(); ++i) {
+        const char c = sv[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\' && quoteChar != '\0') {
+            escaped = true;
+            continue;
+        }
+        if (quoteChar != '\0') {
+            if (c == quoteChar) quoteChar = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quoteChar = c;
+            continue;
+        }
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+    return std::string_view::npos;
+}
+
 void ParseTomlLuaPaths(const std::string& tomlFilePath, std::vector<std::string>& outPaths) {
     std::filesystem::path tomlPath = Utf8Path(tomlFilePath);
     std::ifstream file(tomlPath);
@@ -30,12 +98,20 @@ void ParseTomlLuaPaths(const std::string& tomlFilePath, std::vector<std::string>
     std::string line;
     bool inLuaSection = false;
     bool inPathsArray = false;
+    bool firstLine = true;
 
     while (std::getline(file, line)) {
-        std::string_view sv = TrimWhitespace(line);
-        if (sv.empty() || sv.starts_with('#')) continue;
+        std::string_view sv(line);
+        if (firstLine) {
+            firstLine = false;
+            if (sv.starts_with("\xEF\xBB\xBF")) {
+                sv.remove_prefix(3);
+            }
+        }
+        sv = TrimWhitespace(StripUnquotedComment(sv, "#"));
+        if (sv.empty()) continue;
 
-        if (sv.starts_with('[') && sv.ends_with(']')) {
+        if (sv.starts_with('[') && sv.ends_with(']') && !inPathsArray) {
             std::string_view sec = sv.substr(1, sv.size() - 2);
             sec = TrimWhitespace(sec);
             inLuaSection = EqualIgnoreCase(sec, "lua");
@@ -46,10 +122,10 @@ void ParseTomlLuaPaths(const std::string& tomlFilePath, std::vector<std::string>
         if (!inLuaSection) continue;
 
         if (!inPathsArray) {
-            size_t pPos = sv.find("paths");
-            if (pPos != std::string_view::npos) {
-                size_t eqPos = sv.find('=', pPos + 5);
-                if (eqPos != std::string_view::npos) {
+            size_t eqPos = sv.find('=');
+            if (eqPos != std::string_view::npos) {
+                std::string_view keyPart = TrimWhitespace(sv.substr(0, eqPos));
+                if (EqualIgnoreCase(keyPart, "paths")) {
                     size_t bracket = sv.find('[', eqPos + 1);
                     if (bracket != std::string_view::npos) {
                         inPathsArray = true;
@@ -66,19 +142,37 @@ void ParseTomlLuaPaths(const std::string& tomlFilePath, std::vector<std::string>
                     inPathsArray = false;
                     break;
                 }
-                if (sv[pos] == '"') {
-                    size_t closeQ = sv.find('"', pos + 1);
-                    if (closeQ != std::string_view::npos) {
-                        std::string pStr(sv.substr(pos + 1, closeQ - pos - 1));
+                if (sv[pos] == '"' || sv[pos] == '\'') {
+                    const char qChar = sv[pos];
+                    std::string pStr;
+                    size_t i = pos + 1;
+                    bool closed = false;
+                    while (i < sv.size()) {
+                        if (qChar == '"' && sv[i] == '\\' && i + 1 < sv.size()) {
+                            if (sv[i + 1] == '"' || sv[i + 1] == '\\') {
+                                pStr.push_back(sv[i + 1]);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        if (sv[i] == qChar) {
+                            closed = true;
+                            pos = i + 1;
+                            break;
+                        }
+                        pStr.push_back(sv[i]);
+                        ++i;
+                    }
+                    if (closed) {
                         std::filesystem::path p = Utf8Path(pStr);
                         if (p.is_relative()) {
-                            outPaths.push_back((baseDir / p).lexically_normal().string());
+                            outPaths.push_back(PathToUtf8((baseDir / p).lexically_normal()));
                         } else {
-                            outPaths.push_back(p.lexically_normal().string());
+                            outPaths.push_back(PathToUtf8(p.lexically_normal()));
                         }
-                        pos = closeQ + 1;
                         continue;
                     }
+                    break;
                 }
                 ++pos;
             }
@@ -89,11 +183,25 @@ void ParseTomlLuaPaths(const std::string& tomlFilePath, std::vector<std::string>
 std::vector<std::string_view> SplitArgs(std::string_view argsStr) {
     std::vector<std::string_view> args;
     size_t start = 0;
-    bool inQ = false;
+    char quoteChar = '\0';
+    bool escaped = false;
     for (size_t i = 0; i < argsStr.size(); ++i) {
-        if (argsStr[i] == '"') {
-            inQ = !inQ;
-        } else if (argsStr[i] == ',' && !inQ) {
+        const char c = argsStr[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\' && quoteChar != '\0') {
+            escaped = true;
+            continue;
+        }
+        if (quoteChar != '\0') {
+            if (c == quoteChar) quoteChar = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quoteChar = c;
+        } else if (c == ',') {
             args.push_back(TrimWhitespace(argsStr.substr(start, i - start)));
             start = i + 1;
         }
@@ -106,10 +214,32 @@ std::vector<std::string_view> SplitArgs(std::string_view argsStr) {
 
 std::string StripQuotes(std::string_view str) {
     std::string_view trimmed = TrimWhitespace(str);
-    if (trimmed.size() >= 2 && trimmed.front() == '"' && trimmed.back() == '"') {
+    if (trimmed.size() >= 2 &&
+        ((trimmed.front() == '"' && trimmed.back() == '"') ||
+         (trimmed.front() == '\'' && trimmed.back() == '\''))) {
         trimmed = trimmed.substr(1, trimmed.size() - 2);
     }
     return std::string(trimmed);
+}
+
+bool LuaContentRefersToAppId(std::string_view content, uint32_t targetAppId) {
+    size_t searchPos = 0;
+    while ((searchPos = FindIgnoreCase(content, "addappid", searchPos)) != std::string_view::npos) {
+        size_t openP = content.find('(', searchPos + 8);
+        if (openP != std::string_view::npos) {
+            size_t closeP = FindClosingParen(content, openP);
+            if (closeP != std::string_view::npos && closeP > openP) {
+                auto args = SplitArgs(content.substr(openP + 1, closeP - openP - 1));
+                if (!args.empty()) {
+                    if (auto parsedId = ParseAppId(StripQuotes(args[0])); parsedId && *parsedId == targetAppId) {
+                        return true;
+                    }
+                }
+            }
+        }
+        searchPos += 8;
+    }
+    return false;
 }
 
 void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallbackData& out) {
@@ -129,17 +259,12 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
         }
 
         std::string comment;
-        size_t commentPos = line.find("--");
-        std::string_view code = line;
-        if (commentPos != std::string_view::npos) {
-            comment = SanitizeComment(TrimWhitespace(line.substr(commentPos + 2)));
-            code = TrimWhitespace(line.substr(0, commentPos));
-        }
+        std::string_view code = StripUnquotedComment(line, "--", &comment);
 
         // 1. addappid(...)
         if (size_t fPos = FindIgnoreCase(code, "addappid"); fPos != std::string_view::npos) {
-            size_t openP = code.find('(', fPos);
-            size_t closeP = code.rfind(')');
+            size_t openP = code.find('(', fPos + 8);
+            size_t closeP = (openP != std::string_view::npos) ? FindClosingParen(code, openP) : std::string_view::npos;
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
                 std::string_view argsStr = code.substr(openP + 1, closeP - openP - 1);
                 auto args = SplitArgs(argsStr);
@@ -168,8 +293,8 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
         }
         // 2. setmanifestid(...)
         else if (size_t fPos = FindIgnoreCase(code, "setmanifestid"); fPos != std::string_view::npos) {
-            size_t openP = code.find('(', fPos);
-            size_t closeP = code.rfind(')');
+            size_t openP = code.find('(', fPos + 13);
+            size_t closeP = (openP != std::string_view::npos) ? FindClosingParen(code, openP) : std::string_view::npos;
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
                 std::string_view argsStr = code.substr(openP + 1, closeP - openP - 1);
                 auto args = SplitArgs(argsStr);
@@ -186,8 +311,8 @@ void ParseLuaContent(std::string_view content, uint32_t targetAppId, LuaFallback
         }
         // 3. addtoken(...)
         else if (size_t fPos = FindIgnoreCase(code, "addtoken"); fPos != std::string_view::npos) {
-            size_t openP = code.find('(', fPos);
-            size_t closeP = code.rfind(')');
+            size_t openP = code.find('(', fPos + 8);
+            size_t closeP = (openP != std::string_view::npos) ? FindClosingParen(code, openP) : std::string_view::npos;
             if (openP != std::string_view::npos && closeP != std::string_view::npos && closeP > openP) {
                 std::string_view argsStr = code.substr(openP + 1, closeP - openP - 1);
                 auto args = SplitArgs(argsStr);
@@ -215,8 +340,8 @@ void ScanManifestFilesInDir(const std::string& dir, LuaFallbackData& out) {
     for (const auto& entry : std::filesystem::directory_iterator(dirP, ec)) {
         if (ec) break;
         if (entry.is_regular_file(ec)) {
-            std::string fname = entry.path().filename().string();
-            if (fname.ends_with(".manifest")) {
+            std::string fname = PathToUtf8(entry.path().filename());
+            if (fname.size() > 9 && EqualIgnoreCase(std::string_view(fname).substr(fname.size() - 9), ".manifest")) {
                 size_t under = fname.find('_');
                 size_t dot = fname.rfind('.');
                 if (under != std::string_view::npos && dot != std::string_view::npos && dot > under + 1) {
@@ -224,7 +349,7 @@ void ScanManifestFilesInDir(const std::string& dir, LuaFallbackData& out) {
                     std::string_view candidateMan = std::string_view(fname).substr(under + 1, dot - under - 1);
                     if (auto dId = ParseAppId(depotStr)) {
                         if (IsValidManifestId(candidateMan)) {
-                            out.manifestFiles[*dId] = entry.path().string();
+                            out.manifestFiles[*dId] = PathToUtf8(entry.path());
                             out.depotManifests.try_emplace(*dId, std::string(candidateMan));
                         }
                     }
@@ -266,7 +391,7 @@ std::vector<std::string> GetOstLuaSearchDirectories(const std::string& steamPath
     DWORD exeLen = GetModuleFileNameW(nullptr, exeBuf, static_cast<DWORD>(std::size(exeBuf)));
     if (exeLen > 0 && exeLen < std::size(exeBuf)) {
         std::filesystem::path p(exeBuf);
-        exeDir = p.parent_path().string();
+        exeDir = PathToUtf8(p.parent_path());
         if (!exeDir.empty()) {
             addDir(JoinPath(exeDir, "config\\lua"));
             addDir(JoinPath(exeDir, "lua"));
@@ -280,7 +405,7 @@ std::vector<std::string> GetOstLuaSearchDirectories(const std::string& steamPath
     std::filesystem::path cwdPath = std::filesystem::current_path(cwdEc);
     std::string cwd;
     if (!cwdEc) {
-        cwd = cwdPath.string();
+        cwd = PathToUtf8(cwdPath);
         addDir(JoinPath(cwd, "config\\lua"));
         addDir(JoinPath(cwd, "lua"));
         addDir(JoinPath(cwd, "st_config"));
@@ -351,9 +476,9 @@ LuaFallbackData ParseLuaFallbackData(const std::string& steamPath, uint32_t targ
             for (const auto& entry : std::filesystem::directory_iterator(dirP, dirEc)) {
                 if (dirEc) break;
                 if (entry.is_regular_file(dirEc)) {
-                    std::string fname = entry.path().filename().string();
-                    if (fname.ends_with(".lua")) {
-                        matchedFiles.push_back(entry.path().string());
+                    std::string fname = PathToUtf8(entry.path().filename());
+                    if (fname.size() > 4 && EqualIgnoreCase(std::string_view(fname).substr(fname.size() - 4), ".lua")) {
+                        matchedFiles.push_back(PathToUtf8(entry.path()));
                         manifestDirs.push_back(dir);
                     }
                 }
@@ -372,18 +497,12 @@ LuaFallbackData ParseLuaFallbackData(const std::string& steamPath, uint32_t targ
         file.seekg(0, std::ios::beg);
         std::string content(static_cast<size_t>(size), '\0');
         file.read(content.data(), size);
+        content.resize(static_cast<size_t>(file.gcount()));
 
-        // If scanning a generic Lua file, ensure it refers to targetAppId
-        if (filePath.find(targetLuaName) == std::string::npos) {
-            std::string targetPattern = "addappid(" + std::to_string(targetAppId);
-            std::string lowerContent;
-            lowerContent.reserve(content.size());
-            for (char ch : content) {
-                if (ch != ' ' && ch != '\t') {
-                    lowerContent.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-                }
-            }
-            if (lowerContent.find(targetPattern) == std::string::npos) {
+        // If scanning a generic Lua file, ensure it refers to targetAppId specifically
+        const std::string fileName = PathToUtf8(Utf8Path(filePath).filename());
+        if (!EqualIgnoreCase(fileName, targetLuaName)) {
+            if (!LuaContentRefersToAppId(content, targetAppId)) {
                 continue;
             }
         }

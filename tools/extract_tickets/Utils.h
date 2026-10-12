@@ -60,6 +60,9 @@ bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t>
 [[nodiscard]] inline std::filesystem::path Utf8Path(std::string_view utf8) {
     return std::filesystem::path(Utf8ToWide(utf8));
 }
+[[nodiscard]] inline std::string PathToUtf8(const std::filesystem::path& p) {
+    return WideToUtf8(p.native());
+}
 
 // Path & Steam Discovery
 [[nodiscard]] std::string JoinPath(std::string_view base, std::string_view name);

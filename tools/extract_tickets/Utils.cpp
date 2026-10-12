@@ -1,4 +1,5 @@
 #include "Utils.h"
+#include "I18n.h"
 #include "Log.h"
 #include "TuiEngine.h"
 
@@ -21,6 +22,7 @@
 #include <charconv>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 namespace OST::ExtractTickets {
 
@@ -136,19 +138,22 @@ std::string ToHexString(std::span<const uint8_t> data) {
 bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t> data) {
     std::ofstream output{path, std::ios::binary | std::ios::trunc};
     if (!output) {
+        const std::string utf8Path = PathToUtf8(path);
         if (!TuiEngine::IsActive()) {
-            std::cerr << "Failed to create " << path.string() << ".\n";
+            std::cerr << TR_FMT(MsgKey::OutCreateFileFailed, utf8Path) << "\n";
         }
-        LOG_ERROR("Utils", "创建文件失败: {}", path.string());
+        LOG_ERROR("Utils", MsgKey::LogUtilsCreateFileFailed, MaskPath(utf8Path));
         return false;
     }
     output.write(reinterpret_cast<const char*>(data.data()),
                  static_cast<std::streamsize>(data.size()));
+    output.flush();
     if (!output) {
+        const std::string utf8Path = PathToUtf8(path);
         if (!TuiEngine::IsActive()) {
-            std::cerr << "Failed to write " << path.string() << ".\n";
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, utf8Path) << "\n";
         }
-        LOG_ERROR("Utils", "写入文件失败: {}", path.string());
+        LOG_ERROR("Utils", MsgKey::LogUtilsWriteFileFailed, MaskPath(utf8Path));
         return false;
     }
     return true;
@@ -175,7 +180,9 @@ std::string NormalizeDir(std::string dir) {
 }
 
 std::wstring Utf8ToWide(std::string_view utf8) {
-    if (utf8.empty()) return {};
+    if (utf8.empty() || utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return {};
+    }
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
     if (len <= 0) return {};
     std::wstring w(len, L'\0');
@@ -184,7 +191,9 @@ std::wstring Utf8ToWide(std::string_view utf8) {
 }
 
 std::string WideToUtf8(std::wstring_view wide) {
-    if (wide.empty()) return {};
+    if (wide.empty() || wide.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return {};
+    }
     int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
     if (len <= 0) return {};
     std::string s(len, '\0');
@@ -195,8 +204,8 @@ std::string WideToUtf8(std::wstring_view wide) {
 std::optional<std::string> FindSteamInstallPath() {
     static const auto s_cachedPath = []() -> std::optional<std::string> {
         if (auto resolved = OSTPlatform::SteamLocator::ResolvePath()) {
-            std::string norm = NormalizeDir(WideToUtf8(resolved->wstring()));
-            LOG_DEBUG("SteamPath", "Found Steam install path via SteamLocator: {}", MaskPath(norm));
+            std::string norm = NormalizeDir(PathToUtf8(*resolved));
+            LOG_DEBUG("SteamPath", MsgKey::LogUtilsFoundSteamPath, MaskPath(norm));
             return norm;
         }
         return std::nullopt;

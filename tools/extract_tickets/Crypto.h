@@ -15,7 +15,7 @@ class SecureString {
 public:
     SecureString();
     explicit SecureString(std::string_view str);
-    ~SecureString();
+    ~SecureString() noexcept;
 
     SecureString(const SecureString& other);
     SecureString& operator=(const SecureString& other);
@@ -25,7 +25,7 @@ public:
     void Assign(std::string_view str);
     void Append(char c);
     void PopBack();
-    void Clear();
+    void Clear() noexcept;
 
     [[nodiscard]] const std::string& Data() const noexcept { return m_data; }
     [[nodiscard]] const char* c_str() const noexcept { return m_data.c_str(); }
@@ -41,7 +41,7 @@ private:
 // ============================================================================
 
 // Reads password from console using _getch() with '*' mask or invisible
-[[nodiscard]] SecureString ReadPasswordFromConsole(const char* prompt = "Steam 密码: ");
+[[nodiscard]] SecureString ReadPasswordFromConsole(const char* prompt = nullptr);
 
 // Converts hex string to byte buffer
 [[nodiscard]] std::vector<uint8_t> HexToBytes(std::string_view hex);
@@ -52,8 +52,43 @@ private:
 // Decodes standard Base64 string to binary data
 [[nodiscard]] std::vector<uint8_t> Base64Decode(std::string_view base64);
 
+// Securely zeroes full allocated capacity of a std::string and clears its length
+inline void SecureWipeString(std::string& s) noexcept {
+    if (s.capacity() > 0 && s.data() != nullptr) {
+        volatile char* p = s.data();
+        const size_t cap = s.capacity();
+        for (size_t i = 0; i < cap; ++i) {
+            p[i] = '\0';
+        }
+        s.clear();
+    }
+}
+
+// Securely zeroes full allocated capacity of a std::vector<uint8_t> and clears its length
+inline void SecureWipeBuffer(std::vector<uint8_t>& buf) noexcept {
+    if (buf.capacity() > 0 && buf.data() != nullptr) {
+        volatile uint8_t* p = buf.data();
+        const size_t cap = buf.capacity();
+        for (size_t i = 0; i < cap; ++i) {
+            p[i] = 0;
+        }
+        buf.clear();
+    }
+}
+
+struct ScopedBufferWiper {
+    std::vector<uint8_t>& buf;
+    explicit ScopedBufferWiper(std::vector<uint8_t>& b) noexcept : buf(b) {}
+    ~ScopedBufferWiper() noexcept { SecureWipeBuffer(buf); }
+    ScopedBufferWiper(const ScopedBufferWiper&) = delete;
+    ScopedBufferWiper& operator=(const ScopedBufferWiper&) = delete;
+};
+
 // Parses expiration unix timestamp from Steam OAuth JWT access token (0 if missing/invalid)
 [[nodiscard]] int64_t GetJwtExpiration(std::string_view jwt);
+
+// Parses 64-bit SteamID ("sub" claim) from Steam OAuth JWT token (0 if missing/invalid)
+[[nodiscard]] uint64_t GetJwtSteamId(std::string_view jwt);
 
 // Encrypts password using Steam's RSA public key (modulus & exponent)
 // Returns Base64-encoded encrypted password ready for BeginAuthSessionViaCredentials

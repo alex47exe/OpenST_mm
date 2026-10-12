@@ -1,4 +1,5 @@
 #include "WinHttpTransport.h"
+#include "I18n.h"
 #include "Log.h"
 #include "Utils.h"
 
@@ -39,7 +40,7 @@ namespace {
         urlComp.dwExtraInfoLength = static_cast<DWORD>(-1);
 
         if (!WinHttpCrackUrl(wideUrl.c_str(), static_cast<DWORD>(wideUrl.size()), 0, &urlComp)) {
-            LOG_WARN("WinHttp", "WinHttpCrackUrl 失败: {} (GetLastError={})", MaskUrl(urlStr), GetLastError());
+            LOG_WARN("WinHttp", MsgKey::LogHttpCrackUrlFailed, MaskUrl(urlStr), GetLastError());
             return false;
         }
 
@@ -117,7 +118,7 @@ WinHttpTransport::WinHttpTransport() {
     }
 
     if (!m_hSession) {
-        LOG_ERROR("WinHttp", "WinHttpOpen 失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WinHttp", MsgKey::LogHttpOpenFailed, GetLastError());
     } else {
         // Enforce TLS 1.2 and TLS 1.3
         DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
@@ -171,19 +172,19 @@ HttpResponse WinHttpTransport::Get(
     
     HttpResponse resp;
     if (!m_hSession) {
-        resp.errorMessage = "WinHTTP 会话未就绪";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrSessionNotReady));
         return resp;
     }
 
     ParsedUrl parsed;
     if (!ParseUrl(url, parsed)) {
-        resp.errorMessage = "无效的 URL 地址";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrInvalidUrl));
         return resp;
     }
 
     HINTERNET hConnect = GetOrCreateConnection(parsed.host, parsed.port);
     if (!hConnect) {
-        resp.errorMessage = std::format("无法连接主机 {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrConnectHostFailed, WideToUtf8(parsed.host), GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
@@ -237,13 +238,13 @@ HttpResponse WinHttpTransport::Get(
     }
 
     if (!hRequest) {
-        resp.errorMessage = std::format("发送 GET 请求失败 (GetLastError={})", GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrSendGetFailed, GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
 
     if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-        resp.errorMessage = std::format("接收响应头失败 (GetLastError={})", GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrRecvHeadersFailed, GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
@@ -282,7 +283,7 @@ HttpResponse WinHttpTransport::Get(
     }
 
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WinHttp", "GET 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", resp.statusCode, resp.body.size(), elapsedMs);
+    LOG_DEBUG("WinHttp", MsgKey::LogHttpGetDone, resp.statusCode, resp.body.size(), elapsedMs);
 
     return resp;
 }
@@ -296,19 +297,19 @@ HttpResponse WinHttpTransport::Post(
 
     HttpResponse resp;
     if (!m_hSession) {
-        resp.errorMessage = "WinHTTP 会话未就绪";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrSessionNotReady));
         return resp;
     }
 
     ParsedUrl parsed;
     if (!ParseUrl(url, parsed)) {
-        resp.errorMessage = "无效的 URL 地址";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrInvalidUrl));
         return resp;
     }
 
     HINTERNET hConnect = GetOrCreateConnection(parsed.host, parsed.port);
     if (!hConnect) {
-        resp.errorMessage = std::format("无法连接主机 {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrConnectHostFailed, WideToUtf8(parsed.host), GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
@@ -370,13 +371,13 @@ HttpResponse WinHttpTransport::Post(
     }
 
     if (!hRequest) {
-        resp.errorMessage = std::format("创建或发送 POST 请求失败 (GetLastError={})", GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrSendPostFailed, GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
 
     if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-        resp.errorMessage = std::format("接收响应头失败 (GetLastError={})", GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrRecvHeadersFailed, GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
@@ -414,7 +415,7 @@ HttpResponse WinHttpTransport::Post(
     }
 
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WinHttp", "POST 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", resp.statusCode, resp.body.size(), elapsedMs);
+    LOG_DEBUG("WinHttp", MsgKey::LogHttpPostDone, resp.statusCode, resp.body.size(), elapsedMs);
 
     return resp;
 }
@@ -474,22 +475,22 @@ void WebSocketClient::Close() {
 bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
     Close();
     if (!m_hSession) {
-        LOG_ERROR("WebSocket", "WinHTTP 会话无效");
+        LOG_ERROR("WebSocket", MsgKey::LogWsSessionInvalid);
         return false;
     }
 
     ParsedUrl parsed;
     if (!ParseUrl(wssUrl, parsed)) {
-        LOG_ERROR("WebSocket", "无效的 WebSocket URL: {}", wssUrl);
+        LOG_ERROR("WebSocket", MsgKey::LogWsInvalidUrl, wssUrl);
         return false;
     }
 
-    LOG_DEBUG("WebSocket", "正在建立连接 -> {}:{} (Path: {}, SSL: {})",
+    LOG_DEBUG("WebSocket", MsgKey::LogWsConnecting,
               WideToUtf8(parsed.host), parsed.port, WideToUtf8(parsed.path), parsed.isHttps);
 
     m_hConnect = WinHttpConnect(m_hSession, parsed.host.c_str(), parsed.port, 0);
     if (!m_hConnect) {
-        LOG_ERROR("WebSocket", "无法连接 WebSocket 主机: {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsConnectHostFailed, WideToUtf8(parsed.host), GetLastError());
         return false;
     }
 
@@ -504,14 +505,14 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
         flags);
 
     if (!m_hRequest) {
-        LOG_ERROR("WebSocket", "创建 WebSocket 握手请求失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsOpenReqFailed, GetLastError());
         Close();
         return false;
     }
 
     // Request WebSocket Upgrade
     if (!WinHttpSetOption(m_hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
-        LOG_ERROR("WebSocket", "请求升级 WebSocket 选项失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsUpgradeOptFailed, GetLastError());
         Close();
         return false;
     }
@@ -528,13 +529,13 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
 
     auto startT = std::chrono::steady_clock::now();
     if (!WinHttpSendRequest(m_hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0)) {
-        LOG_ERROR("WebSocket", "发送 WebSocket 升级握手请求失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsSendHandshakeFailed, GetLastError());
         Close();
         return false;
     }
 
     if (!WinHttpReceiveResponse(m_hRequest, nullptr)) {
-        LOG_ERROR("WebSocket", "接收 WebSocket 握手响应失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsRecvHandshakeFailed, GetLastError());
         Close();
         return false;
     }
@@ -550,7 +551,7 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
         WINHTTP_NO_HEADER_INDEX);
 
     if (statusCode != 101) {
-        LOG_ERROR("WebSocket", "WebSocket 握手被拒绝 (HTTP 状态码: {})", statusCode);
+        LOG_ERROR("WebSocket", MsgKey::LogWsHandshakeRejected, statusCode);
         Close();
         return false;
     }
@@ -560,13 +561,13 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
     m_hRequest = nullptr;
 
     if (!m_hWebSocket) {
-        LOG_ERROR("WebSocket", "WinHttpWebSocketCompleteUpgrade 失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsCompleteUpgradeFailed, GetLastError());
         Close();
         return false;
     }
 
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WebSocket", "已成功建立安全 WebSocket 连接: {} (耗时: {}ms)", wssUrl, elapsedMs);
+    LOG_DEBUG("WebSocket", MsgKey::LogWsConnected, wssUrl, elapsedMs);
     return true;
 }
 
@@ -584,7 +585,7 @@ bool WebSocketClient::Send(std::span<const uint8_t> data, bool isBinary) {
         static_cast<DWORD>(data.size()));
 
     if (error != ERROR_SUCCESS) {
-        LOG_ERROR("WebSocket", "WinHttpWebSocketSend 失败 (error={})", error);
+        LOG_ERROR("WebSocket", MsgKey::LogWsSendFailed, error);
         Close();
         return false;
     }
@@ -614,7 +615,7 @@ bool WebSocketClient::Receive(std::vector<uint8_t>& outData, bool& isBinary, DWO
             &bufType);
 
         if (error != ERROR_SUCCESS) {
-            LOG_ERROR("WebSocket", "WinHttpWebSocketReceive 错误 (error={})", error);
+            LOG_ERROR("WebSocket", MsgKey::LogWsRecvError, error);
             if (error != ERROR_WINHTTP_TIMEOUT) {
                 Close();
             }
@@ -622,7 +623,7 @@ bool WebSocketClient::Receive(std::vector<uint8_t>& outData, bool& isBinary, DWO
         }
 
         if (bufType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
-            LOG_WARN("WebSocket", "收到对端 WebSocket 关闭帧");
+            LOG_WARN("WebSocket", MsgKey::LogWsPeerClosed);
             Close();
             return false;
         }
