@@ -32,6 +32,11 @@ HMODULE LoadSteamClient64(const std::string& steamPath, std::string& loadedPath)
     // directory. Add that directory to the search path and load with
     // LOAD_WITH_ALTERED_SEARCH_PATH so those dependencies resolve; otherwise the
     // load fails with ERROR_MOD_NOT_FOUND (126).
+    struct DllDirectoryScopeGuard {
+        ~DllDirectoryScopeGuard() noexcept {
+            SetDllDirectoryW(nullptr);
+        }
+    } dllDirGuard;
     SetDllDirectoryW(std::filesystem::path(steamDir).c_str());
     HMODULE module{LoadLibraryExW(std::filesystem::path(loadedPath).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)};
     if (!module) {

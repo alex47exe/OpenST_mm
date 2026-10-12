@@ -14,9 +14,6 @@
 #include <format>
 #include <iostream>
 #include <thread>
-#if defined(_WIN32)
-#include <conio.h>
-#endif
 
 namespace OST::ExtractTickets {
 
@@ -893,8 +890,8 @@ void OnlineSession::RunInSessionExtraction(
 
                 for (const auto& game : gameMgr.Games()) {
                     if (TuiEngine::HasInputPending()) {
-                        auto ev = TuiEngine::ReadKey();
-                        if (ev.code == KeyCode::Escape) {
+                        KeyEvent checkKey = TuiEngine::ReadKey();
+                        if (checkKey.code == KeyCode::Escape) {
                             TuiEngine::FlushInputBuffer();
                             aborted = true;
                             break;
@@ -1232,7 +1229,7 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
         if (fallbackAcc && fallbackCreds.has_value()) {
             activeAcc = fallbackAcc;
             creds = std::move(*fallbackCreds);
-            LOG_INFO("OnlineSession", "{}", TR_FMT(MsgKey::CliExtractFallbackBase, appId));
+            LOG_INFO("OnlineSession", MsgKey::CliExtractFallbackBase, appId);
         } else {
             std::cerr << TR(MsgKey::CliExtractFailedAll) << "\n";
             std::cerr << TR(MsgKey::CliExtractFailedAllTip) << "\n";

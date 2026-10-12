@@ -3,7 +3,6 @@
 #include "I18n.h"
 #include "Utils.h"
 
-#include <conio.h>
 #include <algorithm>
 #include <chrono>
 #include <format>
@@ -198,26 +197,45 @@ bool TuiEngine::EnsureMinTerminalSize(int minW, int minH) {
 }
 
 namespace {
+    struct ClipboardScopeGuard {
+        bool open{false};
+        explicit ClipboardScopeGuard(HWND hwnd = nullptr) noexcept : open(OpenClipboard(hwnd) != FALSE) {}
+        ~ClipboardScopeGuard() noexcept {
+            if (open) {
+                CloseClipboard();
+            }
+        }
+        [[nodiscard]] explicit operator bool() const noexcept { return open; }
+    };
+
+    struct GlobalLockScopeGuard {
+        HGLOBAL hMem{nullptr};
+        const wchar_t* ptr{nullptr};
+        explicit GlobalLockScopeGuard(HGLOBAL h) noexcept
+            : hMem(h), ptr(h ? static_cast<const wchar_t*>(GlobalLock(h)) : nullptr) {}
+        ~GlobalLockScopeGuard() noexcept {
+            if (hMem && ptr) {
+                GlobalUnlock(hMem);
+            }
+        }
+        [[nodiscard]] const wchar_t* Get() const noexcept { return ptr; }
+        [[nodiscard]] explicit operator bool() const noexcept { return ptr != nullptr; }
+    };
+
     std::string GetClipboardTextUtf8() {
-        if (!OpenClipboard(nullptr)) return "";
+        ClipboardScopeGuard clipGuard;
+        if (!clipGuard) return "";
         HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-        if (!hData) {
-            CloseClipboard();
-            return "";
-        }
-        const wchar_t* wstr = static_cast<const wchar_t*>(GlobalLock(hData));
-        if (!wstr) {
-            CloseClipboard();
-            return "";
-        }
+        if (!hData) return "";
+        GlobalLockScopeGuard lockGuard(hData);
+        if (!lockGuard) return "";
+        const wchar_t* wstr = lockGuard.Get();
         int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
         std::string result;
         if (len > 1) {
             result.resize(len - 1);
             WideCharToMultiByte(CP_UTF8, 0, wstr, -1, result.data(), len, nullptr, nullptr);
         }
-        GlobalUnlock(hData);
-        CloseClipboard();
         std::string clean;
         clean.reserve(result.size());
         for (char c : result) {

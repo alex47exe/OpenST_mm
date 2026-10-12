@@ -25,6 +25,15 @@ namespace OST::ExtractTickets {
 
 #if defined(_WIN64)
 bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
+    struct EnvVarScopeGuard {
+        ~EnvVarScopeGuard() noexcept {
+            SetEnvironmentVariableA("SteamAppId", nullptr);
+            SetEnvironmentVariableA("SteamGameId", nullptr);
+            SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
+            SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
+        }
+    } envGuard;
+
     if (inTui) {
         int w = 80, h = 25;
         TuiEngine::GetScreenSize(w, h);
@@ -161,6 +170,7 @@ bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
     } else {
         LOG_WARN("Main", MsgKey::LogMainWorkerTimeout);
         TerminateProcess(hProcess, 1);
+        WaitForSingleObject(hProcess, 1000);
     }
 
     return exitCode == 0;
