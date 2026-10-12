@@ -91,7 +91,7 @@ namespace {
     constexpr double kProtectorBlobHighConfidenceEntropy = 7.0;         // looks encrypted/packed at rest
     constexpr size_t kProtectorBlobEntropySampleBytes = 8ull * 1024ull * 1024ull;  // cap per-section read
 
-    double SectionEntropy(std::span<const uint8_t> bytes) {
+    [[nodiscard]] double SectionEntropy(std::span<const uint8_t> bytes) noexcept {
         if (bytes.empty()) return 0.0;
         std::array<uint64, 256> counts{};
         for (uint8_t value : bytes) ++counts[value];
@@ -106,7 +106,7 @@ namespace {
         return entropy;  // 0.0 .. 8.0 bits/byte
     }
 
-    double BytesToMiB(uint64 bytes) {
+    [[nodiscard]] constexpr double BytesToMiB(uint64 bytes) noexcept {
         return static_cast<double>(bytes) / (1024.0 * 1024.0);
     }
 
@@ -130,7 +130,7 @@ namespace {
         return value;
     }
 
-    bool EndsWithInsensitive(std::string_view value, std::string_view suffix) {
+    [[nodiscard]] bool EndsWithInsensitive(std::string_view value, std::string_view suffix) noexcept {
         if (value.size() < suffix.size()) return false;
 
         const size_t offset = value.size() - suffix.size();
@@ -142,9 +142,9 @@ namespace {
         return true;
     }
 
-    std::string BaseNameFromPath(const std::string& path) {
+    [[nodiscard]] std::string_view BaseNameFromPath(std::string_view path) noexcept {
         const size_t slash = path.find_last_of("\\/");
-        if (slash == std::string::npos) return path;
+        if (slash == std::string_view::npos) return path;
         return path.substr(slash + 1);
     }
 
@@ -168,9 +168,14 @@ namespace {
         return normalizedPath.starts_with(prefix);
     }
 
-    bool IsSteamRuntimeModuleName(std::string name) {
-        name = Lower(std::move(name));
-        return std::ranges::find(kSteamRuntimeModuleNames, name) != kSteamRuntimeModuleNames.end();
+    [[nodiscard]] bool IsSteamRuntimeModuleName(std::string_view name) noexcept {
+        for (std::string_view runtimeMod : kSteamRuntimeModuleNames) {
+            if (name.size() == runtimeMod.size() &&
+                _strnicmp(name.data(), runtimeMod.data(), name.size()) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     const OSTPlatform::PE::Section* FindLegacyDenuvoSection(const OSTPlatform::PE::Image& image) {
@@ -342,7 +347,7 @@ namespace {
         std::vector<ModuleCandidate> modules;
 
         size_t order = 0;
-        for (auto module : OSTPlatform::Process::EnumerateModules(pid)) {
+        for (auto& module : OSTPlatform::Process::EnumerateModules(pid)) {
             if (module.path.empty()) continue;
 
             const bool executable = EndsWithInsensitive(module.path, ".exe");
@@ -385,7 +390,7 @@ namespace {
         // may not have loaded GameAssembly.dll into process memory yet. Check the game directory
         // on disk and add it as a candidate if present and >= kMinPackedModuleBytes.
         if (!gameDirectory.empty()) {
-            const std::filesystem::path gameDir(gameDirectory);
+            const std::filesystem::path gameDir = OSTPlatform::Encoding::PathFromUtf8(gameDirectory);
             const std::filesystem::path gameAssemblyPath = gameDir / "GameAssembly.dll";
             std::error_code ec;
             if (std::filesystem::is_regular_file(gameAssemblyPath, ec)) {
@@ -482,24 +487,19 @@ namespace {
 
 } // namespace
 
-const char* ToString(DetectionMethod method) {
-    switch (method) {
-    case DetectionMethod::None: return "None";
-    case DetectionMethod::LegacySectionString: return "LegacySectionString";
-    case DetectionMethod::OepPattern: return "OepPattern";
-    case DetectionMethod::ProtectedBlobSection: return "ProtectedBlobSection";
-    }
-    return "Unknown";
-}
-
 ProtectionScanReport ScanProtection(PID_t pid) {
     return RunProtectionScan(pid);
 }
 
 bool IsDenuvoPath(const std::filesystem::path& inPath) {
-    std::wstring wpath = inPath.wstring();
-    while (!wpath.empty() && (wpath.front() == L'"' || wpath.front() == L' ' || wpath.front() == L'\t')) wpath.erase(0, 1);
-    while (!wpath.empty() && (wpath.back() == L'"' || wpath.back() == L' ' || wpath.back() == L'\t')) wpath.pop_back();
+    const std::wstring rawStr = inPath.wstring();
+    std::wstring_view wpath = rawStr;
+    while (!wpath.empty() && (wpath.front() == L'"' || wpath.front() == L' ' || wpath.front() == L'\t')) {
+        wpath.remove_prefix(1);
+    }
+    while (!wpath.empty() && (wpath.back() == L'"' || wpath.back() == L' ' || wpath.back() == L'\t')) {
+        wpath.remove_suffix(1);
+    }
 
     std::error_code ec;
     const std::filesystem::path exePath(wpath);

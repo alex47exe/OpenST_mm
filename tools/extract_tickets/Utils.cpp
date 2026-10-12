@@ -1,7 +1,15 @@
 #include "Utils.h"
+#include "I18n.h"
 #include "Log.h"
-#include "RaiiGuards.h"
 #include "TuiEngine.h"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #if __has_include(<OSTPlatform/SteamLocator.hpp>)
 #include <OSTPlatform/SteamLocator.hpp>
@@ -9,11 +17,16 @@
 #include "../../src/OSTPlatform/include/OSTPlatform/SteamLocator.hpp"
 #endif
 
+#include "RaiiGuards.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <thread>
 
 namespace OST::ExtractTickets {
 
@@ -127,24 +140,83 @@ std::string ToHexString(std::span<const uint8_t> data) {
 }
 
 bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t> data) {
-    std::ofstream output{path, std::ios::binary | std::ios::trunc};
-    if (!output) {
-        if (!TuiEngine::IsActive()) {
-            std::cerr << "Failed to create " << path.string() << ".\n";
+    const auto tempPath = std::filesystem::path(
+        std::format(L"{}.{}.tmp", path.native(), GetCurrentProcessId()));
+
+    std::error_code ec;
+    std::filesystem::remove(tempPath, ec);
+
+    bool writeOk = false;
+    {
+        ScopedHandle hTemp{CreateFileW(
+            tempPath.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr)};
+        if (hTemp.IsValid()) {
+            DWORD bytesWritten = 0;
+            const auto* ptr = reinterpret_cast<const char*>(data.data());
+            size_t remaining = data.size();
+            bool hasError = false;
+            while (remaining > 0) {
+                DWORD chunk = static_cast<DWORD>((std::min)(remaining, static_cast<size_t>(MAXDWORD)));
+                if (!WriteFile(hTemp, ptr, chunk, &bytesWritten, nullptr) || bytesWritten == 0) {
+                    hasError = true;
+                    break;
+                }
+                ptr += bytesWritten;
+                remaining -= bytesWritten;
+            }
+            if (!hasError && FlushFileBuffers(hTemp)) {
+                writeOk = true;
+            }
         }
-        LOG_ERROR("Utils", "创建文件失败: {}", path.string());
+    }
+
+    if (!writeOk) {
+        std::filesystem::remove(tempPath, ec);
+        const std::string utf8Path = PathToUtf8(path);
+        if (!TuiEngine::IsActive()) {
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, utf8Path) << "\n";
+        }
+        LOG_ERROR("Utils", MsgKey::LogUtilsWriteFileFailed, MaskPath(utf8Path));
         return false;
     }
-    output.write(reinterpret_cast<const char*>(data.data()),
-                 static_cast<std::streamsize>(data.size()));
-    if (!output) {
-        if (!TuiEngine::IsActive()) {
-            std::cerr << "Failed to write " << path.string() << ".\n";
+
+    bool replaced = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (ReplaceFileW(path.c_str(), tempPath.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+            replaced = true;
+            break;
         }
-        LOG_ERROR("Utils", "写入文件失败: {}", path.string());
+        DWORD lastErr = GetLastError();
+        if (lastErr == ERROR_FILE_NOT_FOUND) {
+            if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                replaced = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (!replaced) {
+        std::filesystem::remove(tempPath, ec);
+        const std::string utf8Path = PathToUtf8(path);
+        if (!TuiEngine::IsActive()) {
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, utf8Path) << "\n";
+        }
+        LOG_ERROR("Utils", MsgKey::LogUtilsWriteFileFailed, MaskPath(utf8Path));
         return false;
     }
+
     return true;
+}
+
+bool WriteTextFileAtomic(const std::filesystem::path& path, std::string_view content, [[maybe_unused]] bool binaryMode) {
+    return WriteBinaryFile(path, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(content.data()), content.size()));
 }
 
 std::string JoinPath(std::string_view base, std::string_view name) {
@@ -168,7 +240,9 @@ std::string NormalizeDir(std::string dir) {
 }
 
 std::wstring Utf8ToWide(std::string_view utf8) {
-    if (utf8.empty()) return {};
+    if (utf8.empty() || utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return {};
+    }
     int len = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
     if (len <= 0) return {};
     std::wstring w(len, L'\0');
@@ -177,7 +251,9 @@ std::wstring Utf8ToWide(std::string_view utf8) {
 }
 
 std::string WideToUtf8(std::wstring_view wide) {
-    if (wide.empty()) return {};
+    if (wide.empty() || wide.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        return {};
+    }
     int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
     if (len <= 0) return {};
     std::string s(len, '\0');
@@ -185,64 +261,11 @@ std::string WideToUtf8(std::wstring_view wide) {
     return s;
 }
 
-std::optional<std::string> QueryRegistryString(HKEY root, const char* subKey, const char* valueName) {
-    std::wstring wSubKey = Utf8ToWide(subKey ? subKey : "");
-    std::wstring wValueName = Utf8ToWide(valueName ? valueName : "");
-
-    HKEY rawKey{nullptr};
-    LSTATUS status = RegOpenKeyExW(root, wSubKey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &rawKey);
-    if (status != ERROR_SUCCESS) {
-        status = RegOpenKeyExW(root, wSubKey.c_str(), 0, KEY_READ, &rawKey);
-    }
-    if (status != ERROR_SUCCESS) {
-        return std::nullopt;
-    }
-    ScopedHKey key{rawKey};
-
-    DWORD valueType{0};
-    DWORD byteSize{0};
-    status = RegQueryValueExW(key, wValueName.c_str(), nullptr, &valueType, nullptr, &byteSize);
-    if (status != ERROR_SUCCESS || (valueType != REG_SZ && valueType != REG_EXPAND_SZ) || byteSize == 0) {
-        return std::nullopt;
-    }
-
-    std::wstring wValue(byteSize / sizeof(wchar_t) + 1, L'\0');
-    status = RegQueryValueExW(
-        key,
-        wValueName.c_str(),
-        nullptr,
-        nullptr,
-        reinterpret_cast<LPBYTE>(wValue.data()),
-        &byteSize);
-
-    if (status != ERROR_SUCCESS) return std::nullopt;
-    wValue.resize(byteSize / sizeof(wchar_t));
-    while (!wValue.empty() && (wValue.back() == L'\0' || wValue.back() == L' ')) {
-        wValue.pop_back();
-    }
-
-    if (valueType == REG_EXPAND_SZ) {
-        DWORD reqSize = ExpandEnvironmentStringsW(wValue.c_str(), nullptr, 0);
-        if (reqSize > 0) {
-            std::wstring expanded(reqSize, L'\0');
-            DWORD expLen = ExpandEnvironmentStringsW(wValue.c_str(), expanded.data(), reqSize);
-            if (expLen > 0) {
-                while (!expanded.empty() && expanded.back() == L'\0') {
-                    expanded.pop_back();
-                }
-                wValue = std::move(expanded);
-            }
-        }
-    }
-
-    return WideToUtf8(wValue);
-}
-
 std::optional<std::string> FindSteamInstallPath() {
     static const auto s_cachedPath = []() -> std::optional<std::string> {
         if (auto resolved = OSTPlatform::SteamLocator::ResolvePath()) {
-            std::string norm = NormalizeDir(WideToUtf8(resolved->wstring()));
-            LOG_DEBUG("SteamPath", "Found Steam install path via SteamLocator: {}", MaskPath(norm));
+            std::string norm = NormalizeDir(PathToUtf8(*resolved));
+            LOG_DEBUG("SteamPath", MsgKey::LogUtilsFoundSteamPath, MaskPath(norm));
             return norm;
         }
         return std::nullopt;

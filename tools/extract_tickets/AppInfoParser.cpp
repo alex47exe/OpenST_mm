@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <ranges>
 
 namespace OST::ExtractTickets {
@@ -16,7 +17,7 @@ namespace OST::ExtractTickets {
 namespace {
 
 void ParseStringTableV41(const uint8_t* data, size_t totalBytes, uint64_t stringTableOffset, std::vector<std::string_view>& outTable) {
-    if (stringTableOffset < 16 || stringTableOffset + 4 > totalBytes) return;
+    if (totalBytes < 20 || stringTableOffset < 16 || stringTableOffset > totalBytes - 4) return;
 
     uint32_t numStrings = 0;
     std::memcpy(&numStrings, data + stringTableOffset, sizeof(uint32_t));
@@ -28,6 +29,9 @@ void ParseStringTableV41(const uint8_t* data, size_t totalBytes, uint64_t string
         size_t sLen = 0;
         while (sOff + sLen < totalBytes && data[sOff + sLen] != '\0') {
             ++sLen;
+        }
+        if (sOff + sLen >= totalBytes) {
+            break;
         }
         outTable.emplace_back(sStart, sLen);
         sOff += sLen + 1;
@@ -94,10 +98,10 @@ struct AppInfoFileContext {
         ctx.appsEndOffset = ctx.totalBytes;
 
         if (ctx.version >= 41) {
-            if (ctx.totalBytes >= 16) {
+            if (ctx.totalBytes >= 20) {
                 uint64_t stringTableOffset = 0;
                 std::memcpy(&stringTableOffset, ctx.data + 8, sizeof(uint64_t));
-                if (stringTableOffset >= 16 && stringTableOffset + 4 <= ctx.totalBytes) {
+                if (stringTableOffset >= 16 && stringTableOffset <= ctx.totalBytes - 4) {
                     ctx.appsEndOffset = static_cast<size_t>(stringTableOffset);
                     ParseStringTableV41(ctx.data, ctx.totalBytes, stringTableOffset, ctx.stringTable);
                 }
@@ -110,7 +114,7 @@ struct AppInfoFileContext {
     template <typename Callback>
     void ForEachApp(Callback&& cb) const {
         size_t offset = appsStartOffset;
-        while (offset + 8 <= appsEndOffset) {
+        while (appsEndOffset >= 8 && offset <= appsEndOffset - 8) {
             uint32_t entryAppId = 0;
             uint32_t entrySize = 0;
             std::memcpy(&entryAppId, data + offset, sizeof(uint32_t));
@@ -147,16 +151,15 @@ struct VdfReader {
     }
 
     bool ReadKey(std::string_view& outKey) noexcept {
-        if (stringTable && !stringTable->empty()) {
-            if (p + 4 > end) return false;
+        if (stringTable != nullptr) {
+            if (static_cast<size_t>(end - p) < 4) return false;
             uint32_t idx = 0;
             std::memcpy(&idx, p, 4);
             p += 4;
-            if (idx < stringTable->size()) {
-                outKey = (*stringTable)[idx];
-            } else {
-                outKey = "";
+            if (idx >= stringTable->size()) {
+                return false;
             }
+            outKey = (*stringTable)[idx];
             return true;
         } else {
             const char* start = reinterpret_cast<const char*>(p);
@@ -164,7 +167,7 @@ struct VdfReader {
                 ++p;
             }
             if (p >= end) return false;
-            outKey = std::string_view(start, reinterpret_cast<const char*>(p) - start);
+            outKey = std::string_view(start, static_cast<size_t>(reinterpret_cast<const char*>(p) - start));
             ++p; // skip null terminator
             return true;
         }
@@ -176,47 +179,47 @@ struct VdfReader {
             ++p;
         }
         if (p >= end) return false;
-        outVal = std::string_view(start, reinterpret_cast<const char*>(p) - start);
+        outVal = std::string_view(start, static_cast<size_t>(reinterpret_cast<const char*>(p) - start));
         ++p;
         return true;
     }
 
     bool ReadInt32(int32_t& outVal) noexcept {
-        if (p + 4 > end) return false;
+        if (static_cast<size_t>(end - p) < 4) return false;
         std::memcpy(&outVal, p, 4);
         p += 4;
         return true;
     }
 
     bool ReadUInt64(uint64_t& outVal) noexcept {
-        if (p + 8 > end) return false;
+        if (static_cast<size_t>(end - p) < 8) return false;
         std::memcpy(&outVal, p, 8);
         p += 8;
         return true;
     }
 
     bool ReadInt64(int64_t& outVal) noexcept {
-        if (p + 8 > end) return false;
+        if (static_cast<size_t>(end - p) < 8) return false;
         std::memcpy(&outVal, p, 8);
         p += 8;
         return true;
     }
 
     bool ReadFloat(float& outVal) noexcept {
-        if (p + 4 > end) return false;
+        if (static_cast<size_t>(end - p) < 4) return false;
         std::memcpy(&outVal, p, 4);
         p += 4;
         return true;
     }
 
     bool SkipBytes(size_t n) noexcept {
-        if (p + n > end) return false;
+        if (static_cast<size_t>(end - p) < n) return false;
         p += n;
         return true;
     }
 
     bool SkipWideString() noexcept {
-        while (p + 2 <= end) {
+        while (static_cast<size_t>(end - p) >= 2) {
             uint16_t ch = 0;
             std::memcpy(&ch, p, 2);
             p += 2;
@@ -243,15 +246,18 @@ void ParseVdfRecurse(VdfReader& reader,
         if (!reader.ReadKey(key)) return;
 
         // Handle Valve PICS Root node wrapper with leading empty key (00 00 <root_name> 00)
-        if (type == 0x00 && key.empty() && pathStack.empty()) {
+        if (type == 0x00 && key.empty() && pathStack.empty() &&
+            reader.stringTable == nullptr && reader.HasMore() && *reader.p >= 0x20) {
             if (reader.ReadKey(key)) {
-                LOG_DEBUG("AppInfoParser", "检测到 PICS 二进制流包含 Root 包裹名: '{}'", key);
+                LOG_DEBUG("AppInfoParser", MsgKey::LogVdfPicsRootWrapper, key);
             }
         }
 
-        const bool isPublicBranch = (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "public"));
-        const bool isDirectManifestKey = (EqualIgnoreCase(key, "gid") ||
-                                          (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "manifests") && EqualIgnoreCase(key, "public")));
+        const bool inManifestsBranch = (pathStack.size() >= 2 && EqualIgnoreCase(pathStack[pathStack.size() - 2], "manifests"));
+        const bool isPublicBranch = (inManifestsBranch && EqualIgnoreCase(pathStack.back(), "public"));
+        const bool isManifestsParent = (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "manifests"));
+        const bool isDirectManifestKey = ((inManifestsBranch && EqualIgnoreCase(key, "gid")) ||
+                                          (isManifestsParent && EqualIgnoreCase(key, "public")));
 
         auto recordManifest = [&](std::string_view gidStr, bool isPublic) {
             if (currentDepotId == 0 || gidStr.empty() || !IsValidManifestId(gidStr)) return;
@@ -259,7 +265,7 @@ void ParseVdfRecurse(VdfReader& reader,
                 if (d.depotId == currentDepotId) {
                     if (isPublic || d.manifestId.empty()) {
                         d.manifestId = std::string(gidStr);
-                        LOG_DEBUG("AppInfoParser", "Depot {} 记录清单 GID: {} (分支: {})",
+                        LOG_DEBUG("AppInfoParser", MsgKey::LogVdfRecordManifestGid,
                                   currentDepotId, gidStr, isPublic ? "public" : "other");
                     }
                     break;
@@ -279,7 +285,7 @@ void ParseVdfRecurse(VdfReader& reader,
             }
             if (std::ranges::find(outData.dlcAppIds, dlcId) == outData.dlcAppIds.end()) {
                 outData.dlcAppIds.push_back(dlcId);
-                LOG_DEBUG("AppInfoParser", "发现关联 DLC AppID: {}", dlcId);
+                LOG_DEBUG("AppInfoParser", MsgKey::LogVdfFoundDlcAppId, dlcId);
             }
         };
 
@@ -288,14 +294,12 @@ void ParseVdfRecurse(VdfReader& reader,
 
             uint32_t prevDepot = currentDepotId;
             if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack[pathStack.size() - 2], "depots")) {
-                uint32_t parsedId = 0;
-                auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), parsedId);
-                if (ec == std::errc() && parsedId > 0) {
-                    currentDepotId = parsedId;
+                if (auto parsedId = ParseAppId(key)) {
+                    currentDepotId = *parsedId;
                     if (std::none_of(outData.depots.begin(), outData.depots.end(),
-                                     [&](const AppDepotManifest& d) { return d.depotId == parsedId; })) {
-                        outData.depots.push_back({parsedId, "", 0});
-                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", parsedId);
+                                     [&](const AppDepotManifest& d) { return d.depotId == *parsedId; })) {
+                        outData.depots.push_back({*parsedId, "", 0});
+                        LOG_DEBUG("AppInfoParser", MsgKey::LogVdfFoundDepotId, *parsedId);
                     }
                 }
             }
@@ -316,11 +320,8 @@ void ParseVdfRecurse(VdfReader& reader,
                 while (start < val.size()) {
                     size_t comma = val.find(',', start);
                     std::string_view token = (comma == std::string_view::npos) ? val.substr(start) : val.substr(start, comma - start);
-                    token = TrimWhitespace(token);
-                    uint32_t dlcId = 0;
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), dlcId);
-                    if (ec == std::errc() && dlcId > 0) {
-                        recordDlcId(dlcId);
+                    if (auto dlcId = ParseAppId(token)) {
+                        recordDlcId(*dlcId);
                     }
                     if (comma == std::string_view::npos) break;
                     start = comma + 1;
@@ -328,28 +329,26 @@ void ParseVdfRecurse(VdfReader& reader,
             } else if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "extended")) {
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
-                    LOG_DEBUG("AppInfoParser", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") &&
-                           (val.find("denuvo") != std::string_view::npos || val.find("Denuvo") != std::string_view::npos)) {
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedDenuvoFlag, val);
+                } else if ((EqualIgnoreCase(key, "thirdpartydrm") || EqualIgnoreCase(key, "drm_notice")) &&
+                           ContainsIgnoreCase(val, "denuvo")) {
                     outData.requiresDenuvo = true;
-                    LOG_DEBUG("AppInfoParser", "检测到第三方 DRM Denuvo 标记: {}", val);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedThirdPartyDenuvo, val);
                 }
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0) {
-                uint32_t dlcId = 0;
-                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), dlcId);
-                if (ec == std::errc() && dlcId > 0) {
-                    recordDlcId(dlcId);
+                if (auto dlcId = ParseAppId(val)) {
+                    recordDlcId(*dlcId);
                 }
             } else if (EqualIgnoreCase(key, "name") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
                 if (outData.name.empty()) {
                     outData.name = std::string(val);
-                    LOG_DEBUG("AppInfoParser", "解析到游戏官方名称: '{}'", outData.name);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedAppName, outData.name);
                 }
             } else if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack.back(), "name_localized") &&
                        EqualIgnoreCase(pathStack[pathStack.size() - 2], "common")) {
                 if (EqualIgnoreCase(key, I18n::GetSteamLanguageCode())) {
                     outData.localizedName = std::string(val);
-                    LOG_DEBUG("AppInfoParser", "解析到匹配语言的官方本地化名称: '{}' ({})", outData.localizedName, key);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedLocalizedName, outData.localizedName, key);
                 } else if (I18n::GetCurrentLanguage() == Language::Chinese && EqualIgnoreCase(key, "tchinese") && outData.localizedName.empty()) {
                     outData.localizedName = std::string(val);
                 } else if (I18n::GetCurrentLanguage() == Language::Spanish && EqualIgnoreCase(key, "latam") && outData.localizedName.empty()) {
@@ -365,7 +364,7 @@ void ParseVdfRecurse(VdfReader& reader,
             } else if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "extended") &&
                        EqualIgnoreCase(key, "gamerequiresdenuvo") && val != 0) {
                 outData.requiresDenuvo = true;
-                LOG_DEBUG("AppInfoParser", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", val);
+                LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedDenuvoFlag, val);
             }
         } else if (type == 0x03) { // Float
             float f = 0.0f;
@@ -382,7 +381,8 @@ void ParseVdfRecurse(VdfReader& reader,
 
             if (isDirectManifestKey && val > 0) {
                 recordManifest(std::to_string(val), isPublicBranch || EqualIgnoreCase(key, "public"));
-            } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0) {
+            } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0 &&
+                       val <= (std::numeric_limits<uint32_t>::max)()) {
                 recordDlcId(static_cast<uint32_t>(val));
             }
         } else if (type == 0x09) { // CompiledInt
@@ -393,13 +393,14 @@ void ParseVdfRecurse(VdfReader& reader,
 
             if (isDirectManifestKey && val > 0) {
                 recordManifest(std::to_string(val), isPublicBranch || EqualIgnoreCase(key, "public"));
-            } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0) {
+            } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0 &&
+                       static_cast<uint64_t>(val) <= (std::numeric_limits<uint32_t>::max)()) {
                 recordDlcId(static_cast<uint32_t>(val));
             }
         } else {
             // Unknown or unsupported type encountered: binary VDF is not self-describing in length.
             // Abort current object traversal to avoid desynchronization and corrupted key/value reads.
-            LOG_DEBUG("AppInfoParser", "遇到未支持的 VDF 类型码 0x{:02X} (key='{}')，终止当前节点解析", type, key);
+            LOG_DEBUG("AppInfoParser", MsgKey::LogVdfUnsupportedType, type, key);
             return;
         }
     }
@@ -533,7 +534,7 @@ void ParseTextVdfRecurse(
             if (d.depotId == depotId) {
                 if (isPublic || d.manifestId.empty()) {
                     d.manifestId = std::string(gidStr);
-                    LOG_DEBUG("AppInfoParser", "Depot {} 记录清单 GID: {} (分支: {})",
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfRecordManifestGid,
                               depotId, gidStr, isPublic ? "public" : "other");
                 }
                 return;
@@ -541,7 +542,7 @@ void ParseTextVdfRecurse(
         }
         if (isPublic) {
             outData.depots.push_back({depotId, std::string(gidStr), 0});
-            LOG_DEBUG("AppInfoParser", "Depot {} 记录清单 GID: {} (分支: public)", depotId, gidStr);
+            LOG_DEBUG("AppInfoParser", MsgKey::LogVdfRecordManifestGid, depotId, gidStr, "public");
         }
     };
 
@@ -557,7 +558,7 @@ void ParseTextVdfRecurse(
         }
         if (std::ranges::find(outData.dlcAppIds, dlcId) == outData.dlcAppIds.end()) {
             outData.dlcAppIds.push_back(dlcId);
-            LOG_DEBUG("AppInfoParser", "发现关联 DLC AppID: {}", dlcId);
+            LOG_DEBUG("AppInfoParser", MsgKey::LogVdfFoundDlcAppId, dlcId);
         }
     };
 
@@ -585,14 +586,12 @@ void ParseTextVdfRecurse(
 
             uint32_t nextDepotId = currentDepotId;
             if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "depots")) {
-                uint32_t parsedId = 0;
-                auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), parsedId);
-                if (ec == std::errc() && parsedId > 0) {
-                    nextDepotId = parsedId;
+                if (auto parsedId = ParseAppId(key)) {
+                    nextDepotId = *parsedId;
                     if (std::none_of(outData.depots.begin(), outData.depots.end(),
-                                     [&](const AppDepotManifest& d) { return d.depotId == parsedId; })) {
-                        outData.depots.push_back({parsedId, "", 0});
-                        LOG_DEBUG("AppInfoParser", "发现 Depot ID: {}", parsedId);
+                                     [&](const AppDepotManifest& d) { return d.depotId == *parsedId; })) {
+                        outData.depots.push_back({*parsedId, "", 0});
+                        LOG_DEBUG("AppInfoParser", MsgKey::LogVdfFoundDepotId, *parsedId);
                     }
                 }
             }
@@ -610,10 +609,11 @@ void ParseTextVdfRecurse(
                 (void)lexer.Next();
             }
 
-            const bool isPublicBranch = (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "public"));
+            const bool inManifestsBranch = (pathStack.size() >= 2 && EqualIgnoreCase(pathStack[pathStack.size() - 2], "manifests"));
+            const bool isPublicBranch = (inManifestsBranch && EqualIgnoreCase(pathStack.back(), "public"));
             const bool isManifestsParent = (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "manifests"));
             const bool isPublicKey = EqualIgnoreCase(key, "public");
-            const bool isGidKey = EqualIgnoreCase(key, "gid");
+            const bool isGidKey = (inManifestsBranch && EqualIgnoreCase(key, "gid"));
 
             if (isGidKey || (isManifestsParent && isPublicKey)) {
                 recordManifest(currentDepotId, val, isPublicBranch || isPublicKey);
@@ -625,11 +625,8 @@ void ParseTextVdfRecurse(
                     std::string_view token = (comma == std::string::npos) ?
                         std::string_view(val).substr(start) :
                         std::string_view(val).substr(start, comma - start);
-                    token = TrimWhitespace(token);
-                    uint32_t dlcId = 0;
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), dlcId);
-                    if (ec == std::errc() && dlcId > 0) {
-                        recordDlcId(currentDepotId, dlcId);
+                    if (auto dlcId = ParseAppId(token)) {
+                        recordDlcId(currentDepotId, *dlcId);
                     }
                     if (comma == std::string::npos) break;
                     start = comma + 1;
@@ -637,28 +634,26 @@ void ParseTextVdfRecurse(
             } else if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "extended")) {
                 if (EqualIgnoreCase(key, "gamerequiresdenuvo") && (val == "1" || EqualIgnoreCase(val, "true"))) {
                     outData.requiresDenuvo = true;
-                    LOG_DEBUG("AppInfoParser", "检测到 Denuvo 反篡改保护标记 (gamerequiresdenuvo={})", val);
-                } else if (EqualIgnoreCase(key, "thirdpartydrm") &&
-                           (val.find("denuvo") != std::string_view::npos || val.find("Denuvo") != std::string_view::npos)) {
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedDenuvoFlag, val);
+                } else if ((EqualIgnoreCase(key, "thirdpartydrm") || EqualIgnoreCase(key, "drm_notice")) &&
+                           ContainsIgnoreCase(val, "denuvo")) {
                     outData.requiresDenuvo = true;
-                    LOG_DEBUG("AppInfoParser", "检测到第三方 DRM Denuvo 标记: {}", val);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedThirdPartyDenuvo, val);
                 }
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0) {
-                uint32_t dlcId = 0;
-                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), dlcId);
-                if (ec == std::errc() && dlcId > 0) {
-                    recordDlcId(currentDepotId, dlcId);
+                if (auto dlcId = ParseAppId(val)) {
+                    recordDlcId(currentDepotId, *dlcId);
                 }
             } else if (EqualIgnoreCase(key, "name") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
                 if (outData.name.empty()) {
                     outData.name = val;
-                    LOG_DEBUG("AppInfoParser", "解析到游戏官方名称: '{}'", outData.name);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedAppName, outData.name);
                 }
             } else if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack.back(), "name_localized") &&
                        EqualIgnoreCase(pathStack[pathStack.size() - 2], "common")) {
                 if (EqualIgnoreCase(key, I18n::GetSteamLanguageCode())) {
                     outData.localizedName = val;
-                    LOG_DEBUG("AppInfoParser", "解析到匹配语言的官方本地化名称: '{}' ({})", outData.localizedName, key);
+                    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedLocalizedName, outData.localizedName, key);
                 } else if (I18n::GetCurrentLanguage() == Language::Chinese && EqualIgnoreCase(key, "tchinese") && outData.localizedName.empty()) {
                     outData.localizedName = val;
                 } else if (I18n::GetCurrentLanguage() == Language::Spanish && EqualIgnoreCase(key, "latam") && outData.localizedName.empty()) {
@@ -747,14 +742,16 @@ std::optional<ParsedAppInfoData> ParseBinaryVdfAppInfo(
 
     if (buffer.empty()) return std::nullopt;
 
+#if EXTRACT_TICKETS_HAS_LOGGING
     std::string hexDump;
     const size_t dumpLen = (std::min<size_t>)(32, buffer.size());
     hexDump.reserve(dumpLen * 3);
     for (size_t i = 0; i < dumpLen; ++i) {
         std::format_to(std::back_inserter(hexDump), "{:02X} ", buffer[i]);
     }
-    LOG_DEBUG("AppInfoParser", "开始解析 PICS VDF 数据 (大小: {} 字节, AppID: {}, 前32字节Hex: {})",
+    LOG_DEBUG("AppInfoParser", MsgKey::LogVdfStartParsePics,
               buffer.size(), appId, hexDump);
+#endif
 
     ParsedAppInfoData out;
     out.appId = appId;
@@ -769,18 +766,19 @@ std::optional<ParsedAppInfoData> ParseBinaryVdfAppInfo(
     for (size_t i = scanStart; i < buffer.size(); ++i) {
         uint8_t b = buffer[i];
         if (b == ' ' || b == '\t' || b == '\r' || b == '\n') continue;
-        if (b == '"' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '{') {
+        if (b == '"' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '{' ||
+            (b == '/' && i + 1 < buffer.size() && buffer[i + 1] == '/')) {
             isText = true;
         }
         break;
     }
 
     if (isText) {
-        LOG_DEBUG("AppInfoParser", "检测到 PICS 响应为文本 VDF (KeyValues) 格式，启动文本解析引擎...");
+        LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedTextFormat);
         std::string_view text(reinterpret_cast<const char*>(buffer.data()), buffer.size());
         ParseTextVdfAppInfo(text, out);
     } else {
-        LOG_DEBUG("AppInfoParser", "检测到 PICS 响应为二进制 VDF 格式，启动二进制解析引擎...");
+        LOG_DEBUG("AppInfoParser", MsgKey::LogVdfDetectedBinaryFormat);
         VdfReader reader{buffer.data(), buffer.data() + buffer.size(), nullptr};
         std::vector<std::string_view> pathStack;
         uint32_t curDepot = 0;
@@ -791,7 +789,7 @@ std::optional<ParsedAppInfoData> ParseBinaryVdfAppInfo(
         out.name = std::move(out.localizedName);
     }
 
-    LOG_INFO("AppInfoParser", "PICS VDF 解析完成 (AppID: {}, 提取到 {} 个 Depot, {} 个 DLC)",
+    LOG_INFO("AppInfoParser", MsgKey::LogVdfParseComplete,
              appId, out.depots.size(), out.dlcAppIds.size());
     return out;
 }

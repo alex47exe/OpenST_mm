@@ -10,7 +10,7 @@ namespace StatsClient {
 
     // Non-blocking lookup. If in cache, returns true and writes *outSteamId.
     // If cache miss, triggers async background pre-warm and returns false immediately.
-    bool TryGetCachedStatSteamId(AppId_t appId, uint64_t* outSteamId);
+    [[nodiscard]] bool TryGetCachedStatSteamId(AppId_t appId, uint64_t* outSteamId);
 
     // Asynchronously pre-warms the cache for appId in a detached background thread.
     // If already cached, in-flight, or in cooldown, this is a no-op.
@@ -18,6 +18,9 @@ namespace StatsClient {
 
     // Synchronous fetch with network I/O.
     // WARNING: Do NOT call this on time-critical or mutex-protected paths (e.g., g_SendMutex).
-    bool FetchStatSteamId(AppId_t appId, uint64_t* outSteamId);
+    [[nodiscard]] bool FetchStatSteamId(AppId_t appId, uint64_t* outSteamId);
+
+    // Gracefully shut down background workers and clear cache resources.
+    void Shutdown() noexcept;
 
 } // namespace StatsClient

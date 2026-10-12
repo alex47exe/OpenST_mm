@@ -11,9 +11,10 @@ namespace OST::ExtractTickets {
 
 std::vector<std::string> FindSteamLibraryFolders(const std::string& steamPath) {
     std::vector<std::string> libraries;
-    if (!steamPath.empty()) {
-        libraries.push_back(NormalizeDir(steamPath));
+    if (steamPath.empty()) {
+        return libraries;
     }
+    libraries.push_back(NormalizeDir(steamPath));
 
     const std::filesystem::path libraryVdfPath = Utf8Path(steamPath) / "steamapps" / "libraryfolders.vdf";
     std::ifstream file(libraryVdfPath);
@@ -126,14 +127,16 @@ std::string FindDepotManifestFile(const std::vector<std::string>& depotcacheDirs
         for (const auto& entry : std::filesystem::directory_iterator(dirP, dirEc)) {
             if (dirEc) break;
             if (entry.is_regular_file(dirEc)) {
-                std::string fname = entry.path().filename().string();
-                if (fname.starts_with(prefix) && fname.ends_with(".manifest")) {
+                std::string fname = PathToUtf8(entry.path().filename());
+                if (fname.size() > prefix.size() + 9 &&
+                    fname.starts_with(prefix) &&
+                    EqualIgnoreCase(std::string_view(fname).substr(fname.size() - 9), ".manifest")) {
                     std::string_view candidate = std::string_view(fname).substr(prefix.size(), fname.size() - prefix.size() - 9);
                     if (IsValidManifestId(candidate)) {
                         auto writeTime = entry.last_write_time(dirEc);
                         if (!dirEc && (bestPath.empty() || writeTime > bestWriteTime)) {
                             bestWriteTime = writeTime;
-                            bestPath = entry.path().string();
+                            bestPath = PathToUtf8(entry.path());
                             bestManifestId = std::string(candidate);
                         }
                     }
@@ -190,10 +193,20 @@ void ParseAcfDepots(const std::string& acfPath,
         }
 
         bool inQuote = false;
+        bool escaped = false;
         for (size_t i = 0; i < line.size(); ++i) {
             char c = line[i];
-            if (c == '"' && (i == 0 || line[i - 1] != '\\')) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inQuote) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
                 inQuote = !inQuote;
+                continue;
             }
             if (inQuote) continue;
 
@@ -209,10 +222,14 @@ void ParseAcfDepots(const std::string& acfPath,
                     pendingMountedDepots = false;
                 }
             } else if (c == '}') {
-                if (inInstalledDepots && braceDepth == installedDepth) {
-                    inInstalledDepots = false;
-                    installedDepth = -1;
-                    currentDepotId = 0;
+                if (inInstalledDepots) {
+                    if (braceDepth == installedDepth + 1) {
+                        currentDepotId = 0;
+                    } else if (braceDepth == installedDepth) {
+                        inInstalledDepots = false;
+                        installedDepth = -1;
+                        currentDepotId = 0;
+                    }
                 }
                 if (inMountedDepots && braceDepth == mountedDepth) {
                     inMountedDepots = false;
@@ -255,6 +272,9 @@ void ParseAcfDepots(const std::string& acfPath,
 
 std::unordered_map<uint32_t, std::string> ParseConfigVdfDepotKeys(const std::string& steamPath) {
     std::unordered_map<uint32_t, std::string> depotKeys;
+    if (steamPath.empty()) {
+        return depotKeys;
+    }
     const std::filesystem::path configPath = Utf8Path(steamPath) / "config" / "config.vdf";
     std::ifstream file(configPath);
     if (!file) return depotKeys;
@@ -283,10 +303,20 @@ std::unordered_map<uint32_t, std::string> ParseConfigVdfDepotKeys(const std::str
         }
 
         bool inQuote = false;
+        bool escaped = false;
         for (size_t i = 0; i < line.size(); ++i) {
             char c = line[i];
-            if (c == '"' && (i == 0 || line[i - 1] != '\\')) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inQuote) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
                 inQuote = !inQuote;
+                continue;
             }
             if (inQuote) continue;
 
@@ -298,10 +328,14 @@ std::unordered_map<uint32_t, std::string> ParseConfigVdfDepotKeys(const std::str
                     pendingDepots = false;
                 }
             } else if (c == '}') {
-                if (inDepots && braceDepth == depotsDepth) {
-                    inDepots = false;
-                    depotsDepth = -1;
-                    currentDepotId = 0;
+                if (inDepots) {
+                    if (braceDepth == depotsDepth + 1) {
+                        currentDepotId = 0;
+                    } else if (braceDepth == depotsDepth) {
+                        inDepots = false;
+                        depotsDepth = -1;
+                        currentDepotId = 0;
+                    }
                 }
                 braceDepth--;
             }
@@ -328,9 +362,10 @@ std::unordered_map<uint32_t, std::string> ParseConfigVdfDepotKeys(const std::str
             file.seekg(0, std::ios::beg);
             std::string fullText(static_cast<size_t>(fileSize), '\0');
             file.read(fullText.data(), fileSize);
+            fullText.resize(static_cast<size_t>(file.gcount()));
 
             size_t offset = 0;
-            while ((offset = fullText.find("\"DecryptionKey\"", offset)) != std::string::npos) {
+            while ((offset = FindIgnoreCase(fullText, "\"DecryptionKey\"", offset)) != std::string_view::npos) {
                 size_t keyStart = fullText.find('"', offset + 15);
                 if (keyStart != std::string::npos) {
                     size_t keyEnd = fullText.find('"', keyStart + 1);

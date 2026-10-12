@@ -18,6 +18,7 @@ namespace {
 
 constexpr std::array<std::string_view, kLanguageCount> kTranslations[] = {
     OST_I18N_MESSAGES(OST_I18N_TABLE_DEF)
+    OST_I18N_LOG_MESSAGES(OST_I18N_TABLE_DEF)
 };
 
 #undef OST_I18N_TABLE_DEF
@@ -26,6 +27,22 @@ static_assert(std::size(kTranslations) == kMsgKeyCount, "kTranslations size must
 
 std::atomic<Language> s_currentLang{Language::English};
 
+bool TryParseLanguage(std::string_view val, Language& outLang) noexcept {
+    if (val.starts_with("zh") || val.starts_with("ZH") || val == "chinese" || val == "schinese" || val == "cn" || val == "CN") {
+        outLang = Language::Chinese;
+        return true;
+    }
+    if (val.starts_with("es") || val.starts_with("ES") || val == "spanish" || val == "latam") {
+        outLang = Language::Spanish;
+        return true;
+    }
+    if (val.starts_with("en") || val.starts_with("EN") || val == "english") {
+        outLang = Language::English;
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 Language I18n::DetectSystemLanguage() noexcept {
@@ -33,15 +50,9 @@ Language I18n::DetectSystemLanguage() noexcept {
 #if defined(_WIN32)
     DWORD envLen = GetEnvironmentVariableA("OST_LANG", envBuf, sizeof(envBuf));
     if (envLen > 0 && envLen < sizeof(envBuf)) {
-        std::string_view envVal(envBuf);
-        if (envVal.starts_with("zh") || envVal.starts_with("ZH") || envVal == "chinese" || envVal == "schinese") {
-            return Language::Chinese;
-        }
-        if (envVal.starts_with("es") || envVal.starts_with("ES") || envVal == "spanish") {
-            return Language::Spanish;
-        }
-        if (envVal.starts_with("en") || envVal.starts_with("EN") || envVal == "english") {
-            return Language::English;
+        Language parsed{};
+        if (TryParseLanguage(std::string_view(envBuf, envLen), parsed)) {
+            return parsed;
         }
     }
 
@@ -66,6 +77,15 @@ void I18n::SetLanguage(Language lang) noexcept {
 #if defined(_WIN32)
     SetEnvironmentVariableA("OST_LANG", GetLanguageCode(lang).data());
 #endif
+}
+
+bool I18n::SetLanguageFromString(std::string_view langStr) noexcept {
+    Language parsed{};
+    if (TryParseLanguage(langStr, parsed)) {
+        SetLanguage(parsed);
+        return true;
+    }
+    return false;
 }
 
 void I18n::InitLanguage() noexcept {

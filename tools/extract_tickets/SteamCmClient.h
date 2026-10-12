@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AppInfoParser.h"
+#include "Crypto.h"
 #include "SteamSession.h"
 #include "SteamWire.h"
 #include "VdfParser.h"
@@ -77,9 +78,6 @@ public:
     // Promotes a validated fast CDN server to the head of the cached server list
     static void PromoteWorkingCdnServer(std::string_view server);
 
-    // Queries official Steam Store API for drm_notice and caches the result
-    [[nodiscard]] static bool DetectDenuvoFromStore(uint32_t appId);
-
     using ProgressCallback = std::function<void(std::string_view stage, size_t current, size_t total, uint32_t depotId)>;
 
     // High-level extraction pipeline for a single target AppID
@@ -88,7 +86,10 @@ public:
         bool forceEticket = false,
         ProgressCallback onProgress = nullptr);
 
-    void SetAccessToken(std::string_view token) { m_accessToken = token; }
+    void SetAccessToken(std::string_view token);
+    void SetRefreshToken(std::string_view token);
+    [[nodiscard]] std::optional<std::string> RefreshAccessTokenViaCm(std::string* outNewRefreshToken = nullptr);
+    [[nodiscard]] uint64_t GetSteamId() const noexcept { return m_steamId; }
     [[nodiscard]] int32_t GetLastLogonEResult() const noexcept { return m_lastLogonEResult; }
     [[nodiscard]] bool IsConnected() const noexcept { return m_ws.IsConnected() && m_isLoggedOn; }
     [[nodiscard]] bool EnsureConnected();
@@ -98,9 +99,18 @@ private:
     [[nodiscard]] bool ReadMatchingMsg(
         uint32_t expectedEMsg,
         std::vector<uint8_t>& outBody,
-        DWORD timeoutMs = 8000,
+        uint32_t timeoutMs = 8000,
         int32_t* outEResult = nullptr,
         uint64_t expectedJobId = 0);
+    [[nodiscard]] bool SendAndReceiveWithRetry(
+        ESteamMsg reqEMsg,
+        const ProtoWriter& reqBody,
+        uint32_t respEMsg,
+        std::vector<uint8_t>& outBody,
+        uint32_t timeoutMs = 8000,
+        int32_t* outEResult = nullptr,
+        std::string_view targetJobName = {},
+        uint64_t* outJobId = nullptr);
     void UnpackMultiMsg(std::span<const uint8_t> bodySpan);
 
     struct QueuedMsg {
@@ -108,6 +118,41 @@ private:
         uint64_t targetJobId{0};
         int32_t eresult{1};
         std::vector<uint8_t> body;
+
+        QueuedMsg() = default;
+        QueuedMsg(uint32_t e, uint64_t job, int32_t res, std::vector<uint8_t>&& b) noexcept
+            : eMsg(e), targetJobId(job), eresult(res), body(std::move(b)) {
+            SecureWipeBuffer(b);
+        }
+        ~QueuedMsg() noexcept {
+            SecureWipeBuffer(body);
+        }
+        QueuedMsg(const QueuedMsg&) = default;
+        QueuedMsg(QueuedMsg&& other) noexcept
+            : eMsg(other.eMsg), targetJobId(other.targetJobId), eresult(other.eresult), body(std::move(other.body)) {
+            SecureWipeBuffer(other.body);
+        }
+        QueuedMsg& operator=(const QueuedMsg& other) {
+            if (this != &other) {
+                SecureWipeBuffer(body);
+                eMsg = other.eMsg;
+                targetJobId = other.targetJobId;
+                eresult = other.eresult;
+                body = other.body;
+            }
+            return *this;
+        }
+        QueuedMsg& operator=(QueuedMsg&& other) noexcept {
+            if (this != &other) {
+                SecureWipeBuffer(body);
+                eMsg = other.eMsg;
+                targetJobId = other.targetJobId;
+                eresult = other.eresult;
+                body = std::move(other.body);
+                SecureWipeBuffer(other.body);
+            }
+            return *this;
+        }
     };
 
     WebSocketClient m_ws;
@@ -118,8 +163,10 @@ private:
     uint64_t m_nextJobId{100};
     int32_t m_clientSessionId{0};
     uint32_t m_cellId{0};
+    uint32_t m_playingAppId{0};
     int32_t m_lastLogonEResult{1};
     bool m_isLoggedOn{false};
+    bool m_reconnecting{false};
 };
 
 } // namespace OST::ExtractTickets

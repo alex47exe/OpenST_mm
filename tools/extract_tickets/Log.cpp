@@ -1,5 +1,8 @@
 #include "Log.h"
+#include "Utils.h"
+#if EXTRACT_TICKETS_HAS_LOGGING
 #include "TuiEngine.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -74,8 +77,7 @@ namespace {
         }
 
         // 2. Windows User Path redaction
-        if (result.find("Users\\") != std::string::npos || result.find("Users/") != std::string::npos ||
-            result.find("users\\") != std::string::npos || result.find("users/") != std::string::npos) {
+        if (FindIgnoreCase(result, "users") != std::string_view::npos) {
             result = MaskPath(result);
         }
 
@@ -84,16 +86,61 @@ namespace {
 } // namespace
 #endif // EXTRACT_TICKETS_HAS_LOGGING
 
+namespace {
+    [[nodiscard]] constexpr bool IsUtf8ContinuationByte(char c) noexcept {
+        return (static_cast<unsigned char>(c) & 0xC0) == 0x80;
+    }
+
+    [[nodiscard]] constexpr size_t CountUtf8Codepoints(std::string_view s) noexcept {
+        size_t count = 0;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i == 0 || !IsUtf8ContinuationByte(s[i])) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    [[nodiscard]] constexpr std::string_view Utf8Prefix(std::string_view s, size_t maxCodepoints) noexcept {
+        if (maxCodepoints == 0 || s.empty()) return {};
+        size_t cp = 0;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (i == 0 || !IsUtf8ContinuationByte(s[i])) {
+                if (cp == maxCodepoints) {
+                    return s.substr(0, i);
+                }
+                ++cp;
+            }
+        }
+        return s;
+    }
+
+    [[nodiscard]] constexpr std::string_view Utf8Suffix(std::string_view s, size_t maxCodepoints) noexcept {
+        if (maxCodepoints == 0 || s.empty()) return {};
+        size_t cp = 0;
+        for (size_t i = s.size(); i > 0; --i) {
+            const size_t idx = i - 1;
+            if (idx == 0 || !IsUtf8ContinuationByte(s[idx])) {
+                ++cp;
+                if (cp == maxCodepoints) {
+                    return s.substr(idx);
+                }
+            }
+        }
+        return s;
+    }
+} // namespace
+
 std::string MaskAccount(std::string_view account) {
     if (account.empty()) return "***";
-    const size_t len = account.size();
-    if (len <= 2) {
-        return std::string{account.substr(0, 1)} + "*";
+    const size_t cpCount = CountUtf8Codepoints(account);
+    if (cpCount <= 2) {
+        return std::string{Utf8Prefix(account, 1)} + "*";
     }
-    if (len == 3) {
-        return std::string{account.substr(0, 1)} + "*" + std::string{account.substr(2, 1)};
+    if (cpCount == 3) {
+        return std::string{Utf8Prefix(account, 1)} + "*" + std::string{Utf8Suffix(account, 1)};
     }
-    return std::string{account.substr(0, 2)} + "***" + std::string{account.substr(len - 2)};
+    return std::string{Utf8Prefix(account, 2)} + "***" + std::string{Utf8Suffix(account, 2)};
 }
 
 std::string MaskSteamId(uint64_t steamId) {
@@ -169,13 +216,14 @@ std::string MaskEmail(std::string_view email) {
     }
     std::string_view local = email.substr(0, atPos);
     std::string_view domain = email.substr(atPos); // includes '@'
-    if (local.size() <= 1) {
+    const size_t cpCount = CountUtf8Codepoints(local);
+    if (cpCount <= 1) {
         return "*" + std::string{domain};
     }
-    if (local.size() <= 3) {
-        return std::string{local.substr(0, 1)} + "*@" + std::string{email.substr(atPos + 1)};
+    if (cpCount <= 3) {
+        return std::string{Utf8Prefix(local, 1)} + "*@" + std::string{email.substr(atPos + 1)};
     }
-    return std::string{local.substr(0, 2)} + "***" + std::string{local.substr(local.size() - 1)} + std::string{domain};
+    return std::string{Utf8Prefix(local, 2)} + "***" + std::string{Utf8Suffix(local, 1)} + std::string{domain};
 }
 
 std::string MaskPicsToken(uint64_t picsToken) {
@@ -190,27 +238,30 @@ std::string MaskPicsToken(uint64_t picsToken) {
 std::string MaskPath(std::string_view path) {
     if (path.empty()) return {};
     std::string s{path};
-    std::string lowerS = s;
-    for (char& c : lowerS) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
     size_t pos = 0;
-    while ((pos = lowerS.find("users", pos)) != std::string::npos) {
+    while ((pos = FindIgnoreCase(s, "users", pos)) != std::string_view::npos) {
+        const bool validStart = (pos == 0 || s[pos - 1] == '\\' || s[pos - 1] == '/' ||
+                                 s[pos - 1] == '"' || s[pos - 1] == '\'' ||
+                                 std::isspace(static_cast<unsigned char>(s[pos - 1])));
         size_t slashPos = pos + 5;
-        if (slashPos < s.size() && (s[slashPos] == '\\' || s[slashPos] == '/')) {
+        if (validStart && slashPos < s.size() && (s[slashPos] == '\\' || s[slashPos] == '/')) {
             size_t userStart = slashPos + 1;
-            size_t nextSlash = s.find_first_of("\\/", userStart);
-            if (nextSlash != std::string::npos && nextSlash > userStart) {
-                std::string_view userPart(s.data() + userStart, nextSlash - userStart);
-                std::string maskedUser = MaskAccount(userPart);
-                s.replace(userStart, nextSlash - userStart, maskedUser);
-                lowerS.replace(userStart, nextSlash - userStart, maskedUser);
-                pos = userStart + maskedUser.size();
-                continue;
-            } else if (nextSlash == std::string::npos && userStart < s.size()) {
-                std::string_view userPart(s.data() + userStart, s.size() - userStart);
-                std::string maskedUser = MaskAccount(userPart);
-                s.replace(userStart, s.size() - userStart, maskedUser);
-                break;
+            while (userStart < s.size() && (s[userStart] == '\\' || s[userStart] == '/')) {
+                ++userStart;
+            }
+            if (userStart < s.size()) {
+                size_t userEnd = s.find_first_of("\\/\"' \t\r\n", userStart);
+                if (userEnd == std::string::npos) {
+                    userEnd = s.size();
+                }
+                if (userEnd > userStart) {
+                    std::string_view userPart(s.data() + userStart, userEnd - userStart);
+                    std::string maskedUser = MaskAccount(userPart);
+                    s.replace(userStart, userEnd - userStart, maskedUser);
+                    pos = userStart + maskedUser.size();
+                    continue;
+                }
             }
         }
         pos += 5;
@@ -251,11 +302,11 @@ std::string MaskUrl(std::string_view url) {
 void InitLogging(const std::string& logFileName) {
     std::lock_guard<std::mutex> lock(g_logMutex);
     if (!g_loggingInitialized) {
-        g_logFile.open(logFileName, std::ios::app);
+        g_logFile.open(Utf8Path(logFileName), std::ios::app);
         g_loggingInitialized = true;
         if (g_logFile.is_open()) {
             g_logFile << "\n======================================================================\n"
-                      << "  extract_tickets Debug Session Started at " << GetTimestampString() << "\n"
+                      << "  " << TR_FMT(MsgKey::LogSessionStartedHeader, GetTimestampString()) << "\n"
                       << "======================================================================\n";
             g_logFile.flush();
         }
@@ -275,7 +326,7 @@ void LogMessage(LogLevel level, std::string_view tag, std::string_view message) 
     std::lock_guard<std::mutex> lock(g_logMutex);
 
     if (!g_loggingInitialized) {
-        g_logFile.open("extract_tickets_debug.log", std::ios::app);
+        g_logFile.open(Utf8Path("extract_tickets_debug.log"), std::ios::app);
         g_loggingInitialized = true;
     }
 
@@ -290,15 +341,6 @@ void LogMessage(LogLevel level, std::string_view tag, std::string_view message) 
     if (g_logFile.is_open()) {
         g_logFile << line << "\n";
         g_logFile.flush();
-    }
-
-    // Only output to console if TUI is NOT active
-    if (!TuiEngine::IsActive()) {
-        if (level == LogLevel::Warn) {
-            std::cerr << "[WARN] " << safeMsg << "\n";
-        } else if (level == LogLevel::Error) {
-            std::cerr << "[ERROR] " << safeMsg << "\n";
-        }
     }
 }
 

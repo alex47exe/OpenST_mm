@@ -6,10 +6,10 @@
 
 namespace OSTPlatform::Dialog {
 
-void ShowWarning(std::string title, std::string message) {
+void ShowWarning(std::string_view title, std::string_view message) {
     const std::wstring wideTitle = Encoding::Utf8ToWide(title);
     const std::wstring wideMessage = Encoding::Utf8ToWide(message);
-    MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
+    ::MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
 }
 
 } // namespace OSTPlatform::Dialog

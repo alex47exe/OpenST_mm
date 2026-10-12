@@ -19,7 +19,7 @@ namespace {
 class FixedPatternScanner {
 public:
     explicit FixedPatternScanner(std::span<const uint8_t> pattern)
-        : pattern_(pattern.begin(), pattern.end()) {
+        : pattern_(pattern) {
         const size_t patternSize = pattern_.size();
         skip_.fill(patternSize == 0 ? 1 : patternSize);
         if (patternSize <= 1) return;
@@ -29,7 +29,7 @@ public:
         }
     }
 
-    std::optional<size_t> Find(std::span<const uint8_t> bytes) const {
+    [[nodiscard]] std::optional<size_t> Find(std::span<const uint8_t> bytes) const {
         const size_t patternSize = pattern_.size();
         if (patternSize == 0 || bytes.size() < patternSize) return std::nullopt;
 
@@ -50,10 +50,10 @@ public:
         return std::nullopt;
     }
 
-    size_t PatternSize() const { return pattern_.size(); }
+    [[nodiscard]] size_t PatternSize() const noexcept { return pattern_.size(); }
 
 private:
-    std::vector<uint8_t> pattern_;
+    std::span<const uint8_t> pattern_;
     std::array<size_t, 256> skip_{};
 };
 

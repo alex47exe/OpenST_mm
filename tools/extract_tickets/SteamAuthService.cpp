@@ -7,32 +7,64 @@
 #include "Utils.h"
 
 #include <chrono>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <thread>
 #include <unordered_set>
 #if defined(_WIN32)
-#include <conio.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace OST::ExtractTickets {
 
 namespace {
-    std::string UrlEncode(std::string_view str) {
-        std::ostringstream escaped;
-        escaped.fill('0');
-        escaped << std::hex;
+    struct ScopedStringWiper {
+        std::string& str;
+        explicit ScopedStringWiper(std::string& s) noexcept : str(s) {}
+        ~ScopedStringWiper() noexcept { SecureWipeString(str); }
+        ScopedStringWiper(const ScopedStringWiper&) = delete;
+        ScopedStringWiper& operator=(const ScopedStringWiper&) = delete;
+    };
 
+    constexpr bool IsUrlUnreserved(unsigned char uc) noexcept {
+        return (uc >= 'A' && uc <= 'Z') ||
+               (uc >= 'a' && uc <= 'z') ||
+               (uc >= '0' && uc <= '9') ||
+               uc == '-' || uc == '_' || uc == '.' || uc == '~';
+    }
+
+    constexpr size_t ComputeUrlEncodedSize(std::string_view str) noexcept {
+        size_t len = 0;
         for (char c : str) {
-            if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
-                escaped << c;
+            len += IsUrlUnreserved(static_cast<unsigned char>(c)) ? 1 : 3;
+        }
+        return len;
+    }
+
+    void AppendUrlEncoded(std::string& dest, std::string_view str) {
+        static constexpr char kHex[] = "0123456789ABCDEF";
+        for (char c : str) {
+            const auto uc = static_cast<unsigned char>(c);
+            if (IsUrlUnreserved(uc)) {
+                dest.push_back(c);
             } else {
-                escaped << '%' << std::setw(2) << std::uppercase
-                        << static_cast<int>(static_cast<unsigned char>(c));
+                dest.push_back('%');
+                dest.push_back(kHex[(uc >> 4) & 0x0F]);
+                dest.push_back(kHex[uc & 0x0F]);
             }
         }
-        return escaped.str();
+    }
+
+    std::string UrlEncode(std::string_view str) {
+        std::string escaped;
+        escaped.reserve(ComputeUrlEncodedSize(str));
+        AppendUrlEncoded(escaped, str);
+        return escaped;
     }
 
     SteamLoginResult RunDualTrack2FaLoop(
@@ -75,33 +107,39 @@ namespace {
         TuiEngine::DrawBox(top, left, modalW, modalH, title);
         TuiEngine::PrintBounded(top + 2, left + 4, prompt, innerW, "\x1b[1;37m");
 
-        std::string footerText = "[Enter] 提交验证码   [ESC] 取消登录";
-        TuiEngine::DrawFooter(footerText);
+        TuiEngine::DrawFooter(TR(MsgKey::Guard2FaFooter));
 
         std::string code;
+        ScopedStringWiper codeWiper{code};
         std::string statusMsg;
         std::string statusStyle = "\x1b[90m";
         bool inputAllowed = true;
 
-        int elapsedMs = 0;
-        int pollTimerMs = 0;
         constexpr int kMaxDurationMs = 120000; // 2 minutes
         constexpr int kPollIntervalMs = 1500;  // 1.5s
+        const auto startTime = std::chrono::steady_clock::now();
+        auto lastPollTime = startTime;
+
+        auto getElapsedMs = [&]() -> int {
+            return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startTime).count());
+        };
 
         auto drawInputAndStatus = [&]() {
             if (inputAllowed) {
                 TuiEngine::MoveCursor(top + 4, left + 4);
                 std::string displayCode = std::format("[ {:<8} ]", code + "_");
                 std::cout << "\x1b[1;30;47m" << displayCode << "\x1b[0m";
+                SecureWipeString(displayCode);
             }
             TuiEngine::MoveCursor(top + 6, left + 4);
             std::string currentStatus = statusMsg;
             if (currentStatus.empty()) {
                 if (hasDeviceConfirmation) {
-                    currentStatus = std::format("正在等待手机确认... ({}/{}s)", elapsedMs / 1000, kMaxDurationMs / 1000);
+                    currentStatus = TR_FMT(MsgKey::Guard2FaWaitingMobile, getElapsedMs() / 1000, kMaxDurationMs / 1000);
                     statusStyle = "\x1b[90m";
                 } else {
-                    currentStatus = "请输入 5 位验证码后按回车提交";
+                    currentStatus = std::string(TR(MsgKey::Guard2FaEnterCodeHint));
                     statusStyle = "\x1b[90m";
                 }
             }
@@ -111,17 +149,15 @@ namespace {
 
         drawInputAndStatus();
 
-        while (elapsedMs < kMaxDurationMs) {
+        while (getElapsedMs() < kMaxDurationMs) {
             auto keyOpt = TuiEngine::PollKey(50);
-            elapsedMs += 50;
-            pollTimerMs += 50;
 
             if (keyOpt) {
                 KeyEvent ev = *keyOpt;
                 if (ev.code == KeyCode::Escape) {
                     result.cancelled = true;
                     result.errorMessage = std::string(TR(MsgKey::ErrUserCancelledInput));
-                    LOG_INFO("SteamAuth", "用户在 2FA 界面按下 ESC 取消登录");
+                    LOG_INFO("SteamAuth", MsgKey::LogAuthEscCancel2Fa);
                     return result;
                 }
 
@@ -143,13 +179,14 @@ namespace {
                                 }
                             }
                         }
+                        SecureWipeString(toAdd);
                         if (changed) {
                             statusMsg.clear();
                             drawInputAndStatus();
                         }
                     } else if (ev.code == KeyCode::Enter) {
                         if (!code.empty()) {
-                            statusMsg = "正在验证并提交...";
+                            statusMsg = std::string(TR(MsgKey::Guard2FaSubmitting));
                             statusStyle = "\x1b[1;33m";
                             drawInputAndStatus();
 
@@ -158,30 +195,34 @@ namespace {
                                 auto pollRes = authService.PollAuthSessionOnce(session, 2500);
                                 if (pollRes) {
                                     result.success = true;
-                                    result.refreshToken = pollRes->first;
-                                    result.accessToken = pollRes->second;
-                                    LOG_INFO("SteamAuth", "2FA 动态码验证通过并成功取得登录 Token！");
+                                    result.refreshToken = std::move(pollRes->first);
+                                    result.accessToken = std::move(pollRes->second);
+                                    SecureWipeString(pollRes->first);
+                                    SecureWipeString(pollRes->second);
+                                    LOG_INFO("SteamAuth", MsgKey::LogAuth2FaCodeVerified);
                                     return result;
                                 }
                             }
-                            code.clear();
+                            SecureWipeString(code);
                             statusMsg = std::string(TR(MsgKey::GuardCodeIncorrect));
                             statusStyle = "\x1b[1;31m";
                             drawInputAndStatus();
                         } else if (hasDeviceConfirmation) {
-                            statusMsg = "正在检查手机确认状态...";
+                            statusMsg = std::string(TR(MsgKey::Guard2FaCheckingMobile));
                             statusStyle = "\x1b[1;36m";
                             drawInputAndStatus();
 
                             auto pollRes = authService.PollAuthSessionOnce(session, 2500);
                             if (pollRes) {
-                                LOG_INFO("SteamAuth", "手机 Steam App 确认批准 (按回车即时轮询通过)！");
+                                LOG_INFO("SteamAuth", MsgKey::LogAuthMobileApprovedEnter);
                                 result.success = true;
-                                result.refreshToken = pollRes->first;
-                                result.accessToken = pollRes->second;
+                                result.refreshToken = std::move(pollRes->first);
+                                result.accessToken = std::move(pollRes->second);
+                                SecureWipeString(pollRes->first);
+                                SecureWipeString(pollRes->second);
                                 return result;
                             }
-                            statusMsg = "手机端尚未批准，请在手机点击【确认登录】后再按回车，或直接输入 5 位动态码";
+                            statusMsg = std::string(TR(MsgKey::Guard2FaNotApprovedYet));
                             statusStyle = "\x1b[1;33m";
                             drawInputAndStatus();
                         }
@@ -189,16 +230,20 @@ namespace {
                 }
             }
 
-            if (hasDeviceConfirmation && pollTimerMs >= kPollIntervalMs) {
-                pollTimerMs = 0;
+            const auto now = std::chrono::steady_clock::now();
+            const auto sinceLastPollMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPollTime).count();
+            if (hasDeviceConfirmation && sinceLastPollMs >= kPollIntervalMs) {
+                lastPollTime = now;
                 drawInputAndStatus();
 
                 auto pollRes = authService.PollAuthSessionOnce(session, 2500);
                 if (pollRes) {
-                    LOG_INFO("SteamAuth", "手机 Steam App 确认批准 (Zero-Keypress 零按键通过)！");
+                    LOG_INFO("SteamAuth", MsgKey::LogAuthMobileApprovedZeroKey);
                     result.success = true;
-                    result.refreshToken = pollRes->first;
-                    result.accessToken = pollRes->second;
+                    result.refreshToken = std::move(pollRes->first);
+                    result.accessToken = std::move(pollRes->second);
+                    SecureWipeString(pollRes->first);
+                    SecureWipeString(pollRes->second);
                     return result;
                 }
             }
@@ -214,11 +259,11 @@ SteamAuthService::SteamAuthService() = default;
 
 std::optional<SteamRsaKey> SteamAuthService::GetPasswordRsaKey(std::string_view accountName) {
     std::string url = "https://api.steampowered.com/IAuthenticationService/GetPasswordRSAPublicKey/v1?account_name=" + UrlEncode(accountName);
-    LOG_DEBUG("SteamAuth", "正在请求 RSA 公钥: {}", MaskAccount(accountName));
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthRequestingRsa, MaskAccount(accountName));
 
     HttpResponse resp = m_http.Get(url);
     if (!resp.IsSuccess()) {
-        LOG_ERROR("SteamAuth", "获取 RSA 公钥失败 (HTTP {}): {}", resp.statusCode, resp.errorMessage);
+        LOG_ERROR("SteamAuth", MsgKey::LogAuthGetRsaFailed, resp.statusCode, resp.errorMessage);
         return std::nullopt;
     }
 
@@ -227,7 +272,7 @@ std::optional<SteamRsaKey> SteamAuthService::GetPasswordRsaKey(std::string_view 
     auto timeOpt = JsonHelper::GetUInt64(resp.body, "timestamp");
 
     if (!modOpt || !expOpt || !timeOpt) {
-        LOG_ERROR("SteamAuth", "RSA 公钥响应解析失败");
+        LOG_ERROR("SteamAuth", MsgKey::LogAuthParseRsaFailed);
         return std::nullopt;
     }
 
@@ -235,7 +280,7 @@ std::optional<SteamRsaKey> SteamAuthService::GetPasswordRsaKey(std::string_view 
     rsaKey.modHex = *modOpt;
     rsaKey.expHex = *expOpt;
     rsaKey.timestamp = *timeOpt;
-    LOG_DEBUG("SteamAuth", "成功获取 RSA 公钥 (timestamp={})", rsaKey.timestamp);
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthGetRsaSuccess, rsaKey.timestamp);
     return rsaKey;
 }
 
@@ -245,22 +290,47 @@ std::optional<SteamAuthSession> SteamAuthService::BeginAuthSession(
     const SteamRsaKey& rsaKey) {
 
     std::string encryptedPassword = EncryptPasswordWithRSA(password, rsaKey.modHex, rsaKey.expHex);
+    ScopedStringWiper encPwdWiper{encryptedPassword};
     if (encryptedPassword.empty()) {
-        LOG_ERROR("SteamAuth", "密码 RSA 加密失败");
+        LOG_ERROR("SteamAuth", MsgKey::LogAuthRsaEncryptFailed);
         return std::nullopt;
     }
 
-    std::string postData = "account_name=" + UrlEncode(accountName) +
-                           "&encrypted_password=" + UrlEncode(encryptedPassword) +
-                           "&encryption_timestamp=" + std::to_string(rsaKey.timestamp) +
-                           "&set_remember_login=true&platform_type=1&persistence=1&website_id=Client";
+    std::string deviceName = "OpenSteamTool";
+#if defined(_WIN32)
+    wchar_t compName[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD compLen = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(compName, &compLen) && compLen > 0) {
+        std::string utf8Comp = WideToUtf8(std::wstring_view(compName, compLen));
+        if (!utf8Comp.empty()) {
+            deviceName = std::move(utf8Comp);
+        }
+    }
+#endif
+
+    const std::string tsStr = std::to_string(rsaKey.timestamp);
+    std::string postData;
+    postData.reserve(140 + ComputeUrlEncodedSize(accountName) +
+                     ComputeUrlEncodedSize(encryptedPassword) +
+                     tsStr.size() +
+                     ComputeUrlEncodedSize(deviceName));
+    postData.append("account_name=");
+    AppendUrlEncoded(postData, accountName);
+    postData.append("&encrypted_password=");
+    AppendUrlEncoded(postData, encryptedPassword);
+    postData.append("&encryption_timestamp=");
+    postData.append(tsStr);
+    postData.append("&remember_login=true&platform_type=1&persistence=1&website_id=Client&device_friendly_name=");
+    AppendUrlEncoded(postData, deviceName);
+    ScopedStringWiper postDataWiper{postData};
 
     std::string url = "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaCredentials/v1";
-    LOG_DEBUG("SteamAuth", "发起身份认证会话: {}", MaskAccount(accountName));
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthBeginSession, MaskAccount(accountName));
 
     HttpResponse resp = m_http.Post(url, postData, "application/x-www-form-urlencoded");
-    if (!resp.IsSuccess()) {
-        LOG_ERROR("SteamAuth", "发起到 Steam 认证会话失败 (HTTP {}): {}", resp.statusCode, resp.errorMessage);
+    ScopedStringWiper respWiper{resp.body};
+    if (!resp.IsSuccess() || (resp.steamEResult != 0 && resp.steamEResult != 1)) {
+        LOG_ERROR("SteamAuth", MsgKey::LogAuthBeginSessionHttpFailed, resp.statusCode, resp.errorMessage);
         return std::nullopt;
     }
 
@@ -269,7 +339,7 @@ std::optional<SteamAuthSession> SteamAuthService::BeginAuthSession(
     auto steamIdOpt = JsonHelper::GetUInt64(resp.body, "steamid");
 
     if (!clientIdOpt || !requestIdOpt) {
-        LOG_ERROR("SteamAuth", "认证响应缺少 client_id 或 request_id (HTTP {})", resp.statusCode);
+        LOG_ERROR("SteamAuth", MsgKey::LogAuthMissingClientOrReqId, resp.statusCode);
         return std::nullopt;
     }
 
@@ -279,7 +349,7 @@ std::optional<SteamAuthSession> SteamAuthService::BeginAuthSession(
     session.steamId = steamIdOpt.value_or(0);
     session.allowedConfirmations = JsonHelper::GetConfirmations(resp.body);
 
-    LOG_DEBUG("SteamAuth", "会话已创建 (steamId={}, confirmations_count={})",
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthSessionCreated,
               MaskSteamId(session.steamId), session.allowedConfirmations.size());
     return session;
 }
@@ -289,21 +359,34 @@ bool SteamAuthService::SubmitSteamGuardCode(
     std::string_view code,
     int codeType) {
 
-    std::string postData = "client_id=" + UrlEncode(session.clientId) +
-                           "&steamid=" + std::to_string(session.steamId) +
-                           "&code=" + UrlEncode(code) +
-                           "&code_type=" + std::to_string(codeType);
+    const std::string steamIdStr = std::to_string(session.steamId);
+    const std::string codeTypeStr = std::to_string(codeType);
+    std::string postData;
+    postData.reserve(48 + ComputeUrlEncodedSize(session.clientId) +
+                     steamIdStr.size() +
+                     ComputeUrlEncodedSize(code) +
+                     codeTypeStr.size());
+    postData.append("client_id=");
+    AppendUrlEncoded(postData, session.clientId);
+    postData.append("&steamid=");
+    postData.append(steamIdStr);
+    postData.append("&code=");
+    AppendUrlEncoded(postData, code);
+    postData.append("&code_type=");
+    postData.append(codeTypeStr);
+    ScopedStringWiper postDataWiper{postData};
 
     std::string url = "https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithSteamGuardCode/v1";
-    LOG_DEBUG("SteamAuth", "正在提交 2FA 动态码 (codeType={})", codeType);
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthSubmitting2Fa, codeType);
 
     HttpResponse resp = m_http.Post(url, postData, "application/x-www-form-urlencoded", {}, 5000);
-    if (!resp.IsSuccess()) {
-        LOG_WARN("SteamAuth", "提交 2FA 动态码响应非成功 (HTTP {}): {}", resp.statusCode, resp.errorMessage);
+    ScopedStringWiper respWiper{resp.body};
+    if (!resp.IsSuccess() || (resp.steamEResult != 0 && resp.steamEResult != 1)) {
+        LOG_WARN("SteamAuth", MsgKey::LogAuthSubmit2FaHttpFailed, resp.statusCode, resp.errorMessage);
         return false;
     }
 
-    LOG_DEBUG("SteamAuth", "已成功提交动态码至 Valve 服务器");
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthSubmit2FaSuccess);
     return true;
 }
 
@@ -311,11 +394,18 @@ std::optional<std::pair<std::string, std::string>> SteamAuthService::PollAuthSes
     const SteamAuthSession& session,
     int timeoutMs) {
 
-    std::string postData = "client_id=" + UrlEncode(session.clientId) +
-                           "&request_id=" + UrlEncode(session.requestId);
+    std::string postData;
+    postData.reserve(32 + ComputeUrlEncodedSize(session.clientId) + ComputeUrlEncodedSize(session.requestId));
+    postData.append("client_id=");
+    AppendUrlEncoded(postData, session.clientId);
+    postData.append("&request_id=");
+    AppendUrlEncoded(postData, session.requestId);
+    ScopedStringWiper postDataWiper{postData};
+
     std::string url = "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1";
 
     HttpResponse resp = m_http.Post(url, postData, "application/x-www-form-urlencoded", {}, timeoutMs);
+    ScopedStringWiper respWiper{resp.body};
     if (!resp.IsSuccess()) {
         return std::nullopt;
     }
@@ -323,9 +413,14 @@ std::optional<std::pair<std::string, std::string>> SteamAuthService::PollAuthSes
     auto refreshOpt = JsonHelper::GetString(resp.body, "refresh_token");
     auto accessOpt = JsonHelper::GetString(resp.body, "access_token");
 
-    if (refreshOpt && !refreshOpt->empty() && accessOpt && !accessOpt->empty()) {
-        return std::make_pair(*refreshOpt, *accessOpt);
+    if (refreshOpt && !refreshOpt->empty()) {
+        std::pair<std::string, std::string> out{std::move(*refreshOpt), accessOpt ? std::move(*accessOpt) : std::string{}};
+        SecureWipeString(*refreshOpt);
+        if (accessOpt) SecureWipeString(*accessOpt);
+        return out;
     }
+    if (refreshOpt) SecureWipeString(*refreshOpt);
+    if (accessOpt) SecureWipeString(*accessOpt);
     return std::nullopt;
 }
 
@@ -363,25 +458,30 @@ SteamLoginResult SteamAuthService::PollAuthSession(
             std::cout.flush();
         }
 
-        constexpr int sliceMs = 50;
-        const int slices = delayMs / sliceMs;
-        for (int s = 0; s < slices; ++s) {
-            auto keyOpt = TuiEngine::PollKey(sliceMs);
-            if (keyOpt && keyOpt->code == KeyCode::Escape) {
-                TuiEngine::FlushInputBuffer();
-                result.cancelled = true;
-                result.errorMessage = std::string(TR(MsgKey::ErrUserCancelledPoll));
-                LOG_INFO("SteamAuth", "用户按下 ESC 取消认证轮询");
-                return result;
+        // Poll immediately on attempt == 0; only sleep before subsequent attempts
+        if (attempt > 0) {
+            const auto delayStart = std::chrono::steady_clock::now();
+            while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - delayStart).count() < delayMs) {
+                auto keyOpt = TuiEngine::PollKey(50);
+                if (keyOpt && keyOpt->code == KeyCode::Escape) {
+                    TuiEngine::FlushInputBuffer();
+                    result.cancelled = true;
+                    result.errorMessage = std::string(TR(MsgKey::ErrUserCancelledPoll));
+                    LOG_INFO("SteamAuth", MsgKey::LogAuthEscCancelPoll);
+                    return result;
+                }
             }
         }
 
         auto tokens = PollAuthSessionOnce(session, 2500);
         if (tokens) {
             result.success = true;
-            result.refreshToken = tokens->first;
-            result.accessToken = tokens->second;
-            LOG_DEBUG("SteamAuth", "授权状态轮询成功！获取到 Token (refresh={}, access={})",
+            result.refreshToken = std::move(tokens->first);
+            result.accessToken = std::move(tokens->second);
+            SecureWipeString(tokens->first);
+            SecureWipeString(tokens->second);
+            LOG_DEBUG("SteamAuth", MsgKey::LogAuthPollSuccess,
                       MaskToken(result.refreshToken), MaskToken(result.accessToken));
             return result;
         }
@@ -394,29 +494,55 @@ SteamLoginResult SteamAuthService::PollAuthSession(
 
 std::optional<std::string> SteamAuthService::RefreshAccessToken(
     uint64_t steamId,
-    std::string_view refreshToken) {
+    std::string_view refreshToken,
+    std::string* outNewRefreshToken) {
 
-    std::string postData = "refresh_token=" + UrlEncode(refreshToken) +
-                           "&steamid=" + std::to_string(steamId);
+    if (outNewRefreshToken) {
+        SecureWipeString(*outNewRefreshToken);
+    }
+
+    if (steamId == 0) {
+        steamId = GetJwtSteamId(refreshToken);
+    }
+
+    const std::string steamIdStr = std::to_string(steamId);
+    std::string postData;
+    postData.reserve(48 + ComputeUrlEncodedSize(refreshToken) + steamIdStr.size());
+    postData.append("refresh_token=");
+    AppendUrlEncoded(postData, refreshToken);
+    postData.append("&steamid=");
+    postData.append(steamIdStr);
+    postData.append("&renewal_type=1");
+    ScopedStringWiper postDataWiper{postData};
 
     std::string url = "https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1";
-    LOG_DEBUG("SteamAuth", "使用本地缓存 refresh_token 刷新 access_token (SteamID={})", MaskSteamId(steamId));
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthRefreshingAccess, MaskSteamId(steamId));
 
     HttpResponse resp = m_http.Post(url, postData, "application/x-www-form-urlencoded");
+    ScopedStringWiper respWiper{resp.body};
     if (!resp.IsSuccess()) {
-        LOG_WARN("SteamAuth", "刷新 AccessToken 失败 (HTTP {}): {}", resp.statusCode, resp.errorMessage);
+        LOG_WARN("SteamAuth", MsgKey::LogAuthRefreshHttpFailed, resp.statusCode, resp.errorMessage);
         return std::nullopt;
     }
 
-    LOG_DEBUG("SteamAuth", "GenerateAccessTokenForApp 响应成功 (HTTP {})", resp.statusCode);
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthGenAccessHttpOk, resp.statusCode);
 
     auto accessOpt = JsonHelper::GetString(resp.body, "access_token");
+    auto refreshOpt = JsonHelper::GetString(resp.body, "refresh_token");
+
+    if (refreshOpt && !refreshOpt->empty()) {
+        if (outNewRefreshToken) {
+            *outNewRefreshToken = std::move(*refreshOpt);
+        }
+        SecureWipeString(*refreshOpt);
+    }
+
     if (accessOpt && !accessOpt->empty()) {
-        LOG_DEBUG("SteamAuth", "AccessToken 刷新成功: {}", MaskToken(*accessOpt));
+        LOG_DEBUG("SteamAuth", MsgKey::LogAuthRefreshSuccess, MaskToken(*accessOpt));
         return accessOpt;
     }
 
-    LOG_WARN("SteamAuth", "响应体中未包含 access_token (HTTP {})", resp.statusCode);
+    LOG_WARN("SteamAuth", MsgKey::LogAuthNoAccessInResp, resp.statusCode);
     return std::nullopt;
 }
 
@@ -425,28 +551,41 @@ std::vector<OwnedGameInfo> SteamAuthService::FetchOwnedGames(
     std::string_view accessToken,
     SteamCmClient* cmClient) {
 
-    std::string url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?access_token=" +
-                      UrlEncode(accessToken) +
-                      "&steamid=" + std::to_string(steamId) +
-                      "&include_appinfo=1&include_played_free_games=0&language=" +
-                      std::string(I18n::GetSteamLanguageCode());
+    const std::string steamIdStr = std::to_string(steamId);
+    const std::string_view langCode = I18n::GetSteamLanguageCode();
 
-    LOG_DEBUG("SteamAuth", "正在通过官方 WebAPI 拉取拥有的游戏列表...");
+    std::string url;
+    url.reserve(160 + ComputeUrlEncodedSize(accessToken) + steamIdStr.size() + langCode.size());
+    url.append("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?access_token=");
+    AppendUrlEncoded(url, accessToken);
+    url.append("&steamid=");
+    url.append(steamIdStr);
+    url.append("&include_appinfo=1&include_played_free_games=0&language=");
+    url.append(langCode);
+    ScopedStringWiper urlWiper{url};
+
+    LOG_DEBUG("SteamAuth", MsgKey::LogAuthFetchingOwnedGames);
     HttpResponse resp = m_http.Get(url);
+    ScopedStringWiper respWiper{resp.body};
 
     std::vector<OwnedGameInfo> games;
     if (resp.IsSuccess()) {
         games = JsonHelper::ParseOwnedGames(resp.body);
-        LOG_DEBUG("SteamAuth", "成功拉取到 {} 款个人游戏", games.size());
+        LOG_DEBUG("SteamAuth", MsgKey::LogAuthFetchedOwnedGames, games.size());
     } else {
-        LOG_WARN("SteamAuth", "拉取个人游戏列表失败 (HTTP {}): {}", resp.statusCode, resp.errorMessage);
+        LOG_WARN("SteamAuth", MsgKey::LogAuthFetchOwnedGamesFailed, resp.statusCode, resp.errorMessage);
     }
 
     // 查询当前账号的 Steam 家庭组 (IFamilyGroupsService)
-    std::string familyUrl = "https://api.steampowered.com/IFamilyGroupsService/GetFamilyGroupForUser/v1/?access_token=" +
-                            UrlEncode(accessToken) +
-                            "&include_family_group_response=true";
+    std::string familyUrl;
+    familyUrl.reserve(140 + ComputeUrlEncodedSize(accessToken));
+    familyUrl.append("https://api.steampowered.com/IFamilyGroupsService/GetFamilyGroupForUser/v1/?access_token=");
+    AppendUrlEncoded(familyUrl, accessToken);
+    familyUrl.append("&include_family_group_response=true");
+    ScopedStringWiper familyUrlWiper{familyUrl};
+
     HttpResponse famResp = m_http.Get(familyUrl);
+    ScopedStringWiper famRespWiper{famResp.body};
     if (famResp.IsSuccess()) {
         auto familyGroupIdOpt = JsonHelper::GetString(famResp.body, "family_groupid");
         if (!familyGroupIdOpt || familyGroupIdOpt->empty() || *familyGroupIdOpt == "0") {
@@ -457,16 +596,22 @@ std::vector<OwnedGameInfo> SteamAuthService::FetchOwnedGames(
         }
 
         if (familyGroupIdOpt && !familyGroupIdOpt->empty() && *familyGroupIdOpt != "0") {
-            LOG_INFO("SteamAuth", "检测到当前账号加入的 Steam 家庭群组 (GroupID={})", MaskGroupId(*familyGroupIdOpt));
-            std::string sharedUrl = "https://api.steampowered.com/IFamilyGroupsService/GetSharedLibraryApps/v1/?access_token=" +
-                                    UrlEncode(accessToken) +
-                                    "&family_groupid=" + *familyGroupIdOpt +
-                                    "&include_own=false&include_non_games=false&language=" +
-                                    std::string(I18n::GetSteamLanguageCode());
+            LOG_INFO("SteamAuth", MsgKey::LogAuthDetectedFamilyGroup, MaskGroupId(*familyGroupIdOpt));
+            std::string sharedUrl;
+            sharedUrl.reserve(180 + ComputeUrlEncodedSize(accessToken) + familyGroupIdOpt->size() + langCode.size());
+            sharedUrl.append("https://api.steampowered.com/IFamilyGroupsService/GetSharedLibraryApps/v1/?access_token=");
+            AppendUrlEncoded(sharedUrl, accessToken);
+            sharedUrl.append("&family_groupid=");
+            AppendUrlEncoded(sharedUrl, *familyGroupIdOpt);
+            sharedUrl.append("&include_own=false&include_non_games=false&language=");
+            sharedUrl.append(langCode);
+            ScopedStringWiper sharedUrlWiper{sharedUrl};
+
             HttpResponse sharedResp = m_http.Get(sharedUrl);
+            ScopedStringWiper sharedRespWiper{sharedResp.body};
             if (sharedResp.IsSuccess()) {
                 auto sharedGames = JsonHelper::ParseSharedLibraryApps(sharedResp.body);
-                LOG_INFO("SteamAuth", "从 Steam 家庭共享库中发现 {} 款游戏", sharedGames.size());
+                LOG_INFO("SteamAuth", MsgKey::LogAuthFoundSharedGames, sharedGames.size());
 
                 std::unordered_set<uint32_t> existing;
                 for (const auto& g : games) {
@@ -500,29 +645,13 @@ std::vector<OwnedGameInfo> SteamAuthService::FetchOwnedGames(
                         }
                     }
 
-                    // 1. High-speed batch PICS resolution via CM Client (50 apps/batch, ~100ms, immune to Store HTTP 429)
+                    // High-speed batch PICS resolution via CM Client (50 apps/batch, ~100ms, immune to Store HTTP 429)
                     if (!stillMissing.empty() && cmClient && cmClient->EnsureConnected()) {
-                        LOG_INFO("SteamAuth", "正在通过 Steam CM PICS 批量解析 {} 款家庭共享游戏官方名称...", stillMissing.size());
+                        LOG_INFO("SteamAuth", MsgKey::LogAuthBatchResolvingSharedNames, stillMissing.size());
                         auto picsNames = cmClient->RequestPicsAppNames(stillMissing);
                         for (auto& [pAppId, pName] : picsNames) {
                             if (!pName.empty()) {
                                 resolvedNames[pAppId] = std::move(pName);
-                            }
-                        }
-                    } else if (!stillMissing.empty()) {
-                        // 2. Safe fallback to Store WebAPI only if CM Client unavailable, with rate limit cap
-                        size_t fallbackCount = 0;
-                        for (uint32_t mId : stillMissing) {
-                            if (resolvedNames.contains(mId) && !resolvedNames[mId].empty()) continue;
-                            if (++fallbackCount > 10) break; // Hard cap to prevent UI freeze and HTTP 429 flood
-                            std::string storeUrl = std::format("https://store.steampowered.com/api/appdetails?appids={}&filters=basic&l={}",
-                                                               mId, I18n::GetSteamLanguageCode());
-                            HttpResponse sResp = m_http.Get(storeUrl);
-                            if (sResp.IsSuccess()) {
-                                auto nameOpt = JsonHelper::GetString(sResp.body, "name");
-                                if (nameOpt && !nameOpt->empty()) {
-                                    resolvedNames[mId] = std::move(*nameOpt);
-                                }
                             }
                         }
                     }
@@ -542,7 +671,7 @@ std::vector<OwnedGameInfo> SteamAuthService::FetchOwnedGames(
                     }
                 }
             } else {
-                LOG_WARN("SteamAuth", "查询家庭共享游戏列表未成功 (HTTP {}): {}", sharedResp.statusCode, sharedResp.errorMessage);
+                LOG_WARN("SteamAuth", MsgKey::LogAuthFetchSharedGamesFailed, sharedResp.statusCode, sharedResp.errorMessage);
             }
         }
     }
@@ -577,7 +706,7 @@ SteamLoginResult SteamAuthService::LoginWithCredentials(
     std::string emailAddress;
 
     for (const auto& conf : session->allowedConfirmations) {
-        LOG_INFO("SteamAuth", "检测到需要二次验证: type={}, message={}", conf.type,
+        LOG_INFO("SteamAuth", MsgKey::LogAuth2FaRequired, conf.type,
                  conf.type == 2 ? MaskEmail(conf.associatedMessage) : conf.associatedMessage);
         if (conf.type == 3) {
             hasDeviceCode = true;
@@ -599,10 +728,15 @@ SteamLoginResult SteamAuthService::LoginWithCredentials(
                                          hasEmailCode, emailAddress);
         } else {
             if (hasDeviceCode || hasEmailCode) {
-                std::cout << "[2FA] " << (hasEmailCode ? TR(MsgKey::GuardEmailPrompt) : TR(MsgKey::GuardMobilePrompt)) << " ";
+                std::string promptMsg = hasEmailCode
+                    ? (emailAddress.empty() ? std::string(TR(MsgKey::GuardEmailTitle)) : TR_FMT(MsgKey::GuardEmailPrompt, MaskEmail(emailAddress)))
+                    : std::string(TR(MsgKey::GuardMobilePrompt));
+                std::cout << "[2FA] " << promptMsg << " ";
                 std::string code;
-                std::cin >> code;
-                SubmitSteamGuardCode(*session, code, hasDeviceCode ? 3 : 2);
+                ScopedStringWiper cliCodeWiper{code};
+                if (std::cin >> code && !code.empty()) {
+                    SubmitSteamGuardCode(*session, code, hasDeviceCode ? 3 : 2);
+                }
             }
             result = PollAuthSession(*session, accountName);
         }
@@ -614,6 +748,10 @@ SteamLoginResult SteamAuthService::LoginWithCredentials(
             LOG_WARN("SteamAuth", "{}", result.errorMessage);
         }
         return result;
+    }
+
+    if (result.steamId == 0) {
+        result.steamId = GetJwtSteamId(result.refreshToken);
     }
 
     CachedAccount cached;

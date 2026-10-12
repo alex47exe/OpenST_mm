@@ -12,12 +12,12 @@ namespace PipeManager {
 
     // Returns true if the pipe belongs to an external tool process (e.g. extract_tickets.exe).
     // Optionally associates appId with the tool pipe session if known.
-    bool IsToolPipe(const CPipeClient* pipe, AppId_t appId = k_uAppIdInvalid);
+    [[nodiscard]] bool IsToolPipe(const CPipeClient* pipe, AppId_t appId = k_uAppIdInvalid);
 
     // Returns true if an external tool process is currently active or extracting for the specified appId.
-    bool IsToolActiveForApp(AppId_t appId);
+    [[nodiscard]] bool IsToolActiveForApp(AppId_t appId);
 
     // Returns true if an external tool was connected or active for the specified appId within the given window.
-    bool WasToolActiveRecently(AppId_t appId, std::chrono::milliseconds window = std::chrono::seconds(3));
+    [[nodiscard]] bool WasToolActiveRecently(AppId_t appId, std::chrono::milliseconds window = std::chrono::seconds(3));
 
 } // namespace PipeManager

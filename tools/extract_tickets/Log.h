@@ -7,6 +7,13 @@
 #include <string_view>
 #include <utility>
 
+#if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
+    #define EXTRACT_TICKETS_HAS_LOGGING 1
+    #include "I18n.h"
+#else
+    #define EXTRACT_TICKETS_HAS_LOGGING 0
+#endif
+
 namespace OST::ExtractTickets {
 
 // ============================================================================
@@ -37,12 +44,6 @@ enum class LogLevel {
     Error
 };
 
-#if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
-    #define EXTRACT_TICKETS_HAS_LOGGING 1
-#else
-    #define EXTRACT_TICKETS_HAS_LOGGING 0
-#endif
-
 #if EXTRACT_TICKETS_HAS_LOGGING
 
 void LogMessage(LogLevel level, std::string_view tag, std::string_view message);
@@ -59,8 +60,31 @@ inline void LogTrace(std::string_view tag, std::format_string<Args...> fmt, Args
 }
 
 template <typename... Args>
+inline void LogTrace(std::string_view tag, MsgKey key, Args&&... args) {
+#if defined(_DEBUG) || !defined(NDEBUG)
+    if constexpr (sizeof...(Args) == 0) {
+        LogMessage(LogLevel::Trace, tag, TR(key));
+    } else {
+        LogMessage(LogLevel::Trace, tag, TR_FMT(key, std::forward<Args>(args)...));
+    }
+#else
+    (void)tag;
+    (void)key;
+#endif
+}
+
+template <typename... Args>
 inline void LogDebug(std::string_view tag, std::format_string<Args...> fmt, Args&&... args) {
     LogMessage(LogLevel::Debug, tag, std::format(fmt, std::forward<Args>(args)...));
+}
+
+template <typename... Args>
+inline void LogDebug(std::string_view tag, MsgKey key, Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        LogMessage(LogLevel::Debug, tag, TR(key));
+    } else {
+        LogMessage(LogLevel::Debug, tag, TR_FMT(key, std::forward<Args>(args)...));
+    }
 }
 
 template <typename... Args>
@@ -69,13 +93,40 @@ inline void LogInfo(std::string_view tag, std::format_string<Args...> fmt, Args&
 }
 
 template <typename... Args>
+inline void LogInfo(std::string_view tag, MsgKey key, Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        LogMessage(LogLevel::Info, tag, TR(key));
+    } else {
+        LogMessage(LogLevel::Info, tag, TR_FMT(key, std::forward<Args>(args)...));
+    }
+}
+
+template <typename... Args>
 inline void LogWarn(std::string_view tag, std::format_string<Args...> fmt, Args&&... args) {
     LogMessage(LogLevel::Warn, tag, std::format(fmt, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
+inline void LogWarn(std::string_view tag, MsgKey key, Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        LogMessage(LogLevel::Warn, tag, TR(key));
+    } else {
+        LogMessage(LogLevel::Warn, tag, TR_FMT(key, std::forward<Args>(args)...));
+    }
+}
+
+template <typename... Args>
 inline void LogError(std::string_view tag, std::format_string<Args...> fmt, Args&&... args) {
     LogMessage(LogLevel::Error, tag, std::format(fmt, std::forward<Args>(args)...));
+}
+
+template <typename... Args>
+inline void LogError(std::string_view tag, MsgKey key, Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        LogMessage(LogLevel::Error, tag, TR(key));
+    } else {
+        LogMessage(LogLevel::Error, tag, TR_FMT(key, std::forward<Args>(args)...));
+    }
 }
 
 #define LOG_TRACE(...) ::OST::ExtractTickets::LogTrace(__VA_ARGS__)

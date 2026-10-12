@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal DisableDelayedExpansion
 chcp 65001 >nul
 echo =======================================================
 echo   OpenSteamTool - Remove Auto Inject

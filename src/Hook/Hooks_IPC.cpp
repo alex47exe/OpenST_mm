@@ -1,16 +1,46 @@
 #include "dllmain.h"
 #include "Hooks_IPC.h"
+#include "IPCMessages.gen.h"
 #include "Hooks_IPC_ISteamUser.h"
 #include "Hooks_IPC_ISteamUtils.h"
 #include "HookMacros.h"
 #include "Hooks_Misc.h"
 #include "Pipe/PipeManager.h"
-#include "Utils/Support/FnvHash.h"
+#include "Pipe/Features/DenuvoAuth/DenuvoAuth.h"
 #include "Utils/SteamMetadata/IPCLoader.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <new>
+#include <utility>
+#include <vector>
 
 namespace {
+
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
 
     RESOLVE_FUNC(GetPipeClient, CPipeClient*, void* pEngine, HSteamPipe hSteamPipe);
 
@@ -20,35 +50,31 @@ namespace {
 
     //  Handler dispatch table
     struct ResolvedHandler {
-        uint64_t              key;        // (static_cast<uint64_t>(interfaceID) << 32) | funcHash
-        EIPCInterface         interfaceID;
-        uint32                funcHash;
-        std::string           name;       // "IClientUser::GetSteamID" — for logs
-        uint32                fencepost;
-        uint32                argc;
-        IPCHandlerFn          pre;
-        IPCHandlerFn          post;
+        uint64_t     key;           // (static_cast<uint64_t>(interfaceID) << 32) | funcHash
+        const char*  interfaceName;
+        const char*  methodName;
+        IPCHandlerFn pre;
+        IPCHandlerFn post;
 
-        ResolvedHandler(const IPCHandlerEntry& entry, const IPCLoader::Method& method)
+        ResolvedHandler(const IPCHandlerEntry& entry, const IPCLoader::Method& method) noexcept
             : key((static_cast<uint64_t>(method.interfaceID) << 32) | method.funcHash),
-              interfaceID(method.interfaceID),
-              funcHash(method.funcHash),
-              name(std::string(entry.interfaceName) + "::" + entry.methodName),
-              fencepost(method.fencepost),
-              argc(method.argc),
+              interfaceName(entry.interfaceName),
+              methodName(entry.methodName),
               pre(entry.pre),
               post(entry.post) {}
 
         std::string DebugString() const {
-            return std::format("{} -> hash=0x{:08X} fencepost=0x{:08X} argc={}",
-                name, funcHash, fencepost, argc);
+            return std::format("{}::{} -> key=0x{:016X}",
+                interfaceName ? interfaceName : "",
+                methodName ? methodName : "",
+                key);
         }
     };
-    std::vector<ResolvedHandler> g_Handlers;
+    NoDestructor<std::vector<ResolvedHandler>> g_Handlers;
 
     static const ResolvedHandler* FindHandler(EIPCInterface iface, uint32 funcHash) {
         const uint64_t targetKey = (static_cast<uint64_t>(iface) << 32) | funcHash;
-        for (const auto& e : g_Handlers) {
+        for (const auto& e : *g_Handlers) {
             if (e.key == targetKey) return &e;
         }
         return nullptr;
@@ -103,14 +129,16 @@ namespace {
             // NOTE: We do NOT blindly scan the entire payload to avoid corrupting file
             // data in FileWrite calls that might contain 480 (0x000001E0) as content.
             if (Hooks_Misc::IsOnlineFixActive() && call.interfaceID() == EIPCInterface::IClientRemoteStorage) {
-                const AppId_t realAppId = Hooks_Misc::ResolveAppId();
-                if (realAppId != 0 && call.body().size() >= sizeof(uint32_t)) {
-                    uint32_t firstArg = 0;
-                    memcpy(&firstArg, call.body().data(), sizeof(uint32_t));
-                    if (firstArg == kOnlineFixAppId) {
-                        memcpy(const_cast<uint8_t*>(call.body().data()), &realAppId, sizeof(uint32_t));
-                        LOG_IPC_DEBUG("IClientRemoteStorage IPC: mapped AppID {} -> {} in request header arg",
-                                      kOnlineFixAppId, realAppId);
+                if (Hooks_Misc::GetAppIDForCurrentPipeWrap() == Hooks_Misc::kOnlineFixAppId) {
+                    const AppId_t realAppId = Hooks_Misc::ResolvePipeAppId();
+                    if (realAppId != 0 && call.body().size() >= sizeof(uint32_t)) {
+                        uint32_t firstArg = 0;
+                        memcpy(&firstArg, call.body().data(), sizeof(uint32_t));
+                        if (firstArg == Hooks_Misc::kOnlineFixAppId) {
+                            memcpy(const_cast<uint8_t*>(call.body().data()), &realAppId, sizeof(uint32_t));
+                            LOG_IPC_DEBUG("IClientRemoteStorage IPC: mapped AppID {} -> {} in request header arg",
+                                          Hooks_Misc::kOnlineFixAppId, realAppId);
+                        }
                     }
                 }
             }
@@ -118,9 +146,12 @@ namespace {
             // Lookup handler by interface ID + method hash.
             // If matched and app is configured in Lua or OnlineFix is active, resolve pipe and invoke handlers.
             if (const auto* handler = FindHandler(call.interfaceID(), call.funcHash())) {
-                const AppId_t currentAppId = Hooks_Misc::ResolveAppId();
-                if (LuaConfig::HasDepot(currentAppId, false) || Hooks_Misc::IsOnlineFixActive()) {
-                    if (CPipeClient* pipe = GetPipe(pServer, hSteamPipe)) {
+                if (CPipeClient* pipe = GetPipe(pServer, hSteamPipe)) {
+                    AppId_t currentAppId = Hooks_Misc::ResolvePipeAppId();
+                    if (currentAppId == 0 && !pipe->m_bInProcess) {
+                        currentAppId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
+                    }
+                    if ((currentAppId != 0 && LuaConfig::HasDepot(currentAppId, false)) || Hooks_Misc::IsOnlineFixActive()) {
                         LOG_IPC_TRACE("Resolved IPC handler: {} {}", pipe->DebugString(), handler->DebugString());
                         if (handler->pre)
                             handler->pre(pipe, pRead, pWrite);
@@ -153,7 +184,7 @@ namespace Hooks_IPC {
         Hooks_IPC_ISteamUser::Register();
         Hooks_IPC_ISteamUtils::Register();
 
-        LOG_IPC_INFO("Hooks_IPC: {} handlers registered", g_Handlers.size());
+        LOG_IPC_INFO("Hooks_IPC: {} handlers registered", g_Handlers->size());
 
         HOOK_BEGIN();
         INSTALL_HOOK_C(IPCProcessMessage);
@@ -164,7 +195,6 @@ namespace Hooks_IPC {
         UNHOOK_BEGIN();
         UNINSTALL_HOOK_C(IPCProcessMessage);
         UNHOOK_END();
-        g_Handlers.clear();
     }
 
     void RegisterHandlers(std::span<const IPCHandlerEntry> entries) {
@@ -175,12 +205,12 @@ namespace Hooks_IPC {
                 continue;
             }
             const uint64_t key = (static_cast<uint64_t>(m->interfaceID) << 32) | m->funcHash;
-            auto it = std::ranges::find_if(g_Handlers, [key](const ResolvedHandler& h) { return h.key == key; });
-            if (it != g_Handlers.end()) {
+            auto it = std::ranges::find_if(*g_Handlers, [key](const ResolvedHandler& h) { return h.key == key; });
+            if (it != g_Handlers->end()) {
                 *it = ResolvedHandler(e, *m);
                 LOG_IPC_DEBUG("Hooks_IPC: updated {}", it->DebugString());
             } else {
-                auto& handler = g_Handlers.emplace_back(e, *m);
+                auto& handler = g_Handlers->emplace_back(e, *m);
                 LOG_IPC_DEBUG("Hooks_IPC: resolved {}", handler.DebugString());
             }
         }

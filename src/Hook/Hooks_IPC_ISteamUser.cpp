@@ -1,5 +1,6 @@
 #include "Hooks_IPC.h"
 #include "Hooks_IPC_ISteamUser.h"
+#include "IPCMessages.gen.h"
 #include "PendingAPICalls.h"
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Tickets/EticketClient.h"
@@ -12,27 +13,60 @@
 #include "Hooks_Package.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <mutex>
+#include <new>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
     using namespace IPCMessages::IClientUser;
+
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
 
     // Fresh, nonce-bound etickets minted on-demand in RequestEncryptedAppTicket
     // (keyed by appId) and consumed by GetEncryptedAppTicket on the same launch.
     // Lets the strict-Denuvo path serve a ticket matching the launch nonce while
     // keeping GetEncryptedAppTicket's credential-store serve as the fallback.
     std::mutex g_freshEticketMutex;
-    std::unordered_map<AppId_t, std::vector<uint8_t>> g_freshEticket;
+    NoDestructor<std::unordered_map<AppId_t, std::vector<uint8_t>>> g_freshEticket;
+
+    AppId_t ResolvePipeOrOnlineFixAppId(CPipeClient* pipe) {
+        AppId_t appId = Hooks_Misc::ResolvePipeAppId();
+        if (appId == 0 && pipe && !pipe->m_bInProcess) {
+            appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
+        }
+        return appId;
+    }
 
     // [Post-Handler]: IClientUser::GetSteamID
     void HandlerPost_IClientUser_GetSteamID(CPipeClient* pipe,CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
-        AppId_t appId = Hooks_Misc::ResolveAppId();
-        if (appId == 0) {
-            appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
-        }
+        const AppId_t appId = ResolvePipeOrOnlineFixAppId(pipe);
         if (appId == 0 || !LuaConfig::HasDepot(appId, false)) return;
 
         // Genuinely owned and family shared apps: OST must NEVER touch or spoof SteamID,
@@ -71,10 +105,10 @@ namespace {
         if (!req.ok()) return;
 
         LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData:{}", req.DebugString());
-        if (req.cbMaxTicket() < 0) return;
+        if (req.cbMaxTicket() < 0 || req.cbMaxTicket() > INT32_MAX - 32) return;
 
-        AppId_t appId = req.unAppID() == kOnlineFixAppId ? Hooks_Misc::ResolveAppId() : req.unAppID();
-        if (appId == 0) {
+        AppId_t appId = req.unAppID() == Hooks_Misc::kOnlineFixAppId ? Hooks_Misc::ResolvePipeAppId() : req.unAppID();
+        if (appId == 0 && pipe && !pipe->m_bInProcess) {
             appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
         }
         if (appId == 0) return;
@@ -152,8 +186,8 @@ namespace {
         GetAppOwnershipTicketExtendedDataResp resp{pWrite, static_cast<size_t>(req.cbMaxTicket())};
         if (!resp.ok()) return;
 
-        resp.set_returnValue(ticket.totalSize);
         if (!resp.set_pTicket(ticket.data)) return;
+        resp.set_returnValue(ticket.totalSize);
         resp.set_piAppId(ticket.appIdOffset);
         resp.set_piSteamId(ticket.steamIdOffset);
         resp.set_piSignature(ticket.signatureOffset);
@@ -171,14 +205,15 @@ namespace {
         RequestEncryptedAppTicketResp resp{pWrite};
         if (!resp.ok()) return;
 
-        AppId_t appId = Hooks_Misc::ResolveAppId();
-        if (appId == 0) {
-            appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
-        }
+        const AppId_t appId = ResolvePipeOrOnlineFixAppId(pipe);
         if (appId == 0 || !LuaConfig::HasDepot(appId, false)) return;
 
         // Genuinely owned and family shared apps: Steam natively handles encrypted tickets.
-        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) return;
+        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) {
+            std::lock_guard<std::mutex> lock(g_freshEticketMutex);
+            g_freshEticket->erase(appId);
+            return;
+        }
 
         // Signal encrypted ticket requested asynchronously (binds AppId early with 0ms identity pollution).
         if (!PipeManager::IsToolPipe(pipe, appId)) {
@@ -207,15 +242,15 @@ namespace {
             if (existingSteamId != 0) {
                 if (auto fresh = EticketClient::FetchFreshEticket(appId, nonce, existingSteamId)) {
                     std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                    g_freshEticket[appId] = std::move(*fresh);
+                    (*g_freshEticket)[appId] = std::move(*fresh);
                     haveFresh = true;
                 } else {
                     std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                    g_freshEticket.erase(appId);
+                    g_freshEticket->erase(appId);
                 }
             } else {
                 std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-                g_freshEticket.erase(appId);
+                g_freshEticket->erase(appId);
             }
         }
 
@@ -233,14 +268,15 @@ namespace {
     // [Post-Handler]: IClientUser::GetEncryptedAppTicket
     void HandlerPost_IClientUser_GetEncryptedAppTicket(CPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
-        AppId_t appId = Hooks_Misc::ResolveAppId();
-        if (appId == 0) {
-            appId = PipeManager::DenuvoAuth::GetAuthorizedAppId(pipe);
-        }
+        const AppId_t appId = ResolvePipeOrOnlineFixAppId(pipe);
         if (appId == 0 || !LuaConfig::HasDepot(appId, false)) return;
 
         // Genuinely owned and family shared apps: Steam natively handles genuine tickets.
-        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) return;
+        if (Hooks_Package::HasValidLicense(appId) && !LuaConfig::IsDAuth2(appId)) {
+            std::lock_guard<std::mutex> lock(g_freshEticketMutex);
+            g_freshEticket->erase(appId);
+            return;
+        }
 
         // 1. If Steam client returned a genuine encrypted ticket, pass through cleanly:
         GetEncryptedAppTicketResp existingResp{pWrite};
@@ -258,15 +294,15 @@ namespace {
         std::vector<uint8_t> ticket;
         {
             std::lock_guard<std::mutex> lock(g_freshEticketMutex);
-            auto it = g_freshEticket.find(appId);
-            if (it != g_freshEticket.end()) ticket = it->second;
+            auto it = g_freshEticket->find(appId);
+            if (it != g_freshEticket->end()) ticket = it->second;
         }
         const bool fromFresh = !ticket.empty();
         if (ticket.empty()) {
             ticket = AppTicket::GetCachedEncryptedTicket(appId);
         }
-        if (ticket.empty()) {
-            LOG_IPC_DEBUG("GetEncryptedAppTicket: AppId={} - no cached eticket, skip", appId);
+        if (ticket.empty() || ticket.size() > static_cast<size_t>(INT32_MAX - 16)) {
+            LOG_IPC_DEBUG("GetEncryptedAppTicket: AppId={} - no valid cached eticket, skip", appId);
             return;
         }
         LOG_IPC_DEBUG("GetEncryptedAppTicket: AppId={} serving source={}", appId, fromFresh ? "fresh" : "store");
@@ -286,9 +322,9 @@ namespace {
         GetEncryptedAppTicketResp resp{pWrite};
         if (!resp.ok()) return;
 
+        if (!resp.set_pTicket(ticket)) return;
         resp.set_returnValue(true);
         resp.set_pcbTicket(ticketSize);
-        if (!resp.set_pTicket(ticket)) return;
 
         // Arms the activation delivery pulse (2500ms) upon successful ticket delivery:
         if (!PipeManager::IsToolPipe(pipe, appId)) {
@@ -302,7 +338,7 @@ namespace {
 
 namespace Hooks_IPC_ISteamUser {
     void Register() {
-        IPCHandlerEntry UserEntries[] = {
+        constexpr IPCHandlerEntry UserEntries[] = {
             ADD_IPC_POST_HANDLER(IClientUser, GetSteamID),
             ADD_IPC_POST_HANDLER(IClientUser, GetAppOwnershipTicketExtendedData),
             ADD_IPC_POST_HANDLER(IClientUser, RequestEncryptedAppTicket),

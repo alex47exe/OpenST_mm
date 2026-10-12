@@ -1,37 +1,72 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winhttp.h>
+
 #include "WinHttpTransport.h"
+#include "Crypto.h"
+#include "I18n.h"
 #include "Log.h"
 #include "Utils.h"
 
+#include <array>
 #include <chrono>
-#include <iostream>
-#include <sstream>
+#include <type_traits>
 
 #pragma comment(lib, "winhttp.lib")
 
 namespace OST::ExtractTickets {
 
+static_assert(std::is_same_v<HINTERNET, void*>, "HINTERNET must be void*");
+static_assert(std::is_same_v<INTERNET_PORT, uint16_t>, "INTERNET_PORT must be uint16_t");
+static_assert(sizeof(DWORD) == sizeof(uint32_t), "DWORD must be 32-bit unsigned");
+
 namespace {
+
+    void SecureWipeWideString(std::wstring& s) noexcept {
+        if (s.capacity() > 0 && s.data() != nullptr) {
+            SecureZeroMemory(s.data(), s.capacity() * sizeof(wchar_t));
+        }
+        s.clear();
+    }
+
+    struct ScopedWideStringWiper {
+        std::wstring& target;
+        ~ScopedWideStringWiper() noexcept {
+            SecureWipeWideString(target);
+        }
+    };
 
     struct ParsedUrl {
         std::wstring host;
         std::wstring path;
         INTERNET_PORT port{INTERNET_DEFAULT_HTTPS_PORT};
         bool isHttps{true};
+
+        ~ParsedUrl() noexcept {
+            SecureWipeWideString(host);
+            SecureWipeWideString(path);
+        }
     };
 
     bool ParseUrl(std::string_view urlStr, ParsedUrl& outParsed) {
-        std::string normalizedUrl(urlStr);
+        std::wstring wideUrl = Utf8ToWide(urlStr);
+        ScopedWideStringWiper wideWiper{wideUrl};
+
         bool isWss = false;
         bool isWs = false;
-        if (normalizedUrl.starts_with("wss://")) {
+        if (wideUrl.starts_with(L"wss://")) {
             isWss = true;
-            normalizedUrl.replace(0, 6, "https://");
-        } else if (normalizedUrl.starts_with("ws://")) {
+            wideUrl.replace(0, 6, L"https://");
+        } else if (wideUrl.starts_with(L"ws://")) {
             isWs = true;
-            normalizedUrl.replace(0, 5, "http://");
+            wideUrl.replace(0, 5, L"http://");
         }
 
-        std::wstring wideUrl = Utf8ToWide(normalizedUrl);
         URL_COMPONENTS urlComp{};
         urlComp.dwStructSize = sizeof(urlComp);
         urlComp.dwHostNameLength = static_cast<DWORD>(-1);
@@ -39,11 +74,12 @@ namespace {
         urlComp.dwExtraInfoLength = static_cast<DWORD>(-1);
 
         if (!WinHttpCrackUrl(wideUrl.c_str(), static_cast<DWORD>(wideUrl.size()), 0, &urlComp)) {
-            LOG_WARN("WinHttp", "WinHttpCrackUrl 失败: {} (GetLastError={})", MaskUrl(urlStr), GetLastError());
+            LOG_WARN("WinHttp", MsgKey::LogHttpCrackUrlFailed, MaskUrl(urlStr), GetLastError());
             return false;
         }
 
         outParsed.host.assign(urlComp.lpszHostName, urlComp.dwHostNameLength);
+        outParsed.path.reserve(static_cast<size_t>(urlComp.dwUrlPathLength) + urlComp.dwExtraInfoLength + 1);
         outParsed.path.assign(urlComp.lpszUrlPath, urlComp.dwUrlPathLength);
         if (urlComp.dwExtraInfoLength > 0) {
             outParsed.path.append(urlComp.lpszExtraInfo, urlComp.dwExtraInfoLength);
@@ -67,6 +103,14 @@ namespace {
             outParsed.isHttps = (urlComp.nScheme == INTERNET_SCHEME_HTTPS);
         }
         return true;
+    }
+
+    void ConfigureSessionTlsProtocols(HINTERNET hSession) noexcept {
+        DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+        if (!WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols))) {
+            secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+            WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
+        }
     }
 
     struct ScopedHInternet {
@@ -117,12 +161,9 @@ WinHttpTransport::WinHttpTransport() {
     }
 
     if (!m_hSession) {
-        LOG_ERROR("WinHttp", "WinHttpOpen 失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WinHttp", MsgKey::LogHttpOpenFailed, GetLastError());
     } else {
-        // Enforce TLS 1.2 and TLS 1.3
-        DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-        WinHttpSetOption(m_hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
-
+        ConfigureSessionTlsProtocols(m_hSession);
         // Timeouts: resolve, connect, send, receive (all 15s)
         WinHttpSetTimeouts(m_hSession, 15000, 15000, 15000, 15000);
     }
@@ -142,10 +183,12 @@ void WinHttpTransport::SetTimeouts(int resolveMs, int connectMs, int sendMs, int
     }
 }
 
-HINTERNET WinHttpTransport::GetOrCreateConnection(const std::wstring& host, INTERNET_PORT port) {
+void* WinHttpTransport::GetOrCreateConnection(const std::wstring& host, uint16_t port, bool* outWasCached) {
     if (m_hCachedConnect && m_cachedConnectHost == host && m_cachedConnectPort == port) {
+        if (outWasCached) *outWasCached = true;
         return m_hCachedConnect;
     }
+    if (outWasCached) *outWasCached = false;
     InvalidateConnection();
     m_hCachedConnect = WinHttpConnect(m_hSession, host.c_str(), port, 0);
     if (m_hCachedConnect) {
@@ -164,184 +207,65 @@ void WinHttpTransport::InvalidateConnection() {
     m_cachedConnectPort = 0;
 }
 
-HttpResponse WinHttpTransport::Get(
-    std::string_view url,
-    const std::vector<std::string>& extraHeaders,
-    DWORD timeoutMs) {
-    
-    HttpResponse resp;
-    if (!m_hSession) {
-        resp.errorMessage = "WinHTTP 会话未就绪";
-        return resp;
-    }
-
-    ParsedUrl parsed;
-    if (!ParseUrl(url, parsed)) {
-        resp.errorMessage = "无效的 URL 地址";
-        return resp;
-    }
-
-    HINTERNET hConnect = GetOrCreateConnection(parsed.host, parsed.port);
-    if (!hConnect) {
-        resp.errorMessage = std::format("无法连接主机 {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
-        LOG_WARN("WinHttp", "{}", resp.errorMessage);
-        return resp;
-    }
-
-    DWORD flags = parsed.isHttps ? WINHTTP_FLAG_SECURE : 0;
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-
-    auto executeRequest = [&](HINTERNET conn) -> ScopedHInternet {
-        ScopedHInternet req{WinHttpOpenRequest(
-            conn,
-            L"GET",
-            parsed.path.c_str(),
-            nullptr,
-            WINHTTP_NO_REFERER,
-            WINHTTP_DEFAULT_ACCEPT_TYPES,
-            flags)};
-        if (!req) return req;
-
-        if (timeoutMs > 0) {
-            WinHttpSetTimeouts(req, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
-        }
-
-        if (parsed.isHttps) {
-            WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-        }
-
-        for (const auto& hdr : extraHeaders) {
-            std::wstring wHdr = Utf8ToWide(hdr);
-            WinHttpAddRequestHeaders(req, wHdr.c_str(), static_cast<DWORD>(wHdr.size()), WINHTTP_ADDREQ_FLAG_ADD);
-        }
-
-        if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            req.Reset();
-        }
-        return req;
-    };
-
-    auto startT = std::chrono::steady_clock::now();
-    ScopedHInternet hRequest = executeRequest(hConnect);
-
-    // If request failed on a cached connection (e.g. server closed idle keep-alive socket), retry once on fresh connection
-    if (!hRequest) {
-        InvalidateConnection();
-        hConnect = GetOrCreateConnection(parsed.host, parsed.port);
-        if (hConnect) {
-            hRequest = executeRequest(hConnect);
-        }
-    }
-
-    if (!hRequest) {
-        resp.errorMessage = std::format("发送 GET 请求失败 (GetLastError={})", GetLastError());
-        LOG_WARN("WinHttp", "{}", resp.errorMessage);
-        return resp;
-    }
-
-    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-        resp.errorMessage = std::format("接收响应头失败 (GetLastError={})", GetLastError());
-        LOG_WARN("WinHttp", "{}", resp.errorMessage);
-        return resp;
-    }
-
-    DWORD statusCode = 0;
-    DWORD statusSize = sizeof(statusCode);
-    WinHttpQueryHeaders(
-        hRequest,
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX,
-        &statusCode,
-        &statusSize,
-        WINHTTP_NO_HEADER_INDEX);
-    resp.statusCode = static_cast<int>(statusCode);
-
-    // Fast memory pre-allocation if server returns Content-Length
-    DWORD contentLength = 0;
-    DWORD clSize = sizeof(contentLength);
-    if (WinHttpQueryHeaders(
-            hRequest,
-            WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX,
-            &contentLength,
-            &clSize,
-            WINHTTP_NO_HEADER_INDEX) && contentLength > 0) {
-        resp.body.reserve(contentLength);
-    }
-
-    std::vector<char> buffer(131072); // 128 KB buffer for high-throughput streaming
-    while (true) {
-        DWORD bytesRead = 0;
-        if (!WinHttpReadData(hRequest, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead) || bytesRead == 0) {
-            break;
-        }
-        resp.body.append(buffer.data(), bytesRead);
-    }
-
-    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WinHttp", "GET 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", resp.statusCode, resp.body.size(), elapsedMs);
-
-    return resp;
-}
-
-HttpResponse WinHttpTransport::Post(
+HttpResponse WinHttpTransport::ExecuteRequest(
+    const wchar_t* verb,
     std::string_view url,
     std::string_view postData,
     std::string_view contentType,
     const std::vector<std::string>& extraHeaders,
-    DWORD timeoutMs) {
+    uint32_t timeoutMs) {
 
     HttpResponse resp;
     if (!m_hSession) {
-        resp.errorMessage = "WinHTTP 会话未就绪";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrSessionNotReady));
         return resp;
     }
 
     ParsedUrl parsed;
     if (!ParseUrl(url, parsed)) {
-        resp.errorMessage = "无效的 URL 地址";
+        resp.errorMessage = std::string(TR(MsgKey::HttpErrInvalidUrl));
         return resp;
     }
 
-    HINTERNET hConnect = GetOrCreateConnection(parsed.host, parsed.port);
+    bool wasCached = false;
+    void* hConnect = GetOrCreateConnection(parsed.host, parsed.port, &wasCached);
     if (!hConnect) {
-        resp.errorMessage = std::format("无法连接主机 {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrConnectHostFailed, WideToUtf8(parsed.host), GetLastError());
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
 
-    DWORD flags = parsed.isHttps ? WINHTTP_FLAG_SECURE : 0;
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    const bool isPost = (std::wcscmp(verb, L"POST") == 0);
+    const DWORD flags = parsed.isHttps ? WINHTTP_FLAG_SECURE : 0;
+    const DWORD postLen = isPost ? static_cast<DWORD>(postData.size()) : 0;
+    void* pData = (isPost && postLen > 0) ? const_cast<char*>(postData.data()) : WINHTTP_NO_REQUEST_DATA;
 
-    DWORD postLen = static_cast<DWORD>(postData.size());
-    void* pData = postLen > 0 ? const_cast<char*>(postData.data()) : WINHTTP_NO_REQUEST_DATA;
+    DWORD lastErr = ERROR_SUCCESS;
+    bool failedAtRecvHeaders = false;
 
-    auto executeRequest = [&](HINTERNET conn) -> ScopedHInternet {
+    auto openAndSend = [&](void* conn) -> ScopedHInternet {
+        failedAtRecvHeaders = false;
         ScopedHInternet req{WinHttpOpenRequest(
             conn,
-            L"POST",
+            verb,
             parsed.path.c_str(),
             nullptr,
             WINHTTP_NO_REFERER,
             WINHTTP_DEFAULT_ACCEPT_TYPES,
             flags)};
-        if (!req) return req;
+        if (!req) {
+            lastErr = GetLastError();
+            return req;
+        }
 
         if (timeoutMs > 0) {
-            WinHttpSetTimeouts(req, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+            const int t = static_cast<int>(timeoutMs);
+            WinHttpSetTimeouts(req, t, t, t, t);
         }
 
-        if (parsed.isHttps) {
-            WinHttpSetOption(req, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-        }
+        // Strict Schannel TLS verification is preserved by default (no SECURITY_FLAG_IGNORE_* bypass).
 
-        if (!contentType.empty()) {
+        if (isPost && !contentType.empty()) {
             std::string ct = "Content-Type: " + std::string{contentType};
             std::wstring wCt = Utf8ToWide(ct);
             WinHttpAddRequestHeaders(req, wCt.c_str(), static_cast<DWORD>(wCt.size()), WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
@@ -349,34 +273,48 @@ HttpResponse WinHttpTransport::Post(
 
         for (const auto& hdr : extraHeaders) {
             std::wstring wHdr = Utf8ToWide(hdr);
+            ScopedWideStringWiper wHdrWiper{wHdr};
             WinHttpAddRequestHeaders(req, wHdr.c_str(), static_cast<DWORD>(wHdr.size()), WINHTTP_ADDREQ_FLAG_ADD);
         }
 
         if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, pData, postLen, postLen, 0)) {
+            lastErr = GetLastError();
             req.Reset();
+            return req;
+        }
+
+        if (!WinHttpReceiveResponse(req, nullptr)) {
+            lastErr = GetLastError();
+            failedAtRecvHeaders = true;
+            req.Reset();
+            return req;
         }
         return req;
     };
 
-    auto startT = std::chrono::steady_clock::now();
-    ScopedHInternet hRequest = executeRequest(hConnect);
+    const auto startT = std::chrono::steady_clock::now();
+    ScopedHInternet hRequest = openAndSend(hConnect);
 
     if (!hRequest) {
         InvalidateConnection();
-        hConnect = GetOrCreateConnection(parsed.host, parsed.port);
-        if (hConnect) {
-            hRequest = executeRequest(hConnect);
+        // Retry once ONLY if the failure occurred on a reused cached keep-alive handle and was not a timeout or TLS error
+        if (wasCached && lastErr != ERROR_WINHTTP_TIMEOUT && lastErr != ERROR_WINHTTP_SECURE_FAILURE) {
+            hConnect = GetOrCreateConnection(parsed.host, parsed.port, nullptr);
+            if (hConnect) {
+                hRequest = openAndSend(hConnect);
+                if (!hRequest) {
+                    InvalidateConnection();
+                }
+            }
         }
     }
 
     if (!hRequest) {
-        resp.errorMessage = std::format("创建或发送 POST 请求失败 (GetLastError={})", GetLastError());
-        LOG_WARN("WinHttp", "{}", resp.errorMessage);
-        return resp;
-    }
-
-    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-        resp.errorMessage = std::format("接收响应头失败 (GetLastError={})", GetLastError());
+        if (failedAtRecvHeaders) {
+            resp.errorMessage = TR_FMT(MsgKey::HttpErrRecvHeadersFailed, lastErr);
+        } else {
+            resp.errorMessage = TR_FMT(isPost ? MsgKey::HttpErrSendPostFailed : MsgKey::HttpErrSendGetFailed, lastErr);
+        }
         LOG_WARN("WinHttp", "{}", resp.errorMessage);
         return resp;
     }
@@ -392,6 +330,19 @@ HttpResponse WinHttpTransport::Post(
         WINHTTP_NO_HEADER_INDEX);
     resp.statusCode = static_cast<int>(statusCode);
 
+    DWORD steamEResult = 0;
+    DWORD erSize = sizeof(steamEResult);
+    if (WinHttpQueryHeaders(
+            hRequest,
+            WINHTTP_QUERY_CUSTOM | WINHTTP_QUERY_FLAG_NUMBER,
+            L"X-eresult",
+            &steamEResult,
+            &erSize,
+            WINHTTP_NO_HEADER_INDEX)) {
+        resp.steamEResult = static_cast<int32_t>(steamEResult);
+    }
+
+    constexpr size_t kMaxHttpResponseBytes = 256 * 1024 * 1024;
     DWORD contentLength = 0;
     DWORD clSize = sizeof(contentLength);
     if (WinHttpQueryHeaders(
@@ -400,23 +351,60 @@ HttpResponse WinHttpTransport::Post(
             WINHTTP_HEADER_NAME_BY_INDEX,
             &contentLength,
             &clSize,
-            WINHTTP_NO_HEADER_INDEX) && contentLength > 0) {
+            WINHTTP_NO_HEADER_INDEX) && contentLength > 0 && contentLength <= kMaxHttpResponseBytes) {
         resp.body.reserve(contentLength);
     }
 
-    std::vector<char> buffer(131072);
+    std::array<char, 32768> buffer{};
+    bool readOk = true;
     while (true) {
         DWORD bytesRead = 0;
-        if (!WinHttpReadData(hRequest, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead) || bytesRead == 0) {
+        if (!WinHttpReadData(hRequest, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead)) {
+            lastErr = GetLastError();
+            readOk = false;
+            break;
+        }
+        if (bytesRead == 0) {
+            break;
+        }
+        if (resp.body.size() + bytesRead > kMaxHttpResponseBytes) {
+            lastErr = ERROR_INVALID_DATA;
+            readOk = false;
             break;
         }
         resp.body.append(buffer.data(), bytesRead);
     }
+    SecureZeroMemory(buffer.data(), buffer.size());
 
-    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WinHttp", "POST 完成 (HTTP {}, 大小: {} 字节, 耗时: {}ms)", resp.statusCode, resp.body.size(), elapsedMs);
+    if (!readOk) {
+        InvalidateConnection();
+        SecureWipeString(resp.body);
+        resp.statusCode = 0;
+        resp.errorMessage = TR_FMT(MsgKey::HttpErrRecvHeadersFailed, lastErr);
+        LOG_WARN("WinHttp", "{}", resp.errorMessage);
+        return resp;
+    }
+
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
+    LOG_DEBUG("WinHttp", isPost ? MsgKey::LogHttpPostDone : MsgKey::LogHttpGetDone, resp.statusCode, resp.body.size(), elapsedMs);
 
     return resp;
+}
+
+HttpResponse WinHttpTransport::Get(
+    std::string_view url,
+    const std::vector<std::string>& extraHeaders,
+    uint32_t timeoutMs) {
+    return ExecuteRequest(L"GET", url, {}, {}, extraHeaders, timeoutMs);
+}
+
+HttpResponse WinHttpTransport::Post(
+    std::string_view url,
+    std::string_view postData,
+    std::string_view contentType,
+    const std::vector<std::string>& extraHeaders,
+    uint32_t timeoutMs) {
+    return ExecuteRequest(L"POST", url, postData, contentType, extraHeaders, timeoutMs);
 }
 
 // ============================================================================
@@ -441,14 +429,14 @@ WebSocketClient::WebSocketClient() {
     }
 
     if (m_hSession) {
-        DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-        WinHttpSetOption(m_hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols));
+        ConfigureSessionTlsProtocols(m_hSession);
         WinHttpSetTimeouts(m_hSession, 5000, 5000, 5000, 5000);
     }
 }
 
 WebSocketClient::~WebSocketClient() {
     Close();
+    SecureWipeBuffer(m_recvChunk);
     if (m_hSession) {
         WinHttpCloseHandle(m_hSession);
         m_hSession = nullptr;
@@ -457,7 +445,7 @@ WebSocketClient::~WebSocketClient() {
 
 void WebSocketClient::Close() {
     if (m_hWebSocket) {
-        WinHttpWebSocketClose(m_hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        // Directly close the handle to avoid synchronous close-handshake hangs on dead/half-open sockets
         WinHttpCloseHandle(m_hWebSocket);
         m_hWebSocket = nullptr;
     }
@@ -469,27 +457,28 @@ void WebSocketClient::Close() {
         WinHttpCloseHandle(m_hConnect);
         m_hConnect = nullptr;
     }
+    SecureWipeBuffer(m_recvChunk);
 }
 
-bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
+bool WebSocketClient::Connect(std::string_view wssUrl, uint32_t timeoutMs) {
     Close();
     if (!m_hSession) {
-        LOG_ERROR("WebSocket", "WinHTTP 会话无效");
+        LOG_ERROR("WebSocket", MsgKey::LogWsSessionInvalid);
         return false;
     }
 
     ParsedUrl parsed;
     if (!ParseUrl(wssUrl, parsed)) {
-        LOG_ERROR("WebSocket", "无效的 WebSocket URL: {}", wssUrl);
+        LOG_ERROR("WebSocket", MsgKey::LogWsInvalidUrl, MaskUrl(wssUrl));
         return false;
     }
 
-    LOG_DEBUG("WebSocket", "正在建立连接 -> {}:{} (Path: {}, SSL: {})",
-              WideToUtf8(parsed.host), parsed.port, WideToUtf8(parsed.path), parsed.isHttps);
+    LOG_DEBUG("WebSocket", MsgKey::LogWsConnecting,
+              WideToUtf8(parsed.host), parsed.port, MaskUrl(WideToUtf8(parsed.path)), parsed.isHttps);
 
     m_hConnect = WinHttpConnect(m_hSession, parsed.host.c_str(), parsed.port, 0);
     if (!m_hConnect) {
-        LOG_ERROR("WebSocket", "无法连接 WebSocket 主机: {} (GetLastError={})", WideToUtf8(parsed.host), GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsConnectHostFailed, WideToUtf8(parsed.host), GetLastError());
         return false;
     }
 
@@ -504,37 +493,32 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
         flags);
 
     if (!m_hRequest) {
-        LOG_ERROR("WebSocket", "创建 WebSocket 握手请求失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsOpenReqFailed, GetLastError());
         Close();
         return false;
     }
 
     // Request WebSocket Upgrade
     if (!WinHttpSetOption(m_hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
-        LOG_ERROR("WebSocket", "请求升级 WebSocket 选项失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsUpgradeOptFailed, GetLastError());
         Close();
         return false;
     }
 
-    if (parsed.isHttps) {
-        DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(m_hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-    }
+    // Strict Schannel TLS verification is preserved by default (no SECURITY_FLAG_IGNORE_* bypass).
 
-    WinHttpSetTimeouts(m_hRequest, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+    const int t = static_cast<int>(timeoutMs);
+    WinHttpSetTimeouts(m_hRequest, t, t, t, t);
 
     auto startT = std::chrono::steady_clock::now();
     if (!WinHttpSendRequest(m_hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0)) {
-        LOG_ERROR("WebSocket", "发送 WebSocket 升级握手请求失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsSendHandshakeFailed, GetLastError());
         Close();
         return false;
     }
 
     if (!WinHttpReceiveResponse(m_hRequest, nullptr)) {
-        LOG_ERROR("WebSocket", "接收 WebSocket 握手响应失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsRecvHandshakeFailed, GetLastError());
         Close();
         return false;
     }
@@ -550,7 +534,7 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
         WINHTTP_NO_HEADER_INDEX);
 
     if (statusCode != 101) {
-        LOG_ERROR("WebSocket", "WebSocket 握手被拒绝 (HTTP 状态码: {})", statusCode);
+        LOG_ERROR("WebSocket", MsgKey::LogWsHandshakeRejected, statusCode);
         Close();
         return false;
     }
@@ -560,13 +544,13 @@ bool WebSocketClient::Connect(std::string_view wssUrl, DWORD timeoutMs) {
     m_hRequest = nullptr;
 
     if (!m_hWebSocket) {
-        LOG_ERROR("WebSocket", "WinHttpWebSocketCompleteUpgrade 失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("WebSocket", MsgKey::LogWsCompleteUpgradeFailed, GetLastError());
         Close();
         return false;
     }
 
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startT).count();
-    LOG_DEBUG("WebSocket", "已成功建立安全 WebSocket 连接: {} (耗时: {}ms)", wssUrl, elapsedMs);
+    LOG_DEBUG("WebSocket", MsgKey::LogWsConnected, MaskUrl(wssUrl), elapsedMs);
     return true;
 }
 
@@ -584,51 +568,74 @@ bool WebSocketClient::Send(std::span<const uint8_t> data, bool isBinary) {
         static_cast<DWORD>(data.size()));
 
     if (error != ERROR_SUCCESS) {
-        LOG_ERROR("WebSocket", "WinHttpWebSocketSend 失败 (error={})", error);
+        LOG_ERROR("WebSocket", MsgKey::LogWsSendFailed, error);
         Close();
         return false;
     }
     return true;
 }
 
-bool WebSocketClient::Receive(std::vector<uint8_t>& outData, bool& isBinary, DWORD timeoutMs) {
+bool WebSocketClient::Receive(std::vector<uint8_t>& outData, bool& isBinary, uint32_t timeoutMs) {
     if (!m_hWebSocket) return false;
 
-    if (timeoutMs > 0) {
-        DWORD t = timeoutMs;
-        WinHttpSetOption(m_hWebSocket, WINHTTP_OPTION_RECEIVE_TIMEOUT, &t, sizeof(t));
+    outData.clear();
+    if (m_recvChunk.size() < 65536) {
+        m_recvChunk.resize(65536);
     }
 
-    outData.clear();
-    std::vector<uint8_t> chunk(65536);
+    constexpr size_t kMaxWebSocketFrameBytes = 64 * 1024 * 1024;
+    const auto startT = std::chrono::steady_clock::now();
 
     while (true) {
+        if (timeoutMs > 0) {
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startT).count();
+            if (elapsedMs >= static_cast<long long>(timeoutMs)) {
+                LOG_ERROR("WebSocket", MsgKey::LogWsRecvError, ERROR_WINHTTP_TIMEOUT);
+                if (!outData.empty()) {
+                    Close();
+                }
+                SecureWipeBuffer(outData);
+                return false;
+            }
+            DWORD rem = static_cast<DWORD>(timeoutMs - elapsedMs);
+            WinHttpSetOption(m_hWebSocket, WINHTTP_OPTION_RECEIVE_TIMEOUT, &rem, sizeof(rem));
+        }
+
         DWORD bytesRead = 0;
-        WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType{};
 
         DWORD error = WinHttpWebSocketReceive(
             m_hWebSocket,
-            chunk.data(),
-            static_cast<DWORD>(chunk.size()),
+            m_recvChunk.data(),
+            static_cast<DWORD>(m_recvChunk.size()),
             &bytesRead,
             &bufType);
 
         if (error != ERROR_SUCCESS) {
-            LOG_ERROR("WebSocket", "WinHttpWebSocketReceive 错误 (error={})", error);
-            if (error != ERROR_WINHTTP_TIMEOUT) {
+            LOG_ERROR("WebSocket", MsgKey::LogWsRecvError, error);
+            if (error != ERROR_WINHTTP_TIMEOUT || !outData.empty()) {
                 Close();
             }
+            SecureWipeBuffer(outData);
             return false;
         }
 
         if (bufType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
-            LOG_WARN("WebSocket", "收到对端 WebSocket 关闭帧");
+            LOG_WARN("WebSocket", MsgKey::LogWsPeerClosed);
             Close();
+            SecureWipeBuffer(outData);
             return false;
         }
 
         if (bytesRead > 0) {
-            outData.insert(outData.end(), chunk.begin(), chunk.begin() + bytesRead);
+            if (outData.size() + bytesRead > kMaxWebSocketFrameBytes) {
+                LOG_ERROR("WebSocket", MsgKey::LogWsRecvError, ERROR_INVALID_DATA);
+                Close();
+                SecureWipeBuffer(outData);
+                return false;
+            }
+            outData.insert(outData.end(), m_recvChunk.begin(), m_recvChunk.begin() + bytesRead);
         }
 
         if (bufType == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
@@ -637,8 +644,13 @@ bool WebSocketClient::Receive(std::vector<uint8_t>& outData, bool& isBinary, DWO
         } else if (bufType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
             isBinary = false;
             break;
+        } else if (bufType != WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE &&
+                   bufType != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE) {
+            LOG_ERROR("WebSocket", MsgKey::LogWsRecvError, ERROR_INVALID_DATA);
+            Close();
+            SecureWipeBuffer(outData);
+            return false;
         }
-        // If buffer type is fragment (..._FRAGMENT_BUFFER_TYPE), continue reading
     }
 
     return true;

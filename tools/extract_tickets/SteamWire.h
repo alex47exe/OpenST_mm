@@ -18,6 +18,7 @@ enum class ESteamMsg : uint32_t {
     ClientHeartBeat = 703,
     ClientGamesPlayed = 742,
     ClientLogonResponse = 751,
+    ClientLoggedOff = 757,
     ClientGetAppOwnershipTicket = 857,
     ClientGetAppOwnershipTicketResponse = 858,
     ClientGetDepotDecryptionKey = 5438,
@@ -42,10 +43,20 @@ constexpr uint32_t kSteamProtoMask = 0x80000000;
 class ProtoWriter {
 public:
     ProtoWriter() {
-        m_buf.reserve(128);
+        m_buf.reserve(256);
     }
 
+    ~ProtoWriter() noexcept {
+        WipeVectorCapacity(m_buf);
+    }
+
+    ProtoWriter(const ProtoWriter&) = delete;
+    ProtoWriter& operator=(const ProtoWriter&) = delete;
+    ProtoWriter(ProtoWriter&&) = delete;
+    ProtoWriter& operator=(ProtoWriter&&) = delete;
+
     void WriteVarint(uint64_t val) {
+        EnsureCapacity(10);
         while (val >= 0x80) {
             m_buf.push_back(static_cast<uint8_t>((val & 0x7F) | 0x80));
             val >>= 7;
@@ -78,24 +89,28 @@ public:
     }
 
     void WriteFixed64(uint32_t fieldNumber, uint64_t val) {
+        EnsureCapacity(10 + 8);
         WriteTag(fieldNumber, 1);
         const uint8_t* p = reinterpret_cast<const uint8_t*>(&val);
         m_buf.insert(m_buf.end(), p, p + 8);
     }
 
     void WriteString(uint32_t fieldNumber, std::string_view str) {
+        EnsureCapacity(20 + str.size());
         WriteTag(fieldNumber, 2);
         WriteVarint(str.size());
         m_buf.insert(m_buf.end(), str.begin(), str.end());
     }
 
     void WriteBytes(uint32_t fieldNumber, std::span<const uint8_t> data) {
+        EnsureCapacity(20 + data.size());
         WriteTag(fieldNumber, 2);
         WriteVarint(data.size());
         m_buf.insert(m_buf.end(), data.begin(), data.end());
     }
 
     void WriteSubMessage(uint32_t fieldNumber, const ProtoWriter& sub) {
+        EnsureCapacity(20 + sub.Size());
         WriteTag(fieldNumber, 2);
         WriteVarint(sub.Size());
         m_buf.insert(m_buf.end(), sub.Data().begin(), sub.Data().end());
@@ -105,6 +120,30 @@ public:
     [[nodiscard]] size_t Size() const noexcept { return m_buf.size(); }
 
 private:
+    static void WipeVectorCapacity(std::vector<uint8_t>& vec) noexcept {
+        if (vec.capacity() > 0 && vec.data() != nullptr) {
+            volatile uint8_t* p = vec.data();
+            const size_t cap = vec.capacity();
+            for (size_t i = 0; i < cap; ++i) {
+                p[i] = 0;
+            }
+        }
+    }
+
+    void EnsureCapacity(size_t extra) {
+        if (m_buf.size() + extra <= m_buf.capacity()) {
+            return;
+        }
+        const size_t newCap = (m_buf.capacity() * 2 > m_buf.size() + extra)
+            ? (m_buf.capacity() * 2)
+            : (m_buf.size() + extra + 128);
+        std::vector<uint8_t> nextBuf;
+        nextBuf.reserve(newCap);
+        nextBuf.insert(nextBuf.end(), m_buf.begin(), m_buf.end());
+        WipeVectorCapacity(m_buf);
+        m_buf = std::move(nextBuf);
+    }
+
     std::vector<uint8_t> m_buf;
 };
 
@@ -129,9 +168,9 @@ public:
         uint64_t tag = 0;
         if (!ReadVarint(tag)) return false;
 
+        if ((tag >> 3) == 0 || (tag >> 3) > 0x1FFFFFFFULL) return false;
         outField.fieldNumber = static_cast<uint32_t>(tag >> 3);
         outField.wireType = static_cast<uint8_t>(tag & 0x7);
-        if (outField.fieldNumber == 0) return false;
 
         switch (outField.wireType) {
             case 0: // Varint
@@ -167,6 +206,9 @@ private:
         int shift = 0;
         while (m_ptr < m_end && shift < 64) {
             uint8_t b = *m_ptr++;
+            if (shift == 63 && b > 1) {
+                return false;
+            }
             outVal |= static_cast<uint64_t>(b & 0x7F) << shift;
             if ((b & 0x80) == 0) return true;
             shift += 7;
@@ -201,6 +243,7 @@ inline std::vector<uint8_t> PackSteamMsg(
     }
     if (!targetJobName.empty()) {
         hdrWriter.WriteString(12, targetJobName);
+        hdrWriter.WriteUInt32(32, 1); // realm = 1 (steamglobal, field 32 in CMsgProtoBufHeader)
     }
 
     const auto& hdrBytes = hdrWriter.Data();
@@ -231,6 +274,8 @@ inline bool UnpackSteamMsg(
 
     uint32_t rawMsg = 0;
     std::memcpy(&rawMsg, packet.data(), 4);
+    if ((rawMsg & kSteamProtoMask) == 0) return false;
+
     uint32_t hdrLen = 0;
     std::memcpy(&hdrLen, packet.data() + 4, 4);
 
@@ -242,31 +287,60 @@ inline bool UnpackSteamMsg(
     return true;
 }
 
-// Extracts EResult (field 13) from CMsgProtoBufHeader
-inline int32_t ExtractHeaderEResult(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 1;
+struct SteamMsgHeader {
+    uint64_t steamId{0};
+    int32_t clientSessionId{0};
+    uint64_t targetJobId{0};
+    int32_t eresult{1};
+};
+
+// Parses all commonly needed fields from CMsgProtoBufHeader in a single pass
+inline SteamMsgHeader ParseSteamMsgHeader(std::span<const uint8_t> hdrBytes) {
+    SteamMsgHeader hdr;
+    if (hdrBytes.empty()) return hdr;
     ProtoReader r(hdrBytes);
     ProtoField f;
     while (r.ReadNext(f)) {
-        if (f.fieldNumber == 13) { // eresult
-            return static_cast<int32_t>(f.varintVal);
+        switch (f.fieldNumber) {
+            case 1: // steamid (fixed64)
+                hdr.steamId = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+                break;
+            case 2: // client_sessionid (int32)
+                hdr.clientSessionId = static_cast<int32_t>(f.varintVal);
+                break;
+            case 11: { // job_id_target (fixed64)
+                uint64_t id = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+                hdr.targetJobId = (id == UINT64_MAX) ? 0 : id;
+                break;
+            }
+            case 13: // eresult (int32)
+                hdr.eresult = static_cast<int32_t>(f.varintVal);
+                break;
+            default:
+                break;
         }
     }
-    return 1;
+    return hdr;
+}
+
+// Extracts steamid (field 1) from CMsgProtoBufHeader
+inline uint64_t ExtractHeaderSteamId(std::span<const uint8_t> hdrBytes) {
+    return ParseSteamMsgHeader(hdrBytes).steamId;
+}
+
+// Extracts client_sessionid (field 2) from CMsgProtoBufHeader
+inline int32_t ExtractHeaderClientSessionId(std::span<const uint8_t> hdrBytes) {
+    return ParseSteamMsgHeader(hdrBytes).clientSessionId;
+}
+
+// Extracts EResult (field 13) from CMsgProtoBufHeader
+inline int32_t ExtractHeaderEResult(std::span<const uint8_t> hdrBytes) {
+    return ParseSteamMsgHeader(hdrBytes).eresult;
 }
 
 // Extracts job_id_target (field 11) from CMsgProtoBufHeader
 inline uint64_t ExtractHeaderTargetJobId(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 0;
-    ProtoReader r(hdrBytes);
-    ProtoField f;
-    while (r.ReadNext(f)) {
-        if (f.fieldNumber == 11) { // job_id_target
-            uint64_t id = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
-            return (id == UINT64_MAX) ? 0 : id;
-        }
-    }
-    return 0;
+    return ParseSteamMsgHeader(hdrBytes).targetJobId;
 }
 
 } // namespace OST::ExtractTickets

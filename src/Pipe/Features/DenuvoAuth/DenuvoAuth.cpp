@@ -13,8 +13,10 @@
 #include "OSTPlatform/include/Process.h"
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <format>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace PipeManager::DenuvoAuth {
@@ -60,6 +62,7 @@ namespace {
         bool denuvo = false;
         bool isDAuth2 = false;
         bool startupArmed = false;
+        bool scanning = false;
         uint32 pid = 0;
 
         // Scheme 1 (Default): Multi-pipe aware Micro-Pulse State Machine
@@ -71,6 +74,9 @@ namespace {
 
         AppId_t authorizedAppId = k_uAppIdInvalid;
         uint32 handshakeCount = 0;
+
+        bool operator==(const ProcessAuth&) const = default;
+        auto operator<=>(const ProcessAuth&) const = default;
 
         [[nodiscard]] Stage CurrentStage(std::chrono::steady_clock::time_point now) const noexcept {
             if (!denuvo) return Stage::None;
@@ -197,15 +203,52 @@ namespace {
 
         [[nodiscard]] bool CanUseAuthorizedIdentity() const noexcept {
             if (!denuvo) return false;
-            const auto now = std::chrono::steady_clock::now();
             const auto deadline = isDAuth2 ? authDeadline : scheme1Deadline;
+            if (deadline == std::chrono::steady_clock::time_point{}) return false;
+            const auto now = std::chrono::steady_clock::now();
             return now <= deadline;
         }
     };
 
     std::mutex g_authMutex;
+    std::condition_variable g_scanCv;
     std::unordered_map<ProcessKey, ProcessAuth, ProcessKeyHash> g_processAuth;
     std::unordered_map<PipeKey, ProcessKey, PipeKeyHash> g_pipeProcess;
+
+    class ScanningGuard {
+    public:
+        explicit ScanningGuard(ProcessKey key) : key_(key), active_(true) {}
+        ~ScanningGuard() {
+            if (active_) {
+                Dismiss();
+            }
+        }
+        void Dismiss() noexcept {
+            if (active_) {
+                {
+                    std::lock_guard lk(g_authMutex);
+                    auto it = g_processAuth.find(key_);
+                    if (it != g_processAuth.end()) {
+                        it->second.scanning = false;
+                    }
+                }
+                g_scanCv.notify_all();
+                active_ = false;
+            }
+        }
+        void DismissLocked(ProcessAuth& auth) noexcept {
+            if (active_) {
+                auth.scanning = false;
+                g_scanCv.notify_all();
+                active_ = false;
+            }
+        }
+        ScanningGuard(const ScanningGuard&) = delete;
+        ScanningGuard& operator=(const ScanningGuard&) = delete;
+    private:
+        ProcessKey key_;
+        bool active_;
+    };
 
     ProcessAuth* FindAuthForPipe(const PipeKey& pipeKey) {
         const auto pipeIt = g_pipeProcess.find(pipeKey);
@@ -216,14 +259,25 @@ namespace {
         }
 
         // Resilient fallback: match by active process if the specific pipe handle
-        // was not handshaked yet or was evicted from g_pipeProcess
+        // was not handshaked yet or was evicted from g_pipeProcess.
+        // Syscall optimization: pre-check in memory if pipeKey.pid exists in g_processAuth
+        // before calling Win32 GetProcessCreationTime syscall.
         if (pipeKey.pid != 0) {
-            if (const auto currentCreation = ProcessInspector::GetProcessCreationTime(pipeKey.pid)) {
-                const ProcessKey activeKey{pipeKey.pid, *currentCreation};
-                const auto authIt = g_processAuth.find(activeKey);
-                if (authIt != g_processAuth.end()) {
-                    g_pipeProcess[pipeKey] = activeKey;
-                    return &authIt->second;
+            bool hasPidCandidate = false;
+            for (const auto& [procKey, _] : g_processAuth) {
+                if (procKey.pid == pipeKey.pid) {
+                    hasPidCandidate = true;
+                    break;
+                }
+            }
+            if (hasPidCandidate) {
+                if (const auto currentCreation = ProcessInspector::GetProcessCreationTime(pipeKey.pid)) {
+                    const ProcessKey activeKey{pipeKey.pid, *currentCreation};
+                    const auto authIt = g_processAuth.find(activeKey);
+                    if (authIt != g_processAuth.end()) {
+                        g_pipeProcess[pipeKey] = activeKey;
+                        return &authIt->second;
+                    }
                 }
             }
         }
@@ -240,38 +294,49 @@ void Apply(const PipeContext& ctx) {
     if (!pipeKey.IsValid()) return;
 
     bool needsScan = false;
+    std::optional<ScanningGuard> scanGuard;
     {
-        std::lock_guard lock(g_authMutex);
+        std::unique_lock lock(g_authMutex);
         auto it = g_processAuth.find(ctx.process);
+        if (it != g_processAuth.end() && it->second.scanning) {
+            g_scanCv.wait_for(lock, std::chrono::seconds(5), [&]() {
+                auto sit = g_processAuth.find(ctx.process);
+                return sit == g_processAuth.end() || !sit->second.scanning;
+            });
+            it = g_processAuth.find(ctx.process);
+        }
+
         if (it == g_processAuth.end() || !it->second.scanned) {
             needsScan = true;
+            g_processAuth[ctx.process].scanning = true;
+            scanGuard.emplace(ctx.process);
         }
     }
 
     bool denuvo = false;
     bool isDAuth2 = LuaConfig::IsDAuth2(ctx.appId);
 
-    bool cmdLineQueried = false;
-    std::optional<std::string> cmdLine;
-    auto GetCmdLine = [&]() -> const std::string* {
-        if (!cmdLineQueried && ctx.process.pid != 0) {
-            cmdLineQueried = true;
-            cmdLine = OSTPlatform::Process::GetProcessCommandLine(ctx.process.pid);
-        }
-        return cmdLine ? &*cmdLine : nullptr;
-    };
+    if (needsScan) {
+        bool cmdLineQueried = false;
+        std::optional<std::string> cmdLine;
+        auto GetCmdLine = [&]() -> const std::string* {
+            if (!cmdLineQueried && ctx.process.pid != 0) {
+                cmdLineQueried = true;
+                cmdLine = OSTPlatform::Process::GetProcessCommandLine(ctx.process.pid);
+            }
+            return cmdLine ? &*cmdLine : nullptr;
+        };
 
-    if (!isDAuth2) {
-        if (const auto* cmd = GetCmdLine()) {
-            if (HasDAuth2Arg(cmd->c_str())) {
-                isDAuth2 = true;
-                LuaConfig::SetCmdLineDAuth2(ctx.appId, true);
-                LOG_PIPE_INFO("DenuvoAuth: detected -dauth2 in process command line for appid={}", ctx.appId);
+        if (!isDAuth2) {
+            if (const auto* cmd = GetCmdLine()) {
+                if (HasDAuth2Arg(cmd->c_str())) {
+                    isDAuth2 = true;
+                    LuaConfig::SetCmdLineDAuth2(ctx.appId, true);
+                    LOG_PIPE_INFO("DenuvoAuth: detected -dauth2 in process command line for appid={}", ctx.appId);
+                }
             }
         }
-    }
 
-    if (needsScan) {
         bool isNoDenuvo = LuaConfig::IsNoDenuvo(ctx.appId);
         bool isForcedDenuvo = LuaConfig::IsForcedDenuvo(ctx.appId);
 
@@ -332,6 +397,10 @@ void Apply(const PipeContext& ctx) {
                        ctx.process.DebugString(), auth.denuvo, auth.isDAuth2);
     }
 
+    if (scanGuard) {
+        scanGuard->DismissLocked(auth);
+    }
+
     auth.OnHandshake(ctx);
 }
 
@@ -357,17 +426,30 @@ namespace {
 
         // Fallback: match by AppId when pipe is null or untracked.
         // Prioritize exact match for appId first to avoid ambiguous cross-dispatch.
+        // Defend against dead processes: verify creation time matches procKey.
         for (auto& [procKey, auth] : g_processAuth) {
             if (auth.denuvo && auth.authorizedAppId == appId) {
-                fn(auth);
-                return;
+                const auto creation = ProcessInspector::GetProcessCreationTime(procKey.pid);
+                if (creation && *creation == procKey.creationTime) {
+                    fn(auth);
+                    return;
+                }
             }
         }
+
+        // Defend against cross-app corruption: verify InspectProcess resolves same AppId before binding.
         for (auto& [procKey, auth] : g_processAuth) {
             if (auth.denuvo && auth.authorizedAppId == k_uAppIdInvalid) {
-                auth.authorizedAppId = appId;
-                fn(auth);
-                return;
+                const auto creation = ProcessInspector::GetProcessCreationTime(procKey.pid);
+                if (creation && *creation == procKey.creationTime) {
+                    const auto inspect = ProcessInspector::InspectProcess(procKey.pid);
+                    const auto resolved = inspect.ResolveAppId();
+                    if (resolved == appId) {
+                        auth.authorizedAppId = appId;
+                        fn(auth);
+                        return;
+                    }
+                }
             }
         }
     }

@@ -25,6 +25,15 @@ namespace OST::ExtractTickets {
 
 #if defined(_WIN64)
 bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
+    struct EnvVarScopeGuard {
+        ~EnvVarScopeGuard() noexcept {
+            SetEnvironmentVariableA("SteamAppId", nullptr);
+            SetEnvironmentVariableA("SteamGameId", nullptr);
+            SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
+            SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
+        }
+    } envGuard;
+
     if (inTui) {
         int w = 80, h = 25;
         TuiEngine::GetScreenSize(w, h);
@@ -49,7 +58,7 @@ bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
     if (injectAppId) {
         const std::string appIdStr{std::to_string(appId)};
         SetEnvironmentVariableA("SteamAppId", appIdStr.c_str());
-        LOG_INFO("LocalExtract", "已为游戏 AppID {} 注入运行环境变量 (SteamAppId={})", appId, appIdStr);
+        LOG_INFO("LocalExtract", MsgKey::LogMainInjectedSteamAppId, appId, appIdStr);
         if (!inTui) {
             std::cout << TR_FMT(MsgKey::CliExtractLocalInjected, appId) << "\n";
         }
@@ -77,12 +86,12 @@ bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
     if (sessionOpened) {
         ownership = ExtractAppOwnershipTicket(client, pipe, user, appId);
         if (ownership) {
-            LOG_INFO("LocalExtract", "成功提取 OwnershipTicket ({} 字节)", ownership->size());
+            LOG_INFO("LocalExtract", MsgKey::LogMainExtractedOwnership, ownership->size());
         }
         if (injectAppId) {
             encrypted = ExtractEncryptedAppTicket(client, pipe, user, appId);
             if (encrypted) {
-                LOG_INFO("LocalExtract", "成功提取 EncryptedAppTicket ({} 字节)", encrypted->size());
+                LOG_INFO("LocalExtract", MsgKey::LogMainExtractedEncrypted, encrypted->size());
             }
         }
     }
@@ -147,7 +156,7 @@ bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
     );
 
     if (!success) {
-        LOG_ERROR("Main", "创建 Worker 子进程失败 (GetLastError={})", GetLastError());
+        LOG_ERROR("Main", MsgKey::LogMainCreateWorkerFailed, GetLastError());
         return ExtractLocalApp(appId, forceEticket, true);
     }
 
@@ -159,8 +168,9 @@ bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
     if (waitRes == WAIT_OBJECT_0) {
         GetExitCodeProcess(hProcess, &exitCode);
     } else {
-        LOG_WARN("Main", "Worker 子进程执行超时，强制终止");
+        LOG_WARN("Main", MsgKey::LogMainWorkerTimeout);
         TerminateProcess(hProcess, 1);
+        WaitForSingleObject(hProcess, 1000);
     }
 
     return exitCode == 0;
@@ -239,18 +249,55 @@ namespace {
         std::string boxContent = std::format("[ {:<16} ]", std::string{inputAppId} + "_");
         TuiEngine::PrintRaw(std::format("\x1b[1;30;47m{}\x1b[0m  \x1b[90m{}\x1b[0m   ", boxContent, TR(MsgKey::L1InputTip)));
     }
+
+    void PrintCliHelp() {
+        std::cout << "\x1b[1;36m" << TR(MsgKey::CliHelpBanner) << "\x1b[0m\n\n"
+                  << TR(MsgKey::CliHelpUsage) << "\n\n"
+                  << "\x1b[1;33m" << TR(MsgKey::CliHelpOptionsTitle) << "\x1b[0m\n"
+                  << TR(MsgKey::CliHelpOptAppId) << "\n"
+                  << TR(MsgKey::CliHelpOptAccount) << "\n"
+                  << TR(MsgKey::CliHelpOptOnline) << "\n"
+                  << TR(MsgKey::CliHelpOptForce) << "\n"
+                  << TR(MsgKey::CliHelpOptLang) << "\n"
+                  << TR(MsgKey::CliHelpOptHelp) << "\n\n"
+                  << "\x1b[1;33m" << TR(MsgKey::CliHelpNavTitle) << "\x1b[0m\n"
+                  << TR(MsgKey::CliHelpNavL1) << "\n"
+                  << TR(MsgKey::CliHelpNavL2) << "\n"
+                  << TR(MsgKey::CliHelpNavL3) << "\n";
+    }
 } // namespace
 
 int Run(int argc, char** argv) {
     I18n::InitLanguage();
 
+    // First pre-scan --lang / -l so that even LoggingScopeGuard and CLI argument validation errors
+    // are emitted in the user's requested language.
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg{argv[i]};
+        if (arg == "--lang" || arg == "-l") {
+            if (i + 1 < argc) {
+                I18n::SetLanguageFromString(argv[++i]);
+            }
+        } else if (arg.starts_with("--lang=")) {
+            I18n::SetLanguageFromString(arg.substr(7));
+        }
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg{argv[i]};
+        if (arg == "--help" || arg == "-h" || arg == "/?" || arg == "-?") {
+            PrintCliHelp();
+            return 0;
+        }
+    }
+
     struct LoggingScopeGuard {
         LoggingScopeGuard() {
             InitLogging("extract_tickets_debug.log");
-            LOG_INFO("Main", "=== extract_tickets 会话启动 (PID: {}) ===", GetCurrentProcessId());
+            LOG_INFO("Main", MsgKey::LogMainSessionStart, GetCurrentProcessId());
         }
         ~LoggingScopeGuard() {
-            LOG_INFO("Main", "=== extract_tickets 会话正常退出 ===");
+            LOG_INFO("Main", MsgKey::LogMainSessionExit);
             CloseLogging();
         }
     } logGuard;
@@ -265,6 +312,12 @@ int Run(int argc, char** argv) {
         std::string_view arg{argv[i]};
         if (arg == "--online" || arg == "-o" || arg == "-O") {
             onlineMode = true;
+        } else if (arg == "--lang" || arg == "-l") {
+            if (i + 1 < argc) {
+                ++i;
+            }
+        } else if (arg.starts_with("--lang=")) {
+            // Handled in pre-scan
         } else if (arg == "--account" || arg == "-a") {
             if (i + 1 < argc) {
                 cliAccount = argv[++i];
@@ -430,6 +483,11 @@ int Run(int argc, char** argv) {
                         TuiEngine::ClearScreen();
                         OnlineSession::RunInteractive();
                         inputAppId.clear();
+                        layout = DrawLevel1Frame();
+                        UpdateLevel1Input(layout, inputAppId);
+                        continue;
+                    } else {
+                        TuiEngine::ClearScreen();
                         layout = DrawLevel1Frame();
                         UpdateLevel1Input(layout, inputAppId);
                         continue;

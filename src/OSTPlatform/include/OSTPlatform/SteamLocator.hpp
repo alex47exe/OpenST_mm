@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -39,12 +42,22 @@ public:
             }
         }
 
-        wchar_t envBuf[32768];
-        const DWORD envLen = ::GetEnvironmentVariableW(L"OST_STEAM_PATH", envBuf, static_cast<DWORD>(std::size(envBuf)));
-        if (envLen > 0 && envLen < static_cast<DWORD>(std::size(envBuf))) {
-            const std::filesystem::path envPath(std::wstring_view(envBuf, envLen));
-            if (auto dir = NormalizeAndVerifyDir(envPath)) {
-                return dir;
+        wchar_t envBuf[MAX_PATH];
+        DWORD envLen = ::GetEnvironmentVariableW(L"OST_STEAM_PATH", envBuf, static_cast<DWORD>(std::size(envBuf)));
+        if (envLen > 0) {
+            if (envLen < static_cast<DWORD>(std::size(envBuf))) {
+                if (auto dir = NormalizeAndVerifyDir(std::filesystem::path(std::wstring_view(envBuf, envLen)))) {
+                    return dir;
+                }
+            } else {
+                std::wstring dynBuf(envLen, L'\0');
+                envLen = ::GetEnvironmentVariableW(L"OST_STEAM_PATH", dynBuf.data(), envLen);
+                if (envLen > 0 && envLen <= dynBuf.size()) {
+                    dynBuf.resize(envLen);
+                    if (auto dir = NormalizeAndVerifyDir(std::filesystem::path(dynBuf))) {
+                        return dir;
+                    }
+                }
             }
         }
 
@@ -117,7 +130,7 @@ private:
 
         // If candidate directly points to steam.exe or another file
         if (std::filesystem::is_regular_file(candidate, ec)) {
-            const auto filename = candidate.filename().wstring();
+            const auto& filename = candidate.filename().native();
             if (_wcsicmp(filename.c_str(), L"steam.exe") == 0) {
                 const auto parent = candidate.parent_path();
                 if (std::filesystem::is_regular_file(parent / L"steam.exe", ec)) {
@@ -162,7 +175,7 @@ private:
                     ? pathView.substr(lastSlash + 1)
                     : pathView;
 
-                if (_wcsicmp(std::wstring(exeName).c_str(), L"steam.exe") == 0) {
+                if (exeName.size() == 9 && _wcsnicmp(exeName.data(), L"steam.exe", 9) == 0) {
                     const std::filesystem::path fullPath(pathView);
                     const auto dir = fullPath.parent_path();
                     if (auto verified = NormalizeAndVerifyDir(dir)) {
@@ -263,35 +276,39 @@ private:
     }
 
     [[nodiscard]] static std::optional<std::filesystem::path> ProbeCommonFixedDrivePaths() noexcept {
-        wchar_t driveStrings[512] = { 0 };
-        const DWORD len = ::GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveStrings) - 1), driveStrings);
-        std::vector<std::wstring> candidateDrives;
-
-        if (len > 0 && len < static_cast<DWORD>(std::size(driveStrings))) {
-            const wchar_t* cur = driveStrings;
-            while (*cur) {
-                if (::GetDriveTypeW(cur) == DRIVE_FIXED) {
-                    candidateDrives.emplace_back(cur);
-                }
-                cur += wcslen(cur) + 1;
-            }
-        }
-
-        if (candidateDrives.empty()) {
-            candidateDrives = { L"C:\\", L"D:\\", L"E:\\", L"F:\\" };
-        }
-
         constexpr const wchar_t* kCommonSuffixes[] = {
             L"Program Files (x86)\\Steam",
             L"Program Files\\Steam",
             L"Steam"
         };
 
-        for (const auto& drive : candidateDrives) {
-            const std::filesystem::path driveRoot(drive);
+        const auto checkDrive = [&](const wchar_t* driveRootStr) -> std::optional<std::filesystem::path> {
+            const std::filesystem::path driveRoot(driveRootStr);
             for (const auto* suffix : kCommonSuffixes) {
                 const std::filesystem::path candidate = driveRoot / suffix;
                 if (auto dir = NormalizeAndVerifyDir(candidate)) {
+                    return dir;
+                }
+            }
+            return std::nullopt;
+        };
+
+        wchar_t driveStrings[512] = { 0 };
+        const DWORD len = ::GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveStrings) - 1), driveStrings);
+
+        if (len > 0 && len < static_cast<DWORD>(std::size(driveStrings))) {
+            const wchar_t* cur = driveStrings;
+            while (*cur) {
+                if (::GetDriveTypeW(cur) == DRIVE_FIXED) {
+                    if (auto dir = checkDrive(cur)) {
+                        return dir;
+                    }
+                }
+                cur += wcslen(cur) + 1;
+            }
+        } else {
+            for (const auto* fallbackDrive : { L"C:\\", L"D:\\", L"E:\\", L"F:\\" }) {
+                if (auto dir = checkDrive(fallbackDrive)) {
                     return dir;
                 }
             }

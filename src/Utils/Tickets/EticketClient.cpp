@@ -70,8 +70,8 @@ namespace {
     // we skip on-demand for the rest of the session once we learn this.
     std::unordered_set<AppId_t> g_noOwnerApps;
 
-    std::string ToHex(std::span<const uint8_t> bytes) {
-        static const char digits[] = "0123456789ABCDEF";
+    [[nodiscard]] std::string ToHex(std::span<const uint8_t> bytes) {
+        static constexpr char digits[] = "0123456789ABCDEF";
         std::string out;
         out.reserve(bytes.size() * 2);
         for (uint8_t b : bytes) {
@@ -81,68 +81,145 @@ namespace {
         return out;
     }
 
-    int HexNibble(char c) {
+    [[nodiscard]] constexpr int HexNibble(char c) noexcept {
         if (c >= '0' && c <= '9') return c - '0';
         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
         if (c >= 'A' && c <= 'F') return c - 'A' + 10;
         return -1;
     }
 
-    bool FromHex(std::string_view hex, std::vector<uint8_t>& out) {
-        if (hex.empty() || (hex.size() % 2) != 0) return false;
+    [[nodiscard]] bool FromHex(std::string_view hex, std::vector<uint8_t>& out) noexcept {
+        if (hex.empty() || (hex.size() % 2) != 0) {
+            out.clear();
+            return false;
+        }
         out.clear();
         out.reserve(hex.size() / 2);
         for (size_t i = 0; i < hex.size(); i += 2) {
             int hi = HexNibble(hex[i]);
             int lo = HexNibble(hex[i + 1]);
-            if (hi < 0 || lo < 0) return false;
+            if (hi < 0 || lo < 0) {
+                out.clear();
+                return false;
+            }
             out.push_back(static_cast<uint8_t>((hi << 4) | lo));
         }
         return true;
     }
 
-    // Extract a string field ("key":"VALUE") from our own backend's JSON.
-    // Returns false when the key is absent or its value is null/empty.
-    bool ExtractStringField(std::string_view body, std::string_view key, std::string& out) {
-        const std::string needle = std::string("\"") + std::string(key) + "\"";
-        size_t k = body.find(needle);
-        if (k == std::string_view::npos) return false;
-        size_t colon = body.find(':', k + needle.size());
-        if (colon == std::string_view::npos) return false;
-        size_t q1 = body.find('"', colon + 1);
-        if (q1 == std::string_view::npos) return false;
-        // A null value (e.g. "appticket":null) has no opening quote before the
-        // next delimiter — guard against grabbing a later field's quote.
-        size_t delim = body.find_first_of(",}", colon + 1);
-        if (delim != std::string_view::npos && q1 > delim) return false;
-        size_t q2 = body.find('"', q1 + 1);
-        if (q2 == std::string_view::npos) return false;
-        out = std::string(body.substr(q1 + 1, q2 - q1 - 1));
-        return !out.empty();
-    }
+    // Fast zero-allocation JSON scanner for top-level keys.
+    // Handles escape sequences, whitespace, and distinguishes strings from bare values (number/null).
+    [[nodiscard]] bool FindJsonValue(std::string_view json, std::string_view key, std::string_view& val, bool& isQuoted) noexcept {
+        val = {};
+        isQuoted = false;
+        size_t i = 0;
+        const size_t n = json.size();
 
-    bool ExtractUInt64Field(std::string_view body, std::string_view key, uint64_t& out) {
-        std::string str;
-        if (ExtractStringField(body, key, str)) {
-            const auto parsed = OSTPlatform::Numbers::ParseUInt64(str);
-            if (parsed) {
-                out = *parsed;
-                return true;
+        while (i < n) {
+            if (json[i] != '"') {
+                ++i;
+                continue;
+            }
+
+            const size_t keyStart = i + 1;
+            size_t keyEnd = keyStart;
+            bool keyEscaped = false;
+            while (keyEnd < n) {
+                if (json[keyEnd] == '\\') {
+                    if (keyEnd + 1 >= n) return false;
+                    keyEscaped = true;
+                    keyEnd += 2;
+                    continue;
+                }
+                if (json[keyEnd] == '"') {
+                    break;
+                }
+                ++keyEnd;
+            }
+
+            if (keyEnd >= n) return false;
+
+            const std::string_view currentKey = json.substr(keyStart, keyEnd - keyStart);
+            i = keyEnd + 1;
+
+            while (i < n && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) {
+                ++i;
+            }
+            if (i >= n || json[i] != ':') {
+                continue;
+            }
+            ++i;
+
+            while (i < n && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) {
+                ++i;
+            }
+            if (i >= n) return false;
+
+            const bool match = (!keyEscaped && currentKey == key);
+
+            if (json[i] == '"') {
+                const size_t valStart = i + 1;
+                size_t valEnd = valStart;
+                while (valEnd < n) {
+                    if (json[valEnd] == '\\') {
+                        if (valEnd + 1 >= n) return false;
+                        valEnd += 2;
+                        continue;
+                    }
+                    if (json[valEnd] == '"') {
+                        break;
+                    }
+                    ++valEnd;
+                }
+                if (valEnd >= n) return false;
+
+                if (match) {
+                    val = json.substr(valStart, valEnd - valStart);
+                    isQuoted = true;
+                    return true;
+                }
+                i = valEnd + 1;
+            } else {
+                const size_t valStart = i;
+                size_t valEnd = valStart;
+                while (valEnd < n &&
+                       json[valEnd] != ',' && json[valEnd] != '}' && json[valEnd] != ']' &&
+                       json[valEnd] != ' ' && json[valEnd] != '\t' && json[valEnd] != '\r' && json[valEnd] != '\n') {
+                    ++valEnd;
+                }
+
+                if (match) {
+                    val = json.substr(valStart, valEnd - valStart);
+                    isQuoted = false;
+                    if (val == "null") return false;
+                    return true;
+                }
+                i = valEnd;
             }
         }
-        const std::string needle = std::string("\"") + std::string(key) + "\"";
-        size_t k = body.find(needle);
-        if (k == std::string_view::npos) return false;
-        size_t colon = body.find(':', k + needle.size());
-        if (colon == std::string_view::npos) return false;
-        size_t start = colon + 1;
-        while (start < body.size() && (body[start] == ' ' || body[start] == '\t' || body[start] == '\r' || body[start] == '\n')) {
-            ++start;
-        }
-        size_t end = body.find_first_of(",} \t\r\n", start);
-        std::string_view numStr = body.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
-        if (numStr.empty()) return false;
-        const auto parsed = OSTPlatform::Numbers::ParseUInt64(numStr);
+
+        return false;
+    }
+
+    [[nodiscard]] bool ExtractStringField(std::string_view body, std::string_view key, std::string_view& out) noexcept {
+        bool isQuoted = false;
+        if (!FindJsonValue(body, key, out, isQuoted)) return false;
+        return isQuoted && !out.empty();
+    }
+
+    [[nodiscard]] bool ExtractStringField(std::string_view body, std::string_view key, std::string& out) {
+        std::string_view sv;
+        if (!ExtractStringField(body, key, sv)) return false;
+        out.assign(sv);
+        return true;
+    }
+
+    [[nodiscard]] bool ExtractUInt64Field(std::string_view body, std::string_view key, uint64_t& out) noexcept {
+        std::string_view val;
+        bool isQuoted = false;
+        if (!FindJsonValue(body, key, val, isQuoted)) return false;
+        if (val.empty()) return false;
+        const auto parsed = OSTPlatform::Numbers::ParseUInt64(val);
         if (parsed) {
             out = *parsed;
             return true;
@@ -157,9 +234,12 @@ namespace {
     // an entry is cached, subsequent calls (ownership vs eticket, any order) share
     // it so both layers always align to the same account.
     bool EnsureFetched(AppId_t appId, std::span<const uint8_t> nonce, uint64_t existingSteamId, CachedTickets& out) {
+        if (appId == 0) return false;
+
         // No seteticketurl() in the config: feature off, never touch the network.
         // Callers fall back to the static credential-store ticket, i.e. stock OST.
-        if (EticketUrl().empty()) return false;
+        const std::string endpointUrl = EticketUrl();
+        if (endpointUrl.empty()) return false;
 
         {
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -193,7 +273,7 @@ namespace {
         reqBody += "}";
 
         auto r = OSTPlatform::Http::Execute(
-            L"POST", EticketUrl().c_str(),
+            L"POST", endpointUrl.c_str(),
             reqBody.data(), static_cast<uint32_t>(reqBody.size()),
             L"Content-Type: application/json\r\n",
             kResolveMs, kConnectMs, kSendMs, kRecvMs);
@@ -236,12 +316,12 @@ namespace {
         }
 
         CachedTickets fetched;
-        std::string hex;
-        if (ExtractStringField(r.body, "eticket", hex)) {
-            if (!FromHex(hex, fetched.eticket)) fetched.eticket.clear();
+        std::string_view hexView;
+        if (ExtractStringField(r.body, "eticket", hexView)) {
+            if (!FromHex(hexView, fetched.eticket)) fetched.eticket.clear();
         }
-        if (ExtractStringField(r.body, "appticket", hex)) {
-            if (!FromHex(hex, fetched.ownership)) fetched.ownership.clear();
+        if (ExtractStringField(r.body, "appticket", hexView)) {
+            if (!FromHex(hexView, fetched.ownership)) fetched.ownership.clear();
         }
 
         if (fetched.eticket.empty() && fetched.ownership.empty()) {
@@ -251,7 +331,9 @@ namespace {
 
         // Remember which pool account the backend minted under, so a later call
         // whose registry account differs triggers the eviction above.
-        ExtractUInt64Field(r.body, "steam_id", fetched.steamId);
+        if (!ExtractUInt64Field(r.body, "steam_id", fetched.steamId)) {
+            LOG_IPC_TRACE("EticketClient: steam_id absent or non-numeric in response for appid={}", appId);
+        }
 
         {
             std::lock_guard<std::mutex> lock(g_mutex);

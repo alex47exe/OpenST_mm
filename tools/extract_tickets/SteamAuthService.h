@@ -34,6 +34,54 @@ struct SteamLoginResult {
     std::string refreshToken;
     std::string accessToken;
     std::string errorMessage;
+
+    SteamLoginResult() = default;
+    ~SteamLoginResult() noexcept {
+        SecureWipeString(refreshToken);
+        SecureWipeString(accessToken);
+    }
+    SteamLoginResult(const SteamLoginResult&) = default;
+    SteamLoginResult(SteamLoginResult&& other) noexcept
+        : success(other.success),
+          cancelled(other.cancelled),
+          accountName(std::move(other.accountName)),
+          steamId(other.steamId),
+          refreshToken(std::move(other.refreshToken)),
+          accessToken(std::move(other.accessToken)),
+          errorMessage(std::move(other.errorMessage)) {
+        SecureWipeString(other.refreshToken);
+        SecureWipeString(other.accessToken);
+    }
+    SteamLoginResult& operator=(const SteamLoginResult& other) {
+        if (this != &other) {
+            SecureWipeString(refreshToken);
+            SecureWipeString(accessToken);
+            success = other.success;
+            cancelled = other.cancelled;
+            accountName = other.accountName;
+            steamId = other.steamId;
+            refreshToken = other.refreshToken;
+            accessToken = other.accessToken;
+            errorMessage = other.errorMessage;
+        }
+        return *this;
+    }
+    SteamLoginResult& operator=(SteamLoginResult&& other) noexcept {
+        if (this != &other) {
+            SecureWipeString(refreshToken);
+            SecureWipeString(accessToken);
+            success = other.success;
+            cancelled = other.cancelled;
+            accountName = std::move(other.accountName);
+            steamId = other.steamId;
+            refreshToken = std::move(other.refreshToken);
+            accessToken = std::move(other.accessToken);
+            errorMessage = std::move(other.errorMessage);
+            SecureWipeString(other.refreshToken);
+            SecureWipeString(other.accessToken);
+        }
+        return *this;
+    }
 };
 
 class SteamCmClient;
@@ -73,7 +121,8 @@ public:
     // Refreshes an access token using cached refresh_token
     [[nodiscard]] std::optional<std::string> RefreshAccessToken(
         uint64_t steamId,
-        std::string_view refreshToken);
+        std::string_view refreshToken,
+        std::string* outNewRefreshToken = nullptr);
 
     // High-level login with credentials (handles 2FA prompt in TUI/console)
     [[nodiscard]] SteamLoginResult LoginWithCredentials(

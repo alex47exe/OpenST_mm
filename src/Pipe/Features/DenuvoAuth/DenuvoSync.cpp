@@ -28,17 +28,20 @@
 
 namespace PipeManager::DenuvoAuth {
 
-    bool HasCmdLineArg(const char* cmdLine, const char* arg) {
-        if (!cmdLine || !arg) return false;
-        const size_t argLen = strlen(arg);
-        if (argLen == 0) return false;
+    bool HasCmdLineArg(std::string_view cmdLine, std::string_view arg) noexcept {
+        if (cmdLine.empty() || arg.empty()) return false;
+        const size_t argLen = arg.size();
+        if (cmdLine.size() < argLen) return false;
 
-        for (const char* p = cmdLine; *p; ++p) {
+        for (size_t i = 0; i <= cmdLine.size() - argLen; ++i) {
             // Fast token boundary check: token must begin at string start or after whitespace/quotes
-            if (p == cmdLine || *(p - 1) == ' ' || *(p - 1) == '\t' || *(p - 1) == '"' || *(p - 1) == '\'') {
-                if (_strnicmp(p, arg, argLen) == 0) {
-                    const char next = p[argLen];
-                    if (next == '\0' || next == ' ' || next == '\t' || next == '"' || next == '\'' || next == '=') {
+            if (i == 0 || std::isspace(static_cast<unsigned char>(cmdLine[i - 1])) || cmdLine[i - 1] == '"' || cmdLine[i - 1] == '\'') {
+                if (_strnicmp(cmdLine.data() + i, arg.data(), argLen) == 0) {
+                    if (i + argLen == cmdLine.size()) {
+                        return true;
+                    }
+                    const char next = cmdLine[i + argLen];
+                    if (std::isspace(static_cast<unsigned char>(next)) || next == '"' || next == '\'' || next == '=' || next == ':') {
                         return true;
                     }
                 }
@@ -47,29 +50,53 @@ namespace PipeManager::DenuvoAuth {
         return false;
     }
 
+    bool HasCmdLineArg(const char* cmdLine, const char* arg) {
+        if (!cmdLine || !arg) return false;
+        return HasCmdLineArg(std::string_view(cmdLine), std::string_view(arg));
+    }
+
     bool HasNoDenuvoArg(const char* cmdLine) {
-        return cmdLine && (HasCmdLineArg(cmdLine, "-nodenuvo") ||
-                           HasCmdLineArg(cmdLine, "-no-denuvo") ||
-                           HasCmdLineArg(cmdLine, "-no_denuvo"));
+        if (!cmdLine) return false;
+        const std::string_view sv(cmdLine);
+        return HasCmdLineArg(sv, "-nodenuvo") ||
+               HasCmdLineArg(sv, "-no-denuvo") ||
+               HasCmdLineArg(sv, "-no_denuvo") ||
+               HasCmdLineArg(sv, "/nodenuvo") ||
+               HasCmdLineArg(sv, "/no-denuvo") ||
+               HasCmdLineArg(sv, "/no_denuvo");
     }
 
     bool HasForcedDenuvoArg(const char* cmdLine) {
-        return cmdLine && (HasCmdLineArg(cmdLine, "-forcedenuvo") ||
-                           HasCmdLineArg(cmdLine, "-force-denuvo") ||
-                           HasCmdLineArg(cmdLine, "-force_denuvo"));
+        if (!cmdLine) return false;
+        const std::string_view sv(cmdLine);
+        return HasCmdLineArg(sv, "-forcedenuvo") ||
+               HasCmdLineArg(sv, "-force-denuvo") ||
+               HasCmdLineArg(sv, "-force_denuvo") ||
+               HasCmdLineArg(sv, "/forcedenuvo") ||
+               HasCmdLineArg(sv, "/force-denuvo") ||
+               HasCmdLineArg(sv, "/force_denuvo");
     }
 
     bool HasDAuth2Arg(const char* cmdLine) {
-        return cmdLine && (HasCmdLineArg(cmdLine, "-dauth2") ||
-                           HasCmdLineArg(cmdLine, "--dauth2") ||
-                           HasCmdLineArg(cmdLine, "-dauth-2") ||
-                           HasCmdLineArg(cmdLine, "-dauth_2"));
+        if (!cmdLine) return false;
+        const std::string_view sv(cmdLine);
+        return HasCmdLineArg(sv, "-dauth2") ||
+               HasCmdLineArg(sv, "--dauth2") ||
+               HasCmdLineArg(sv, "-dauth-2") ||
+               HasCmdLineArg(sv, "-dauth_2") ||
+               HasCmdLineArg(sv, "/dauth2") ||
+               HasCmdLineArg(sv, "/dauth-2") ||
+               HasCmdLineArg(sv, "/dauth_2");
     }
 
     bool HasLuaArg(const char* cmdLine) {
-        return cmdLine && (HasCmdLineArg(cmdLine, "-lua") ||
-                           HasCmdLineArg(cmdLine, "--lua") ||
-                           HasCmdLineArg(cmdLine, "-d+"));
+        if (!cmdLine) return false;
+        const std::string_view sv(cmdLine);
+        return HasCmdLineArg(sv, "-lua") ||
+               HasCmdLineArg(sv, "--lua") ||
+               HasCmdLineArg(sv, "-d+") ||
+               HasCmdLineArg(sv, "/lua") ||
+               HasCmdLineArg(sv, "/d+");
     }
 
 namespace {
@@ -135,9 +162,11 @@ namespace {
         std::error_code ec;
 
         // Clean exePath from enclosing quotes and whitespace
-        std::string cleanExe = exePath;
-        while (!cleanExe.empty() && (cleanExe.front() == '"' || cleanExe.front() == '\'' || std::isspace(static_cast<unsigned char>(cleanExe.front())))) cleanExe.erase(0, 1);
-        while (!cleanExe.empty() && (cleanExe.back() == '"' || cleanExe.back() == '\'' || std::isspace(static_cast<unsigned char>(cleanExe.back())))) cleanExe.pop_back();
+        std::string_view cleanExe = exePath;
+        cleanExe = TrimWhitespace(cleanExe);
+        while (!cleanExe.empty() && (cleanExe.front() == '"' || cleanExe.front() == '\'')) cleanExe.remove_prefix(1);
+        while (!cleanExe.empty() && (cleanExe.back() == '"' || cleanExe.back() == '\'')) cleanExe.remove_suffix(1);
+        cleanExe = TrimWhitespace(cleanExe);
 
         // Strategy 1: Walk up from exePath directly to find steamapps folder
         if (!cleanExe.empty()) {
@@ -148,7 +177,7 @@ namespace {
                 if (_wcsicmp(fn.c_str(), L"steamapps") == 0) {
                     auto candidate = p / ("appmanifest_" + std::to_string(appId) + ".acf");
                     if (std::filesystem::exists(candidate, ec) && !ec) {
-                        LOG_INFO("DenuvoSync: located ACF from exePath: {}", candidate.string());
+                        LOG_INFO("DenuvoSync: located ACF from exePath: {}", OSTPlatform::Encoding::PathToUtf8(candidate));
                         return candidate;
                     }
                 }
@@ -158,14 +187,14 @@ namespace {
         // Strategy 2: Check primary Steam install path
         std::string steamPath = SteamInstallPath;
         if (!steamPath.empty()) {
-            auto primaryAcf = std::filesystem::path(OSTPlatform::Encoding::PathFromUtf8(steamPath)) / "steamapps" / ("appmanifest_" + std::to_string(appId) + ".acf");
+            auto primaryAcf = OSTPlatform::Encoding::PathFromUtf8(steamPath) / "steamapps" / ("appmanifest_" + std::to_string(appId) + ".acf");
             if (std::filesystem::exists(primaryAcf, ec) && !ec) {
-                LOG_INFO("DenuvoSync: located ACF from primary Steam path: {}", primaryAcf.string());
+                LOG_INFO("DenuvoSync: located ACF from primary Steam path: {}", OSTPlatform::Encoding::PathToUtf8(primaryAcf));
                 return primaryAcf;
             }
 
             // Strategy 3: Parse libraryfolders.vdf
-            auto libVdf = std::filesystem::path(OSTPlatform::Encoding::PathFromUtf8(steamPath)) / "steamapps" / "libraryfolders.vdf";
+            auto libVdf = OSTPlatform::Encoding::PathFromUtf8(steamPath) / "steamapps" / "libraryfolders.vdf";
             std::ifstream file(libVdf);
             if (file.is_open()) {
                 std::string line;
@@ -178,9 +207,9 @@ namespace {
                         std::string key = tokens[0];
                         std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (key == "path") {
-                            auto libAcf = std::filesystem::path(OSTPlatform::Encoding::PathFromUtf8(tokens[1])) / "steamapps" / ("appmanifest_" + std::to_string(appId) + ".acf");
+                            auto libAcf = OSTPlatform::Encoding::PathFromUtf8(tokens[1]) / "steamapps" / ("appmanifest_" + std::to_string(appId) + ".acf");
                             if (std::filesystem::exists(libAcf, ec) && !ec) {
-                                LOG_INFO("DenuvoSync: located ACF from libraryfolders.vdf: {}", libAcf.string());
+                                LOG_INFO("DenuvoSync: located ACF from libraryfolders.vdf: {}", OSTPlatform::Encoding::PathToUtf8(libAcf));
                                 return libAcf;
                             }
                         }
@@ -348,7 +377,7 @@ namespace {
         {
             std::ofstream out(tempPath, std::ios::trunc);
             if (!out.is_open()) {
-                LOG_ERROR("DenuvoSync: failed to open temp file for writing: {}", tempPath.string());
+                LOG_ERROR("DenuvoSync: failed to open temp file for writing: {}", OSTPlatform::Encoding::PathToUtf8(tempPath));
                 return false;
             }
             for (const auto& line : lines) {
@@ -376,7 +405,8 @@ namespace {
         }
 
         if (!moved) {
-            LOG_ERROR("DenuvoSync: MoveFileExW failed to replace {} (error={})", targetPath.string(), lastError);
+            LOG_ERROR("DenuvoSync: MoveFileExW failed to replace {} (error={})",
+                      OSTPlatform::Encoding::PathToUtf8(targetPath), lastError);
             std::filesystem::remove(tempPath, ec);
             return false;
         }
@@ -408,7 +438,7 @@ namespace {
         }
 
         if (SteamInstallPath[0] != '\0') {
-            addSearchDir(std::filesystem::path(OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath)) / "depotcache");
+            addSearchDir(OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / "depotcache");
         }
 
         for (const auto& [depotId, gid] : acfData.installedDepots) {
@@ -421,10 +451,13 @@ namespace {
                     auto destFile = targetDir / manifestFileName;
                     if (!std::filesystem::exists(destFile, ec)) {
                         if (CopyFileW(srcFile.c_str(), destFile.c_str(), FALSE)) {
-                            LOG_INFO("DenuvoSync: mirrored manifest {} -> {}", srcFile.string(), destFile.string());
+                            LOG_INFO("DenuvoSync: mirrored manifest {} -> {}",
+                                     OSTPlatform::Encoding::PathToUtf8(srcFile),
+                                     OSTPlatform::Encoding::PathToUtf8(destFile));
                         } else {
                             LOG_WARN("DenuvoSync: failed to mirror manifest {} -> {} (error={})",
-                                     srcFile.string(), destFile.string(), GetLastError());
+                                     OSTPlatform::Encoding::PathToUtf8(srcFile),
+                                     OSTPlatform::Encoding::PathToUtf8(destFile), GetLastError());
                         }
                     }
                     break;
@@ -469,7 +502,7 @@ namespace {
                 if (ec) break;
                 if (!entry.is_regular_file(ec)) continue;
 
-                auto fn = entry.path().filename().string();
+                auto fn = OSTPlatform::Encoding::PathToUtf8(entry.path().filename());
                 // Expected format: <depotId>_<gid>.manifest
                 if (!fn.ends_with(".manifest")) continue;
 
@@ -625,6 +658,7 @@ void OnSpawnProcess(AppId_t appId, const char* pExePath, const char* cmdLine) {
     while (!exeSv.empty() && (exeSv.back() == '"' || exeSv.back() == '\'')) {
         exeSv.remove_suffix(1);
     }
+    exeSv = TrimWhitespace(exeSv);
     try {
         SyncOrGenerate(appId, std::string(exeSv), hasLuaArg);
     } catch (const std::exception& ex) {
@@ -635,13 +669,13 @@ void OnSpawnProcess(AppId_t appId, const char* pExePath, const char* cmdLine) {
 }
 
 bool IsDPlusLaunch(AppId_t appId) {
-    if (appId == 0) return false;
+    if (appId == 0 || appId == k_uAppIdInvalid) return false;
     std::lock_guard lock(g_dPlusMutex);
-    return g_dPlusLaunches.count(appId) > 0;
+    return g_dPlusLaunches.contains(appId);
 }
 
 void ClearDPlusLaunch(AppId_t appId) {
-    if (appId == 0) return;
+    if (appId == 0 || appId == k_uAppIdInvalid) return;
     std::lock_guard lock(g_dPlusMutex);
     g_dPlusLaunches.erase(appId);
 }
@@ -660,7 +694,7 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
     if (LuaDir[0] != '\0') {
         luaBaseDir = OSTPlatform::Encoding::PathFromUtf8(LuaDir);
     } else if (SteamInstallPath[0] != '\0') {
-        luaBaseDir = std::filesystem::path(OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath)) / "config" / "lua";
+        luaBaseDir = OSTPlatform::Encoding::PathFromUtf8(SteamInstallPath) / "config" / "lua";
     }
     if (luaBaseDir.empty()) {
         LOG_WARN("DenuvoSync: Lua directory undetermined");
@@ -689,7 +723,7 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
     AcfData acfData = ParseAcf(acfPath);
     LOG_INFO("DenuvoSync: parsed ACF depots: count={}", acfData.installedDepots.size());
     if (acfData.installedDepots.empty()) {
-        LOG_WARN("DenuvoSync: no installed depots found in {}", acfPath.string());
+        LOG_WARN("DenuvoSync: no installed depots found in {}", OSTPlatform::Encoding::PathToUtf8(acfPath));
         return false;
     }
 
@@ -699,7 +733,8 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
     bool ticketAlreadyWritten = false;
     {
         std::lock_guard fileLock(g_syncFileMutex);
-        if (!luaFileExists) {
+        const bool currentFileExists = std::filesystem::exists(luaFilePath, ec) && !ec;
+        if (!currentFileExists) {
             // ── Case 1: First-time generation (-lua / -d+) ────────────────────────
             LOG_INFO("DenuvoSync: generating new <AppId>.lua for appId={}", appId);
             std::vector<std::string> lines;
@@ -740,7 +775,7 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
             }
 
             if (!AtomicWriteLines(luaFilePath, lines)) {
-                LOG_ERROR("DenuvoSync: failed to write {}", luaFilePath.string());
+                LOG_ERROR("DenuvoSync: failed to write {}", OSTPlatform::Encoding::PathToUtf8(luaFilePath));
                 return false;
             }
             LuaConfig::ParseFile(OSTPlatform::Encoding::PathToUtf8(luaFilePath));
@@ -749,7 +784,7 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
             LOG_INFO("DenuvoSync: checking and updating existing <AppId>.lua for appId={}", appId);
             std::ifstream in(luaFilePath);
             if (!in.is_open()) {
-                LOG_ERROR("DenuvoSync: failed to read {}", luaFilePath.string());
+                LOG_ERROR("DenuvoSync: failed to read {}", OSTPlatform::Encoding::PathToUtf8(luaFilePath));
                 return false;
             }
 
@@ -815,12 +850,12 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
 
             if (manifestModified) {
                 if (!AtomicWriteLines(luaFilePath, lines)) {
-                    LOG_ERROR("DenuvoSync: failed to update {}", luaFilePath.string());
+                    LOG_ERROR("DenuvoSync: failed to update {}", OSTPlatform::Encoding::PathToUtf8(luaFilePath));
                     return false;
                 }
                 LuaConfig::ParseFile(OSTPlatform::Encoding::PathToUtf8(luaFilePath));
             } else {
-                LOG_DEBUG("DenuvoSync: manifests in {} are already up-to-date", luaFilePath.string());
+                LOG_DEBUG("DenuvoSync: manifests in {} are already up-to-date", OSTPlatform::Encoding::PathToUtf8(luaFilePath));
             }
         }
     }
@@ -846,7 +881,7 @@ bool SyncOrGenerate(AppId_t appId, const std::string& exePath, bool allowGenerat
 }
 
 bool SyncAppTicketToLua(AppId_t appId, const uint8_t* pTicketData, size_t ticketSize) {
-    if (appId == 0 || !pTicketData || ticketSize < AppTicket::kSteamIdTicketMinimumSize) {
+    if (appId == 0 || appId == k_uAppIdInvalid || !pTicketData || ticketSize < AppTicket::kSteamIdTicketMinimumSize) {
         return false;
     }
 
@@ -895,7 +930,7 @@ bool SyncAppTicketToLua(AppId_t appId, const uint8_t* pTicketData, size_t ticket
     std::lock_guard fileLock(g_syncFileMutex);
     std::ifstream in(luaPath);
     if (!in.is_open()) {
-        LOG_ERROR("DenuvoSync: failed to open Lua file {} for ticket update", luaPath.string());
+        LOG_ERROR("DenuvoSync: failed to open Lua file {} for ticket update", OSTPlatform::Encoding::PathToUtf8(luaPath));
         return false;
     }
 
@@ -945,10 +980,14 @@ bool SyncAppTicketToLua(AppId_t appId, const uint8_t* pTicketData, size_t ticket
 
         found = true;
 
-        size_t firstQuote = sv.find('"', comma);
-        size_t secondQuote = (firstQuote != std::string::npos) ? sv.find('"', firstQuote + 1) : std::string::npos;
+        size_t firstQuote = sv.find_first_of("\"'", comma);
+        size_t secondQuote = std::string_view::npos;
+        if (firstQuote != std::string_view::npos) {
+            const char quoteChar = sv[firstQuote];
+            secondQuote = sv.find(quoteChar, firstQuote + 1);
+        }
         std::string_view existingHex;
-        if (firstQuote != std::string::npos && secondQuote != std::string::npos && secondQuote > firstQuote) {
+        if (firstQuote != std::string_view::npos && secondQuote != std::string_view::npos && secondQuote > firstQuote) {
             existingHex = sv.substr(firstQuote + 1, secondQuote - firstQuote - 1);
         }
 
@@ -956,7 +995,7 @@ bool SyncAppTicketToLua(AppId_t appId, const uint8_t* pTicketData, size_t ticket
             lines[i] = std::format("setAppTicket({}, \"{}\")", appId, newHex);
             modified = true;
             LOG_INFO("DenuvoSync: {} setAppTicket for appId={} in {}",
-                     isComment ? "uncommented & updated" : "updated", appId, luaPath.string());
+                     isComment ? "uncommented & updated" : "updated", appId, OSTPlatform::Encoding::PathToUtf8(luaPath));
 
             if (i > 0) {
                 std::string prevLower = lines[i - 1];
@@ -978,12 +1017,12 @@ bool SyncAppTicketToLua(AppId_t appId, const uint8_t* pTicketData, size_t ticket
         lines.push_back("-- App Ownership Ticket (AppTicket)");
         lines.push_back(std::format("setAppTicket({}, \"{}\")", appId, newHex));
         modified = true;
-        LOG_INFO("DenuvoSync: appended setAppTicket for appId={} in {}", appId, luaPath.string());
+        LOG_INFO("DenuvoSync: appended setAppTicket for appId={} in {}", appId, OSTPlatform::Encoding::PathToUtf8(luaPath));
     }
 
     if (modified) {
         if (!AtomicWriteLines(luaPath, lines)) {
-            LOG_ERROR("DenuvoSync: failed to write updated Lua file {}", luaPath.string());
+            LOG_ERROR("DenuvoSync: failed to write updated Lua file {}", OSTPlatform::Encoding::PathToUtf8(luaPath));
             return false;
         }
         // Reload Lua config only when the file content was actually modified

@@ -1,13 +1,23 @@
 #include "Crypto.h"
+#include "I18n.h"
 #include "JsonHelper.h"
 #include "Log.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <bcrypt.h>
 #include <conio.h>
 #include <wincrypt.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <iostream>
+#include <limits>
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -27,7 +37,7 @@ SecureString::SecureString(std::string_view str) {
     m_data.assign(str);
 }
 
-SecureString::~SecureString() {
+SecureString::~SecureString() noexcept {
     Clear();
 }
 
@@ -45,12 +55,15 @@ SecureString& SecureString::operator=(const SecureString& other) {
     return *this;
 }
 
-SecureString::SecureString(SecureString&& other) noexcept : m_data(std::move(other.m_data)) {}
+SecureString::SecureString(SecureString&& other) noexcept : m_data(std::move(other.m_data)) {
+    other.Clear();
+}
 
 SecureString& SecureString::operator=(SecureString&& other) noexcept {
     if (this != &other) {
         Clear();
         m_data = std::move(other.m_data);
+        other.Clear();
     }
     return *this;
 }
@@ -62,6 +75,13 @@ void SecureString::Assign(std::string_view str) {
 }
 
 void SecureString::Append(char c) {
+    if (m_data.size() >= m_data.capacity()) {
+        std::string next;
+        next.reserve((std::max)(static_cast<size_t>(128), m_data.capacity() * 2));
+        next.assign(m_data);
+        Clear();
+        m_data = std::move(next);
+    }
     m_data.push_back(c);
 }
 
@@ -73,7 +93,7 @@ void SecureString::PopBack() {
     }
 }
 
-void SecureString::Clear() {
+void SecureString::Clear() noexcept {
     if (m_data.capacity() > 0) {
         SecureZeroMemory(m_data.data(), m_data.capacity());
         m_data.clear();
@@ -85,14 +105,19 @@ void SecureString::Clear() {
 // ============================================================================
 
 SecureString ReadPasswordFromConsole(const char* prompt) {
-    if (prompt && *prompt) {
-        std::cout << prompt;
+    std::string_view effectivePrompt = (prompt != nullptr) ? std::string_view(prompt) : TR(MsgKey::CliDefaultPasswordPrompt);
+    if (!effectivePrompt.empty()) {
+        std::cout << effectivePrompt;
         std::cout.flush();
     }
 
     SecureString pwd;
     while (true) {
         int ch = _getch();
+        if (ch == EOF) {
+            std::cout << "\n";
+            break;
+        }
         if (ch == '\r' || ch == '\n') {
             std::cout << "\n";
             break;
@@ -104,14 +129,17 @@ SecureString ReadPasswordFromConsole(const char* prompt) {
             }
         } else if (ch == 0 || ch == 0xE0) {
             // Extended keys (arrows, function keys) -> consume trailing byte
-            _getch();
+            if (_getch() == EOF) {
+                std::cout << "\n";
+                break;
+            }
         } else if (ch == 27) { // ESC
             pwd.Clear();
             std::cout << "\n";
             return pwd;
         } else if (ch == 3) { // Ctrl+C
             pwd.Clear();
-            std::cout << "\n[INFO] 用户中断输入。\n";
+            std::cout << "\n" << TR(MsgKey::CliInputInterrupted) << "\n";
             return pwd;
         } else if (ch >= 32 && ch <= 126) { // Printable characters
             pwd.Append(static_cast<char>(ch));
@@ -127,6 +155,9 @@ SecureString ReadPasswordFromConsole(const char* prompt) {
 // ============================================================================
 
 std::vector<uint8_t> HexToBytes(std::string_view hex) {
+    if (hex.empty() || (hex.size() % 2 != 0)) {
+        return {};
+    }
     std::vector<uint8_t> bytes;
     bytes.reserve(hex.size() / 2);
 
@@ -139,9 +170,10 @@ std::vector<uint8_t> HexToBytes(std::string_view hex) {
         };
         int high = hexCharVal(hex[i]);
         int low = hexCharVal(hex[i + 1]);
-        if (high >= 0 && low >= 0) {
-            bytes.push_back(static_cast<uint8_t>((high << 4) | low));
+        if (high < 0 || low < 0) {
+            return {};
         }
+        bytes.push_back(static_cast<uint8_t>((high << 4) | low));
     }
     return bytes;
 }
@@ -206,28 +238,53 @@ std::vector<uint8_t> Base64Decode(std::string_view base64) {
     return result;
 }
 
+namespace {
+    std::vector<uint8_t> DecodeJwtPayload(std::string_view jwt) {
+        constexpr size_t kMaxJwtLen = 16384;
+        if (jwt.empty() || jwt.size() > kMaxJwtLen) return {};
+
+        auto firstDot = jwt.find('.');
+        if (firstDot == std::string_view::npos) return {};
+        auto secondDot = jwt.find('.', firstDot + 1);
+        if (secondDot == std::string_view::npos || secondDot <= firstDot + 1) return {};
+
+        std::string_view payloadB64 = jwt.substr(firstDot + 1, secondDot - firstDot - 1);
+        std::string b64{payloadB64};
+        for (char& c : b64) {
+            if (c == '-') c = '+';
+            else if (c == '_') c = '/';
+        }
+        while (b64.size() % 4 != 0) {
+            b64.push_back('=');
+        }
+
+        auto decoded = Base64Decode(b64);
+        SecureWipeString(b64);
+        return decoded;
+    }
+} // namespace
+
 int64_t GetJwtExpiration(std::string_view jwt) {
-    auto firstDot = jwt.find('.');
-    if (firstDot == std::string_view::npos) return 0;
-    auto secondDot = jwt.find('.', firstDot + 1);
-    if (secondDot == std::string_view::npos) return 0;
-
-    std::string_view payloadB64 = jwt.substr(firstDot + 1, secondDot - firstDot - 1);
-    std::string b64{payloadB64};
-    for (char& c : b64) {
-        if (c == '-') c = '+';
-        else if (c == '_') c = '/';
-    }
-    while (b64.size() % 4 != 0) {
-        b64.push_back('=');
-    }
-
-    auto decoded = Base64Decode(b64);
+    auto decoded = DecodeJwtPayload(jwt);
     if (decoded.empty()) return 0;
 
     std::string_view jsonStr(reinterpret_cast<const char*>(decoded.data()), decoded.size());
     auto expOpt = JsonHelper::GetUInt64(jsonStr, "exp");
-    return expOpt.has_value() ? static_cast<int64_t>(*expOpt) : 0;
+    SecureZeroMemory(decoded.data(), decoded.size());
+    if (!expOpt.has_value() || *expOpt > static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) {
+        return 0;
+    }
+    return static_cast<int64_t>(*expOpt);
+}
+
+uint64_t GetJwtSteamId(std::string_view jwt) {
+    auto decoded = DecodeJwtPayload(jwt);
+    if (decoded.empty()) return 0;
+
+    std::string_view jsonStr(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+    auto subOpt = JsonHelper::GetUInt64(jsonStr, "sub");
+    SecureZeroMemory(decoded.data(), decoded.size());
+    return subOpt.value_or(0);
 }
 
 // ============================================================================
@@ -240,7 +297,7 @@ std::string EncryptPasswordWithRSA(
     std::string_view expHex) {
 
     if (password.Empty() || modHex.empty() || expHex.empty()) {
-        LOG_ERROR("Crypto", "RSA 加密入参为空 / Empty parameter for RSA encryption");
+        LOG_ERROR("Crypto", MsgKey::LogCryptoRsaEmptyParam);
         return {};
     }
 
@@ -248,20 +305,23 @@ std::string EncryptPasswordWithRSA(
     std::vector<uint8_t> expBytes = HexToBytes(expHex);
 
     if (modBytes.empty() || expBytes.empty()) {
-        LOG_ERROR("Crypto", "RSA 公钥 Modulus 或 Exponent 格式无效 / Invalid RSA modulus/exponent format");
+        LOG_ERROR("Crypto", MsgKey::LogCryptoRsaInvalidModExp);
         return {};
     }
 
     BCRYPT_ALG_HANDLE hAlg = nullptr;
     NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_RSA_ALGORITHM, nullptr, 0);
     if (status != 0 || !hAlg) {
-        LOG_ERROR("Crypto", "BCryptOpenAlgorithmProvider 失败 (status=0x{:08X})", static_cast<uint32_t>(status));
+        LOG_ERROR("Crypto", MsgKey::LogCryptoOpenAlgFailed, static_cast<uint32_t>(status));
         return {};
     }
 
     struct AlgGuard {
-        BCRYPT_ALG_HANDLE handle;
-        ~AlgGuard() { if (handle) BCryptCloseAlgorithmProvider(handle, 0); }
+        BCRYPT_ALG_HANDLE handle{nullptr};
+        explicit AlgGuard(BCRYPT_ALG_HANDLE h) noexcept : handle(h) {}
+        ~AlgGuard() noexcept { if (handle) BCryptCloseAlgorithmProvider(handle, 0); }
+        AlgGuard(const AlgGuard&) = delete;
+        AlgGuard& operator=(const AlgGuard&) = delete;
     } algGuard{hAlg};
 
     // Construct BCRYPT_RSAKEY_BLOB:
@@ -293,13 +353,16 @@ std::string EncryptPasswordWithRSA(
         0);
 
     if (status != 0 || !hKey) {
-        LOG_ERROR("Crypto", "BCryptImportKeyPair 失败 (status=0x{:08X})", static_cast<uint32_t>(status));
+        LOG_ERROR("Crypto", MsgKey::LogCryptoImportKeyFailed, static_cast<uint32_t>(status));
         return {};
     }
 
     struct KeyGuard {
-        BCRYPT_KEY_HANDLE handle;
-        ~KeyGuard() { if (handle) BCryptDestroyKey(handle); }
+        BCRYPT_KEY_HANDLE handle{nullptr};
+        explicit KeyGuard(BCRYPT_KEY_HANDLE h) noexcept : handle(h) {}
+        ~KeyGuard() noexcept { if (handle) BCryptDestroyKey(handle); }
+        KeyGuard(const KeyGuard&) = delete;
+        KeyGuard& operator=(const KeyGuard&) = delete;
     } keyGuard{hKey};
 
     // Encrypt password using PKCS#1 v1.5 padding (standard for Steam web authentication)
@@ -317,7 +380,7 @@ std::string EncryptPasswordWithRSA(
         BCRYPT_PAD_PKCS1);
 
     if (status != 0 || encryptedSize == 0) {
-        LOG_ERROR("Crypto", "BCryptEncrypt 测算大小失败 (status=0x{:08X})", static_cast<uint32_t>(status));
+        LOG_ERROR("Crypto", MsgKey::LogCryptoCalcSizeFailed, static_cast<uint32_t>(status));
         return {};
     }
 
@@ -336,12 +399,12 @@ std::string EncryptPasswordWithRSA(
         BCRYPT_PAD_PKCS1);
 
     if (status != 0) {
-        LOG_ERROR("Crypto", "BCryptEncrypt 加密执行失败 (status=0x{:08X})", static_cast<uint32_t>(status));
+        LOG_ERROR("Crypto", MsgKey::LogCryptoEncryptFailed, static_cast<uint32_t>(status));
         return {};
     }
 
     encryptedBytes.resize(actualWritten);
-    LOG_DEBUG("Crypto", "密码 RSA 加密成功，密文大小: {} 字节", actualWritten);
+    LOG_DEBUG("Crypto", MsgKey::LogCryptoRsaSuccess, actualWritten);
 
     return Base64Encode(encryptedBytes);
 }

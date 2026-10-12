@@ -1,11 +1,12 @@
 // xinput1_4.dll HiJack Project - Dynamic System Wrapper using ProxyBootstrap
 #include <windows.h>
+#include <atomic>
 #include <mutex>
 #include "../Common/ProxyBootstrap.hpp"
 
 // ─── 1. Real XInput Function Pointers ───────────────────────────
-static HMODULE g_hRealXInput = nullptr;
 static std::once_flag g_xinputInitOnce;
+static std::atomic<bool> g_xinputReady{false};
 
 using XInputGetState_t = DWORD(WINAPI*)(DWORD, void*);
 using XInputSetState_t = DWORD(WINAPI*)(DWORD, void*);
@@ -32,82 +33,88 @@ static FARPROC o_104 = nullptr;
 static FARPROC o_108 = nullptr;
 
 // ─── 2. Core Initialization (Binding to real System32 DLL via SystemDllLoader) ───
-void LoadRealXInput() noexcept {
+static void LoadRealXInput() noexcept {
     std::call_once(g_xinputInitOnce, []() noexcept {
-        g_hRealXInput = OST::Proxy::SystemDllLoader::Load(L"xinput1_4.dll");
-        if (g_hRealXInput) {
-            o_XInputGetState = reinterpret_cast<XInputGetState_t>(GetProcAddress(g_hRealXInput, "XInputGetState"));
-            o_XInputSetState = reinterpret_cast<XInputSetState_t>(GetProcAddress(g_hRealXInput, "XInputSetState"));
-            o_XInputGetCapabilities = reinterpret_cast<XInputGetCapabilities_t>(GetProcAddress(g_hRealXInput, "XInputGetCapabilities"));
-            o_XInputEnable = reinterpret_cast<XInputEnable_t>(GetProcAddress(g_hRealXInput, "XInputEnable"));
-            o_XInputGetAudioDeviceIds = reinterpret_cast<XInputGetAudioDeviceIds_t>(GetProcAddress(g_hRealXInput, "XInputGetAudioDeviceIds"));
-            o_XInputGetBatteryInformation = reinterpret_cast<XInputGetBatteryInformation_t>(GetProcAddress(g_hRealXInput, "XInputGetBatteryInformation"));
-            o_XInputGetKeystroke = reinterpret_cast<XInputGetKeystroke_t>(GetProcAddress(g_hRealXInput, "XInputGetKeystroke"));
+        if (const HMODULE hRealXInput = OST::Proxy::SystemDllLoader::Load(L"xinput1_4.dll")) {
+            o_XInputGetState = reinterpret_cast<XInputGetState_t>(GetProcAddress(hRealXInput, "XInputGetState"));
+            o_XInputSetState = reinterpret_cast<XInputSetState_t>(GetProcAddress(hRealXInput, "XInputSetState"));
+            o_XInputGetCapabilities = reinterpret_cast<XInputGetCapabilities_t>(GetProcAddress(hRealXInput, "XInputGetCapabilities"));
+            o_XInputEnable = reinterpret_cast<XInputEnable_t>(GetProcAddress(hRealXInput, "XInputEnable"));
+            o_XInputGetAudioDeviceIds = reinterpret_cast<XInputGetAudioDeviceIds_t>(GetProcAddress(hRealXInput, "XInputGetAudioDeviceIds"));
+            o_XInputGetBatteryInformation = reinterpret_cast<XInputGetBatteryInformation_t>(GetProcAddress(hRealXInput, "XInputGetBatteryInformation"));
+            o_XInputGetKeystroke = reinterpret_cast<XInputGetKeystroke_t>(GetProcAddress(hRealXInput, "XInputGetKeystroke"));
 
-            o_100 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(100));
-            o_101 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(101));
-            o_102 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(102));
-            o_103 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(103));
-            o_104 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(104));
-            o_108 = GetProcAddress(g_hRealXInput, reinterpret_cast<LPCSTR>(108));
+            o_100 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(100));
+            o_101 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(101));
+            o_102 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(102));
+            o_103 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(103));
+            o_104 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(104));
+            o_108 = GetProcAddress(hRealXInput, reinterpret_cast<LPCSTR>(108));
         }
+        g_xinputReady.store(true, std::memory_order_release);
     });
+}
+
+inline void EnsureRealXInputLoaded() noexcept {
+    if (!g_xinputReady.load(std::memory_order_acquire)) {
+        LoadRealXInput();
+    }
 }
 
 // ─── 3. Native Exports (Safely passing calls to the system DLL) ──
 extern "C" {
     DWORD WINAPI XInputGetState(DWORD dwUserIndex, void* pState) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputGetState ? o_XInputGetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputSetState(DWORD dwUserIndex, void* pVibration) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputSetState ? o_XInputSetState(dwUserIndex, pVibration) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputGetCapabilities(DWORD dwUserIndex, DWORD dwFlags, void* pCapabilities) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputGetCapabilities ? o_XInputGetCapabilities(dwUserIndex, dwFlags, pCapabilities) : ERROR_DEVICE_NOT_CONNECTED;
     }
     void WINAPI XInputEnable(BOOL enable) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         if (o_XInputEnable) o_XInputEnable(enable);
     }
     DWORD WINAPI XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId, UINT* pRenderCount, LPWSTR pCaptureDeviceId, UINT* pCaptureCount) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputGetAudioDeviceIds ? o_XInputGetAudioDeviceIds(dwUserIndex, pRenderDeviceId, pRenderCount, pCaptureDeviceId, pCaptureCount) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType, void* pBatteryInformation) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputGetBatteryInformation ? o_XInputGetBatteryInformation(dwUserIndex, devType, pBatteryInformation) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputGetKeystroke(DWORD dwUserIndex, DWORD dwReserved, void* pKeystroke) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_XInputGetKeystroke ? o_XInputGetKeystroke(dwUserIndex, dwReserved, pKeystroke) : ERROR_DEVICE_NOT_CONNECTED;
     }
 
     // Undocumented Ordinals
     DWORD WINAPI XInputOrdinal100(DWORD a1, void* a2) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_100 ? ((DWORD(WINAPI*)(DWORD, void*))o_100)(a1, a2) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputOrdinal101(DWORD a1, DWORD a2, void* a3) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_101 ? ((DWORD(WINAPI*)(DWORD, DWORD, void*))o_101)(a1, a2, a3) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputOrdinal102(DWORD a1) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_102 ? ((DWORD(WINAPI*)(DWORD))o_102)(a1) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputOrdinal103(DWORD a1) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_103 ? ((DWORD(WINAPI*)(DWORD))o_103)(a1) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputOrdinal104(DWORD a1, void* a2) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_104 ? ((DWORD(WINAPI*)(DWORD, void*))o_104)(a1, a2) : ERROR_DEVICE_NOT_CONNECTED;
     }
     DWORD WINAPI XInputOrdinal108(DWORD a1, void* a2, void* a3, void* a4, void* a5) {
-        if (!g_hRealXInput) LoadRealXInput();
+        EnsureRealXInputLoaded();
         return o_108 ? ((DWORD(WINAPI*)(DWORD, void*, void*, void*, void*))o_108)(a1, a2, a3, a4, a5) : ERROR_DEVICE_NOT_CONNECTED;
     }
 }
@@ -115,7 +122,6 @@ extern "C" {
 // ─── 4. DllMain with Unified ProxyBootstrap ───────────────────────
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID /*pvReserved*/) {
     if (dwReason == DLL_PROCESS_ATTACH) {
-        LoadRealXInput();
         return OST::Proxy::Bootstrap::OnAttach(hModule);
     }
     return TRUE;

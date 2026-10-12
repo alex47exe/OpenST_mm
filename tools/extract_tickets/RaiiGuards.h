@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -83,51 +86,17 @@ struct ScopedFileMappingView {
     explicit operator bool() const noexcept { return address != nullptr; }
 };
 
-// RAII wrapper for Windows HKEY
-struct ScopedHKey {
-    HKEY key{nullptr};
-
-    ScopedHKey() = default;
-    explicit ScopedHKey(HKEY k) noexcept : key(k) {}
-
-    ~ScopedHKey() noexcept {
-        if (key != nullptr) {
-            RegCloseKey(key);
-        }
-    }
-
-    ScopedHKey(const ScopedHKey&) = delete;
-    ScopedHKey& operator=(const ScopedHKey&) = delete;
-
-    ScopedHKey(ScopedHKey&& other) noexcept : key(other.key) {
-        other.key = nullptr;
-    }
-
-    ScopedHKey& operator=(ScopedHKey&& other) noexcept {
-        if (this != &other) {
-            if (key != nullptr) {
-                RegCloseKey(key);
-            }
-            key = other.key;
-            other.key = nullptr;
-        }
-        return *this;
-    }
-
-    operator HKEY() const noexcept { return key; }
-    [[nodiscard]] bool IsValid() const noexcept { return key != nullptr; }
-};
-
 // RAII guard for Steam client session, loaded module, and process environment
 struct SteamSessionGuard {
     ISteamClient* client{nullptr};
     HSteamPipe pipe{0};
     HSteamUser user{0};
     HMODULE module{nullptr};
+    bool ownsEnv{true};
 
     SteamSessionGuard() = default;
     SteamSessionGuard(ISteamClient* c, HSteamPipe p, HSteamUser u, HMODULE m) noexcept
-        : client(c), pipe(p), user(u), module(m) {}
+        : client(c), pipe(p), user(u), module(m), ownsEnv(true) {}
 
     ~SteamSessionGuard() noexcept {
         Reset();
@@ -137,11 +106,12 @@ struct SteamSessionGuard {
     SteamSessionGuard& operator=(const SteamSessionGuard&) = delete;
 
     SteamSessionGuard(SteamSessionGuard&& other) noexcept
-        : client(other.client), pipe(other.pipe), user(other.user), module(other.module) {
+        : client(other.client), pipe(other.pipe), user(other.user), module(other.module), ownsEnv(other.ownsEnv) {
         other.client = nullptr;
         other.pipe = 0;
         other.user = 0;
         other.module = nullptr;
+        other.ownsEnv = false;
     }
 
     SteamSessionGuard& operator=(SteamSessionGuard&& other) noexcept {
@@ -151,10 +121,12 @@ struct SteamSessionGuard {
             pipe = other.pipe;
             user = other.user;
             module = other.module;
+            ownsEnv = other.ownsEnv;
             other.client = nullptr;
             other.pipe = 0;
             other.user = 0;
             other.module = nullptr;
+            other.ownsEnv = false;
         }
         return *this;
     }
@@ -176,11 +148,14 @@ struct SteamSessionGuard {
             module = nullptr;
             SetDllDirectoryW(nullptr);
         }
-        // Clear spoofed Steam environment variables
-        SetEnvironmentVariableA("SteamAppId", nullptr);
-        SetEnvironmentVariableA("SteamGameId", nullptr);
-        SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
-        SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
+        if (ownsEnv) {
+            // Clear spoofed Steam environment variables
+            SetEnvironmentVariableA("SteamAppId", nullptr);
+            SetEnvironmentVariableA("SteamGameId", nullptr);
+            SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
+            SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
+            ownsEnv = false;
+        }
     }
 };
 
@@ -189,16 +164,20 @@ struct ConsoleCodePageGuard {
     UINT oldOutputCP{0};
     UINT oldCP{0};
 
-    ConsoleCodePageGuard() {
+    ConsoleCodePageGuard() noexcept {
         oldOutputCP = GetConsoleOutputCP();
         oldCP = GetConsoleCP();
         SetConsoleOutputCP(CP_UTF8);
         SetConsoleCP(CP_UTF8);
     }
 
-    ~ConsoleCodePageGuard() {
-        SetConsoleOutputCP(oldOutputCP);
-        SetConsoleCP(oldCP);
+    ~ConsoleCodePageGuard() noexcept {
+        if (oldOutputCP != 0) {
+            SetConsoleOutputCP(oldOutputCP);
+        }
+        if (oldCP != 0) {
+            SetConsoleCP(oldCP);
+        }
     }
 
     ConsoleCodePageGuard(const ConsoleCodePageGuard&) = delete;

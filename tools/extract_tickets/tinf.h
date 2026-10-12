@@ -46,20 +46,13 @@ extern "C" {
 /**
  * Status codes returned.
  *
- * @see tinf_uncompress, tinf_gzip_uncompress, tinf_zlib_uncompress
+ * @see tinf_uncompress, tinf_gzip_uncompress
  */
 typedef enum {
 	TINF_OK         = 0,  /**< Success */
 	TINF_DATA_ERROR = -3, /**< Input error */
 	TINF_BUF_ERROR  = -5  /**< Not enough room for output */
 } tinf_error_code;
-
-/**
- * Initialize global data used by tinf.
- *
- * @deprecated No longer required, may be removed in a future version.
- */
-void TINFCC tinf_init(void);
 
 /**
  * Decompress `sourceLen` bytes of deflate data from `source` to `dest`.
@@ -96,33 +89,6 @@ int TINFCC tinf_uncompress(void *dest, unsigned int *destLen,
  */
 int TINFCC tinf_gzip_uncompress(void *dest, unsigned int *destLen,
                                 const void *source, unsigned int sourceLen);
-
-/**
- * Decompress `sourceLen` bytes of zlib data from `source` to `dest`.
- *
- * The variable `destLen` points to must contain the size of `dest` on entry,
- * and will be set to the size of the decompressed data on success.
- *
- * Reads at most `sourceLen` bytes from `source`.
- * Writes at most `*destLen` bytes to `dest`.
- *
- * @param dest pointer to where to place decompressed data
- * @param destLen pointer to variable containing size of `dest`
- * @param source pointer to compressed data
- * @param sourceLen size of compressed data
- * @return `TINF_OK` on success, error code on error
- */
-int TINFCC tinf_zlib_uncompress(void *dest, unsigned int *destLen,
-                                const void *source, unsigned int sourceLen);
-
-/**
- * Compute Adler-32 checksum of `length` bytes starting at `data`.
- *
- * @param data pointer to data
- * @param length size of data
- * @return Adler-32 checksum
- */
-unsigned int TINFCC tinf_adler32(const void *data, unsigned int length);
 
 /**
  * Compute CRC32 checksum of `length` bytes starting at `data`.

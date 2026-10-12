@@ -3,7 +3,6 @@
 #include "I18n.h"
 #include "Utils.h"
 
-#include <conio.h>
 #include <algorithm>
 #include <chrono>
 #include <format>
@@ -185,8 +184,8 @@ bool TuiEngine::EnsureMinTerminalSize(int minW, int minH) {
         ClearScreen();
         int midY = (std::max)(1, h / 2 - 1);
         MoveCursor(midY, 1);
-        std::string warn1 = std::format("[!] 终端窗口尺寸过小 (当前: {}x{}, 推荐最低: {}x{})", w, h, minW, minH);
-        std::string warn2 = "请拉大终端窗口以恢复界面显示... (Please enlarge terminal window)";
+        std::string warn1 = TR_FMT(MsgKey::TermTooSmallWarn1, w, h, minW, minH);
+        std::string warn2{TR(MsgKey::TermTooSmallWarn2)};
         const size_t safeW = static_cast<size_t>(w > 1 ? w - 1 : 1);
         std::cout << "\x1b[1;33m" << Pad(warn1, safeW, true) << "\x1b[0m";
         MoveCursor(midY + 1, 1);
@@ -198,26 +197,45 @@ bool TuiEngine::EnsureMinTerminalSize(int minW, int minH) {
 }
 
 namespace {
+    struct ClipboardScopeGuard {
+        bool open{false};
+        explicit ClipboardScopeGuard(HWND hwnd = nullptr) noexcept : open(OpenClipboard(hwnd) != FALSE) {}
+        ~ClipboardScopeGuard() noexcept {
+            if (open) {
+                CloseClipboard();
+            }
+        }
+        [[nodiscard]] explicit operator bool() const noexcept { return open; }
+    };
+
+    struct GlobalLockScopeGuard {
+        HGLOBAL hMem{nullptr};
+        const wchar_t* ptr{nullptr};
+        explicit GlobalLockScopeGuard(HGLOBAL h) noexcept
+            : hMem(h), ptr(h ? static_cast<const wchar_t*>(GlobalLock(h)) : nullptr) {}
+        ~GlobalLockScopeGuard() noexcept {
+            if (hMem && ptr) {
+                GlobalUnlock(hMem);
+            }
+        }
+        [[nodiscard]] const wchar_t* Get() const noexcept { return ptr; }
+        [[nodiscard]] explicit operator bool() const noexcept { return ptr != nullptr; }
+    };
+
     std::string GetClipboardTextUtf8() {
-        if (!OpenClipboard(nullptr)) return "";
+        ClipboardScopeGuard clipGuard;
+        if (!clipGuard) return "";
         HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-        if (!hData) {
-            CloseClipboard();
-            return "";
-        }
-        const wchar_t* wstr = static_cast<const wchar_t*>(GlobalLock(hData));
-        if (!wstr) {
-            CloseClipboard();
-            return "";
-        }
+        if (!hData) return "";
+        GlobalLockScopeGuard lockGuard(hData);
+        if (!lockGuard) return "";
+        const wchar_t* wstr = lockGuard.Get();
         int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
         std::string result;
         if (len > 1) {
             result.resize(len - 1);
             WideCharToMultiByte(CP_UTF8, 0, wstr, -1, result.data(), len, nullptr, nullptr);
         }
-        GlobalUnlock(hData);
-        CloseClipboard();
         std::string clean;
         clean.reserve(result.size());
         for (char c : result) {
@@ -556,7 +574,7 @@ bool TuiEngine::ShowConfirmModal(std::string_view title,
     if (!g_tuiActive) {
         std::cout << "\n[" << title << "] " << question;
         if (!detail.empty()) std::cout << "\n" << detail;
-        std::cout << "\n确认? [" << (defaultYes ? "Y/n" : "y/N") << "]: ";
+        std::cout << "\n" << TR_FMT(MsgKey::CliConfirmPrompt, defaultYes ? "Y/n" : "y/N");
         std::cout.flush();
         std::string s;
         if (std::getline(std::cin, s)) {
@@ -657,7 +675,7 @@ bool TuiEngine::ShowMessageModal(std::string_view title,
     if (!g_tuiActive) {
         std::cout << "\n[" << title << "] " << message;
         if (!detail.empty()) std::cout << "\n" << detail;
-        std::cout << "\n按 Enter 键继续...";
+        std::cout << "\n" << TR(MsgKey::CliPressEnterContinue);
         std::cout.flush();
         std::string s;
         std::getline(std::cin, s);
@@ -721,7 +739,10 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
         if (isPassword) {
             std::string promptStr = std::string(prompt);
             SecureString pwd = ReadPasswordFromConsole(promptStr.c_str());
-            return pwd.Empty() ? std::nullopt : std::optional<std::string>(std::string(pwd.Data()));
+            if (pwd.Empty()) return std::nullopt;
+            std::string result(pwd.Data());
+            pwd.Clear();
+            return result;
         }
         std::cout << "\n" << prompt;
         if (!defaultValue.empty()) {
@@ -765,6 +786,16 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
     OutputToTerminal(std::format("\x1b[90m{}\x1b[0m", TR(MsgKey::HintInputEnterEsc)));
 
     std::string value{defaultValue};
+    struct PasswordWiper {
+        std::string& s;
+        bool isPwd;
+        ~PasswordWiper() noexcept {
+            if (isPwd) {
+                SecureWipeString(s);
+            }
+        }
+    } wiper{value, isPassword};
+
     const int inputTop = top + 4;
     const int inputLeft = left + 4;
     const int inputWidth = modalW - 8;
@@ -786,16 +817,16 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
 
         KeyEvent ev = ReadKey();
         if (ev.code == KeyCode::Escape) {
-            if (isPassword && !value.empty()) {
-                SecureZeroMemory(value.data(), value.size());
+            if (isPassword) {
+                SecureWipeString(value);
             }
             FlushInputBuffer();
             return std::nullopt;
         }
         if (ev.code == KeyCode::Enter && !HasInputPending()) {
-            std::string result = std::move(value);
-            if (isPassword && !value.empty()) {
-                SecureZeroMemory(value.data(), value.size());
+            std::string result = value;
+            if (isPassword) {
+                SecureWipeString(value);
             }
             FlushInputBuffer();
             return result;
@@ -831,15 +862,15 @@ std::optional<std::string> TuiEngine::PromptInputModal(std::string_view title,
                     if (!chunk.empty() && value.size() + chunk.size() <= 256) {
                         value += chunk;
                     }
-                    std::string result = std::move(value);
-                    if (isPassword && !value.empty()) {
-                        SecureZeroMemory(value.data(), value.size());
+                    std::string result = value;
+                    if (isPassword) {
+                        SecureWipeString(value);
                     }
                     FlushInputBuffer();
                     return result;
                 } else if (nextEv.code == KeyCode::Escape) {
-                    if (isPassword && !value.empty()) {
-                        SecureZeroMemory(value.data(), value.size());
+                    if (isPassword) {
+                        SecureWipeString(value);
                     }
                     FlushInputBuffer();
                     return std::nullopt;

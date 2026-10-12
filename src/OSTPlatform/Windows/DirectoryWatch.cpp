@@ -43,9 +43,9 @@ struct Watch::Impl {
     void Close() {
         if (dir) {
             if (readPending) {
-                CancelIo(dir.get());
+                ::CancelIoEx(dir.get(), &overlapped);
                 DWORD dummy = 0;
-                GetOverlappedResult(dir.get(), &overlapped, &dummy, TRUE);
+                ::GetOverlappedResult(dir.get(), &overlapped, &dummy, TRUE);
             }
         }
         dir.Reset();
@@ -144,6 +144,7 @@ std::vector<Change> Watch::Drain() {
 
     impl_->readPending = false;
     if (bytesReturned == 0) {
+        OSTP_LOG_WARN("DirectoryWatch: buffer overflow or zero bytes returned for '{}'", impl_->directory);
         return changes;
     }
     const char* bufStart = impl_->buffer.data();
@@ -198,7 +199,10 @@ WaitResult WaitAny(std::span<Watch*> watches, uint32_t timeoutMs) {
         originalIndexes.push_back(i);
     }
 
-    if (events.empty()) {
+    if (events.empty() || events.size() > MAXIMUM_WAIT_OBJECTS) {
+        if (events.size() > MAXIMUM_WAIT_OBJECTS) {
+            OSTP_LOG_WARN("DirectoryWatch::WaitAny: events count {} exceeds MAXIMUM_WAIT_OBJECTS (64)", events.size());
+        }
         return {WaitStatus::Failed, 0};
     }
 

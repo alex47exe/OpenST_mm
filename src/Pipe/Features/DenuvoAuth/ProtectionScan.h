@@ -19,7 +19,15 @@ namespace PipeManager::DenuvoAuth {
         ProtectedBlobSection,
     };
 
-    const char* ToString(DetectionMethod method);
+    [[nodiscard]] constexpr const char* ToString(DetectionMethod method) noexcept {
+        switch (method) {
+        case DetectionMethod::None:                 return "None";
+        case DetectionMethod::LegacySectionString:  return "LegacySectionString";
+        case DetectionMethod::OepPattern:           return "OepPattern";
+        case DetectionMethod::ProtectedBlobSection: return "ProtectedBlobSection";
+        }
+        return "Unknown";
+    }
 
     struct ProtectionScanReport {
         bool denuvoDetected = false;
@@ -34,7 +42,9 @@ namespace PipeManager::DenuvoAuth {
         size_t scannedModules = 0;
         double elapsedMs = 0.0;
 
-        std::string DebugString() const {
+        bool operator==(const ProtectionScanReport&) const = default;
+
+        [[nodiscard]] std::string DebugString() const {
             return std::format(
                 "[pid={}] denuvoDetected={} method={} module={} section={} moduleSize={} entryPointRva=0x{:X} matchRva=0x{:X} matchRaw=0x{:X} scannedModules={} elapsedMs={:.3f}",
                 pid,
@@ -51,7 +61,7 @@ namespace PipeManager::DenuvoAuth {
         }
     };
 
-    ProtectionScanReport ScanProtection(PID_t pid);
-    bool IsDenuvoPath(const std::filesystem::path& exePath);
+    [[nodiscard]] ProtectionScanReport ScanProtection(PID_t pid);
+    [[nodiscard]] bool IsDenuvoPath(const std::filesystem::path& exePath);
 
 } // namespace PipeManager::DenuvoAuth

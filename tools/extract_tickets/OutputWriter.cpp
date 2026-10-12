@@ -18,6 +18,7 @@ std::string TicketLine(const char* name, const std::optional<std::vector<uint8_t
     if (!ticket || ticket->empty()) return std::format("{}:null\n", name);
     return std::format("{}({}bytes):{}\n", name, ticket->size(), ToHexString(*ticket));
 }
+
 } // namespace
 
 bool WriteOutputs(uint32_t appId,
@@ -35,7 +36,7 @@ bool WriteOutputs(uint32_t appId,
         if (!TuiEngine::IsActive()) {
             std::cerr << TR_FMT(MsgKey::OutCreateDirFailed, dir, ec.message()) << "\n";
         }
-        LOG_ERROR("OutputWriter", "创建输出目录失败: {} ({})", dir, ec.message());
+        LOG_ERROR("OutputWriter", MsgKey::LogOutCreateDirFailed, dir, ec.message());
         return false;
     }
 
@@ -49,7 +50,7 @@ bool WriteOutputs(uint32_t appId,
     for (const auto& dk : depotKeys) {
         if (!dk.manifestFilePath.empty()) {
             std::filesystem::path srcPath = Utf8Path(dk.manifestFilePath);
-            std::string fname = srcPath.filename().string();
+            std::string fname = PathToUtf8(srcPath.filename());
             if (std::ranges::find(copiedManifests, fname) == copiedManifests.end()) {
                 std::filesystem::path destPath = dirPath / fname;
                 std::error_code copyEc;
@@ -62,9 +63,9 @@ bool WriteOutputs(uint32_t appId,
                         copiedManifests.push_back(fname);
                     } else {
                         if (!TuiEngine::IsActive()) {
-                            std::cerr << "[WARN] Failed to copy manifest " << fname << ": " << copyEc.message() << "\n";
+                            std::cerr << TR_FMT(MsgKey::OutCopyManifestFailed, fname, copyEc.message()) << "\n";
                         }
-                        LOG_WARN("OutputWriter", "复制清单文件失败: {} ({})", fname, copyEc.message());
+                        LOG_WARN("OutputWriter", MsgKey::LogOutCopyManifestFailed, fname, copyEc.message());
                     }
                 }
             }
@@ -123,12 +124,12 @@ bool WriteOutputs(uint32_t appId,
     text += TicketLine("eticket", encrypted);
 
     const std::filesystem::path textPath = dirPath / "tickets.txt";
-    std::ofstream summary{textPath, std::ios::trunc};
-    if (!summary || !(summary << text)) {
+    if (!WriteTextFileAtomic(textPath, text, false)) {
+        const std::string textPathUtf8 = PathToUtf8(textPath);
         if (!TuiEngine::IsActive()) {
-            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, textPath.string()) << "\n";
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, textPathUtf8) << "\n";
         }
-        LOG_ERROR("OutputWriter", "写入 tickets.txt 失败: {}", textPath.string());
+        LOG_ERROR("OutputWriter", MsgKey::LogOutWriteTicketsTxtFailed, textPathUtf8);
         return false;
     }
 
@@ -365,23 +366,25 @@ bool WriteOutputs(uint32_t appId,
     }
 
     const std::filesystem::path luaPath = dirPath / (std::to_string(appId) + ".lua");
-    std::ofstream luaFile{luaPath, std::ios::binary | std::ios::trunc};
-    if (!luaFile || !(luaFile << luaText)) {
+    if (!WriteTextFileAtomic(luaPath, luaText, true)) {
+        const std::string luaPathUtf8 = PathToUtf8(luaPath);
         if (!TuiEngine::IsActive()) {
-            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, luaPath.string()) << "\n";
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, luaPathUtf8) << "\n";
         }
-        LOG_ERROR("OutputWriter", "写入 Lua 脚本失败: {}", luaPath.string());
+        LOG_ERROR("OutputWriter", MsgKey::LogOutWriteLuaFailed, luaPathUtf8);
         ok = false;
     }
 
+    const std::string luaPathUtf8 = PathToUtf8(luaPath);
+
     if (!TuiEngine::IsActive()) {
-        std::cout << "Wrote " << dir << "\\ (" << std::to_string(appId) << ".lua, tickets.txt";
-        if (ownership && !ownership->empty()) std::cout << ", appticket.bin";
-        if (encrypted && !encrypted->empty()) std::cout << ", eticket.bin";
+        std::string fileList = std::to_string(appId) + ".lua, tickets.txt";
+        if (ownership && !ownership->empty()) fileList += ", appticket.bin";
+        if (encrypted && !encrypted->empty()) fileList += ", eticket.bin";
         for (const auto& mName : copiedManifests) {
-            std::cout << ", " << mName;
+            fileList += ", " + mName;
         }
-        std::cout << ")\n";
+        std::cout << TR_FMT(MsgKey::OutWroteSummary, dir, fileList) << "\n";
 
         if (!dlcs.empty()) {
             std::cout << TR_FMT(MsgKey::OutExtractedDlcs, dlcs.size()) << "\n";
@@ -431,15 +434,15 @@ bool WriteOutputs(uint32_t appId,
             std::cout << TR_FMT(MsgKey::OutNoAccessTokenLocal, appId) << "\n";
         }
 
-        std::cout << TR_FMT(MsgKey::OutConfigSaved, luaPath.string()) << "\n";
+        std::cout << TR_FMT(MsgKey::OutConfigSaved, luaPathUtf8) << "\n";
     }
 
     const size_t keyCount = std::count_if(depotKeys.begin(), depotKeys.end(), [](const DepotKeyInfo& dk) {
         return !dk.hexKey.empty();
     });
-    LOG_INFO("OutputWriter", "输出文件已写入: {}/ (DLCs={}, DepotKeys={}, Manifests={}, Tokens={})",
+    LOG_INFO("OutputWriter", MsgKey::LogOutFilesWritten,
              dir, dlcs.size(), keyCount, copiedManifests.size(), relevantTokens.size());
-    LOG_INFO("OutputWriter", "Lua 配置文件已保存至: {}", luaPath.string());
+    LOG_INFO("OutputWriter", MsgKey::LogOutLuaSaved, luaPathUtf8);
     return ok;
 }
 

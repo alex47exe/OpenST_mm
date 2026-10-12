@@ -15,15 +15,17 @@
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
-#include <cwctype>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <queue>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -216,11 +218,36 @@ namespace
     CAPTURE_THIS_FUNC(GetAppByID, CSteamApp*, g_pController,void* pThis, AppId_t appId, bool bCreate);
     CAPTURE_THIS_FUNC(MarkAppChange,void*,g_pAppChangeSource,void* pThis,AppId_t appId, EAppChangeFlags changeFlags);
 
+    template <typename T>
+    class NoDestructor final {
+        alignas(T) std::byte m_storage[sizeof(T)];
+
+    public:
+        template <typename... Args>
+        explicit NoDestructor(Args&&... args) {
+            std::construct_at(reinterpret_cast<T*>(m_storage), std::forward<Args>(args)...);
+        }
+
+        ~NoDestructor() = default;
+
+        NoDestructor(const NoDestructor&) = delete;
+        NoDestructor& operator=(const NoDestructor&) = delete;
+        NoDestructor(NoDestructor&&) = delete;
+        NoDestructor& operator=(NoDestructor&&) = delete;
+
+        [[nodiscard]] T* get() noexcept { return std::launder(reinterpret_cast<T*>(m_storage)); }
+        [[nodiscard]] const T* get() const noexcept { return std::launder(reinterpret_cast<const T*>(m_storage)); }
+        [[nodiscard]] T& operator*() noexcept { return *get(); }
+        [[nodiscard]] const T& operator*() const noexcept { return *get(); }
+        [[nodiscard]] T* operator->() noexcept { return get(); }
+        [[nodiscard]] const T* operator->() const noexcept { return get(); }
+    };
+
     // Apps to drop from or restore to the library UI
     std::mutex g_removalMutex;
-    std::vector<AppId_t> g_pendingRemovals;
-    std::vector<AppId_t> g_pendingAdditions;
-    std::unordered_set<AppId_t> g_removedAppIds;
+    NoDestructor<std::vector<AppId_t>> g_pendingRemovals;
+    NoDestructor<std::vector<AppId_t>> g_pendingAdditions;
+    NoDestructor<std::unordered_set<AppId_t>> g_removedAppIds;
     std::atomic<bool> g_hasRemovedAppIds{false};
 
     constexpr uint32_t k_EAppStateUpdatingMask =
@@ -253,11 +280,11 @@ namespace
     };
 
     // UI-thread confined state (RunFrame only; zero synchronization locks required)
-    static std::unordered_map<AppId_t, AppStateEntry> g_trackedStates;
-    static std::vector<AppId_t> g_activeUpdatingApps;
+    static NoDestructor<std::unordered_map<AppId_t, AppStateEntry>> g_trackedStates;
+    static NoDestructor<std::vector<AppId_t>> g_activeUpdatingApps;
 
     // Cross-thread synchronization state (between UI thread RunFrame and AutoSyncWorkerPool)
-    static std::unordered_set<AppId_t> g_inFlightSyncs;
+    static NoDestructor<std::unordered_set<AppId_t>> g_inFlightSyncs;
     static std::mutex g_inFlightMutex;
 
     class AutoSyncWorkerPool {
@@ -290,7 +317,7 @@ namespace
                     AppId_t id;
                     ~InFlightGuard() {
                         std::lock_guard<std::mutex> lock(g_inFlightMutex);
-                        g_inFlightSyncs.erase(id);
+                        g_inFlightSyncs->erase(id);
                     }
                 } guard{appId};
 
@@ -357,7 +384,7 @@ namespace
             }
             {
                 std::lock_guard<std::mutex> inFlightLock(g_inFlightMutex);
-                g_inFlightSyncs.clear();
+                g_inFlightSyncs->clear();
             }
         }
 
@@ -377,12 +404,11 @@ namespace
             return true;
         }
     };
-    static AutoSyncWorkerPool g_autoSyncWorkerPool;
+    static NoDestructor<AutoSyncWorkerPool> g_autoSyncWorkerPool;
 
-    // Snapshot of installed + configured app IDs shared atomically between scanner and UI thread
-    static std::atomic<std::shared_ptr<const std::vector<AppId_t>>> s_installedSnapshot{
-        std::make_shared<const std::vector<AppId_t>>()
-    };
+    // Snapshot of installed + configured app IDs shared between scanner and UI thread
+    static std::mutex g_installedMutex;
+    static NoDestructor<std::shared_ptr<const std::vector<AppId_t>>> g_installedSnapshot;
 
     // Robust quote-aware comment stripper for VDF files (preserves // or # inside quotes)
     static std::string_view StripVdfComments(std::string_view sv) {
@@ -523,8 +549,10 @@ namespace
                 }
             }
 
-            s_installedSnapshot.store(
-                std::make_shared<const std::vector<AppId_t>>(std::move(filteredInstalled)));
+            {
+                std::lock_guard<std::mutex> lock(g_installedMutex);
+                *g_installedSnapshot = std::make_shared<const std::vector<AppId_t>>(std::move(filteredInstalled));
+            }
         } catch (const std::exception& ex) {
             LOG_STEAMUI_DEBUG("ScanInstalledAppIds: exception: {}", ex.what());
         } catch (...) {
@@ -585,7 +613,7 @@ namespace
             m_cv.notify_one();
         }
     };
-    static InstalledScannerPool g_installedScannerPool;
+    static NoDestructor<InstalledScannerPool> g_installedScannerPool;
 
     constexpr size_t k_SliceBatchSize = 64;
     static size_t s_timeSliceCursor = 0;
@@ -603,27 +631,27 @@ namespace
                 bool inserted = false;
                 {
                     std::lock_guard<std::mutex> lock(g_inFlightMutex);
-                    inserted = g_inFlightSyncs.insert(id).second;
+                    inserted = g_inFlightSyncs->insert(id).second;
                 }
                 if (inserted) {
                     try {
-                        if (!g_autoSyncWorkerPool.Enqueue(id)) {
+                        if (!g_autoSyncWorkerPool->Enqueue(id)) {
                             std::lock_guard<std::mutex> lock(g_inFlightMutex);
-                            g_inFlightSyncs.erase(id);
+                            g_inFlightSyncs->erase(id);
                         }
                     } catch (...) {
                         std::lock_guard<std::mutex> lock(g_inFlightMutex);
-                        g_inFlightSyncs.erase(id);
+                        g_inFlightSyncs->erase(id);
                     }
                 }
             };
 
             // ── 通道一：活跃传输集检查（通常仅 0~1 款下载中游戏）──
-            for (auto it = g_activeUpdatingApps.begin(); it != g_activeUpdatingApps.end(); ) {
+            for (auto it = g_activeUpdatingApps->begin(); it != g_activeUpdatingApps->end(); ) {
                 AppId_t appId = *it;
                 CSteamApp* pApp = oGetAppByID(pCtrl, appId, false);
                 if (!pApp) {
-                    it = g_activeUpdatingApps.erase(it);
+                    it = g_activeUpdatingApps->erase(it);
                     continue;
                 }
 
@@ -632,21 +660,25 @@ namespace
                                                  ((currentState & k_EAppStateFullyInstalled) != 0);
 
                 if (isNowFullyInstalled) {
-                    g_trackedStates[appId].stateFlags = currentState;
-                    g_trackedStates[appId].changeNumber = pApp->ChangeNumber;
+                    (*g_trackedStates)[appId].stateFlags = currentState;
+                    (*g_trackedStates)[appId].changeNumber = pApp->ChangeNumber;
                     safeEnqueue(appId);
-                    it = g_activeUpdatingApps.erase(it);
+                    it = g_activeUpdatingApps->erase(it);
                 } else if ((currentState & k_EAppStateActiveTransferMask) == 0) {
-                    g_trackedStates[appId].stateFlags = currentState;
-                    it = g_activeUpdatingApps.erase(it);
+                    (*g_trackedStates)[appId].stateFlags = currentState;
+                    it = g_activeUpdatingApps->erase(it);
                 } else {
-                    g_trackedStates[appId].stateFlags = currentState;
+                    (*g_trackedStates)[appId].stateFlags = currentState;
                     ++it;
                 }
             }
 
             // ── 通道二：时间片平摊步进（单帧固定 64 个轻量级已安装游戏探针）──
-            auto installedSnapshot = s_installedSnapshot.load(std::memory_order_relaxed);
+            std::shared_ptr<const std::vector<AppId_t>> installedSnapshot;
+            {
+                std::lock_guard<std::mutex> lock(g_installedMutex);
+                installedSnapshot = *g_installedSnapshot;
+            }
             if (!installedSnapshot || installedSnapshot->empty()) {
                 return;
             }
@@ -669,12 +701,12 @@ namespace
                 const uint32_t currentState = static_cast<uint32_t>(pApp->AppStateFlags);
                 const uint32_t currentChangeNum = pApp->ChangeNumber;
 
-                auto entryIt = g_trackedStates.find(appId);
-                if (entryIt == g_trackedStates.end()) {
-                    g_trackedStates[appId] = { currentState, currentChangeNum };
+                auto entryIt = g_trackedStates->find(appId);
+                if (entryIt == g_trackedStates->end()) {
+                    (*g_trackedStates)[appId] = { currentState, currentChangeNum };
                     if ((currentState & k_EAppStateActiveTransferMask) != 0) {
-                        if (std::ranges::find(g_activeUpdatingApps, appId) == g_activeUpdatingApps.end()) {
-                            g_activeUpdatingApps.push_back(appId);
+                        if (std::ranges::find(*g_activeUpdatingApps, appId) == g_activeUpdatingApps->end()) {
+                            g_activeUpdatingApps->push_back(appId);
                         }
                     }
                     continue;
@@ -691,7 +723,7 @@ namespace
                 // 判定 1：常规状态机跳变完成
                 if (wasUpdating && isNowFullyInstalled) {
                     entryIt->second = { currentState, currentChangeNum };
-                    std::erase(g_activeUpdatingApps, appId);
+                    std::erase(*g_activeUpdatingApps, appId);
                     safeEnqueue(appId);
                 }
                 // 判定 2：秒级小补丁/错失 Updating 的版本号跃迁自愈兜底
@@ -707,14 +739,14 @@ namespace
                         entryIt->second = { currentState, currentChangeNum };
                     } else {
                         entryIt->second = { currentState, currentChangeNum };
-                        std::erase(g_activeUpdatingApps, appId);
+                        std::erase(*g_activeUpdatingApps, appId);
                         safeEnqueue(appId);
                     }
                 }
                 // 判定 3：捕获到游戏开始活跃传输，晋升至通道一以享受每帧直达监控
                 else if ((currentState & k_EAppStateActiveTransferMask) != 0) {
-                    if (std::ranges::find(g_activeUpdatingApps, appId) == g_activeUpdatingApps.end()) {
-                        g_activeUpdatingApps.push_back(appId);
+                    if (std::ranges::find(*g_activeUpdatingApps, appId) == g_activeUpdatingApps->end()) {
+                        g_activeUpdatingApps->push_back(appId);
                     }
                     entryIt->second.stateFlags = currentState;
                 } else if (currentState != lastState) {
@@ -739,10 +771,14 @@ namespace
 
             if (LuaConfig::HasDepot(pApp->nAppID, false))
             {
-                if (pApp->OwnershipFlags == k_EAppOwnershipFlags_None)
+                constexpr uint32_t kActiveLicenseMask =
+                    k_EAppOwnershipFlags_OwnsLicense |
+                    k_EAppOwnershipFlags_FreeLicense |
+                    k_EAppOwnershipFlags_SharedLicense;
+                if ((pApp->OwnershipFlags & kActiveLicenseMask) == 0)
                 {
                     pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
-                        k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        pApp->OwnershipFlags | k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
                 }
                 uint32_t t = LuaConfig::GetPurchaseTime(pApp->nAppID);
                 if (t)
@@ -775,14 +811,14 @@ namespace
         if (!g_hasRemovedAppIds.load(std::memory_order_acquire))
             return;
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        if (pChange && !g_removedAppIds.empty() && oRepeatedFieldUint32_Add)
+        if (pChange && !g_removedAppIds->empty() && oRepeatedFieldUint32_Add)
         {
             auto* field = pChange->mutable_removed_appid();
-            for (AppId_t appId : g_removedAppIds){
+            for (AppId_t appId : *g_removedAppIds){
                 oRepeatedFieldUint32_Add(field, &appId);
             }
             LOG_STEAMUI_DEBUG("BuildCompleteAppOverviewChange: appended {} removed_appid entries",
-                              g_removedAppIds.size());
+                              g_removedAppIds->size());
         }
     }
 
@@ -807,11 +843,11 @@ namespace
             std::vector<AppId_t> drainingAdditions;
             {
                 std::lock_guard<std::mutex> lock(g_removalMutex);
-                if (!g_pendingRemovals.empty()) {
-                    drainingRemovals.swap(g_pendingRemovals);
+                if (!g_pendingRemovals->empty()) {
+                    drainingRemovals.swap(*g_pendingRemovals);
                 }
-                if (!g_pendingAdditions.empty()) {
-                    drainingAdditions.swap(g_pendingAdditions);
+                if (!g_pendingAdditions->empty()) {
+                    drainingAdditions.swap(*g_pendingAdditions);
                 }
             }
 
@@ -823,8 +859,20 @@ namespace
                 {
                     if (CSteamApp *pApp = oGetAppByID(g_pController, appId, false))
                     {
-                        pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
-                            k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        if (pApp->OwnershipFlags & k_EAppOwnershipFlags_LicenseLocked)
+                        {
+                            pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
+                                pApp->OwnershipFlags & ~k_EAppOwnershipFlags_LicenseLocked);
+                        }
+                        constexpr uint32_t kActiveLicenseMask =
+                            k_EAppOwnershipFlags_OwnsLicense |
+                            k_EAppOwnershipFlags_FreeLicense |
+                            k_EAppOwnershipFlags_SharedLicense;
+                        if ((pApp->OwnershipFlags & kActiveLicenseMask) == 0)
+                        {
+                            pApp->OwnershipFlags = static_cast<EAppOwnershipFlags>(
+                                pApp->OwnershipFlags | k_EAppOwnershipFlags_OwnsLicense | k_EAppOwnershipFlags_LicensePermanent);
+                        }
 
                         uint32_t t = LuaConfig::GetPurchaseTime(appId);
                         if (t)
@@ -867,8 +915,8 @@ namespace
                     {
                         LOG_STEAMUI_DEBUG("RunFrame: appId {} is still licensed (owned/shared) or active in config, skipping removal", appId);
                         std::lock_guard<std::mutex> lock(g_removalMutex);
-                        g_removedAppIds.erase(appId);
-                        g_hasRemovedAppIds.store(!g_removedAppIds.empty(), std::memory_order_release);
+                        g_removedAppIds->erase(appId);
+                        g_hasRemovedAppIds.store(!g_removedAppIds->empty(), std::memory_order_release);
                         continue;
                     }
 
@@ -892,7 +940,7 @@ namespace
 
                     {
                         std::lock_guard<std::mutex> lock(g_removalMutex);
-                        g_removedAppIds.insert(appId);
+                        g_removedAppIds->insert(appId);
                         g_hasRemovedAppIds.store(true, std::memory_order_release);
                     }
 
@@ -909,7 +957,7 @@ namespace
 
             if (!drainingAdditions.empty() || !drainingRemovals.empty())
             {
-                g_installedScannerPool.TriggerRescan();
+                g_installedScannerPool->TriggerRescan();
             }
         }
 
@@ -923,6 +971,8 @@ namespace Hooks_SteamUI
 {
     void InstallDiversionHooks()
     {
+        if (oGetModuleHandleA != &GetModuleHandleA) return;
+
         // These hooks are the only SteamUI hooks that must exist before Lua is
         // parsed. They redirect steamclient module lookups to the Diversion
         // shadow module and gate LoadModuleWithPath until client hooks finish.
@@ -949,74 +999,95 @@ namespace Hooks_SteamUI
         INSTALL_HOOK_U(CSteamUIAppControllerRunFrame);
         HOOK_END();
 
-        g_trackedStates.reserve(1500);
-        g_activeUpdatingApps.reserve(16);
-        g_autoSyncWorkerPool.Start();
-        g_installedScannerPool.Start();
+        g_trackedStates->reserve(1500);
+        g_activeUpdatingApps->reserve(16);
+        g_autoSyncWorkerPool->Start();
+        g_installedScannerPool->Start();
     }
 
     void Uninstall()
     {
-        g_installedScannerPool.Stop();
-        g_autoSyncWorkerPool.Stop();
-        g_trackedStates.clear();
-        g_activeUpdatingApps.clear();
+        g_installedScannerPool->Stop();
+        g_autoSyncWorkerPool->Stop();
+        g_trackedStates->clear();
+        g_activeUpdatingApps->clear();
+        s_timeSliceCursor = 0;
 
         UNHOOK_BEGIN();
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
+        if (oGetModuleHandleA != &GetModuleHandleA) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleW != &GetModuleHandleW) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleExA != &GetModuleHandleExA) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
+        }
+        if (oGetModuleHandleExW != &GetModuleHandleExW) {
+            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
+        }
 
         UNINSTALL_HOOK(LoadModuleWithPath);
         UNINSTALL_HOOK(FillInAppOverview);
         UNINSTALL_HOOK(BuildCompleteAppOverviewChange);
         UNINSTALL_HOOK(CSteamUIAppControllerRunFrame);
         UNHOOK_END();
+
+        {
+            std::lock_guard<std::mutex> lock(g_removalMutex);
+            g_pendingRemovals->clear();
+            g_pendingAdditions->clear();
+            g_removedAppIds->clear();
+            g_hasRemovedAppIds.store(false, std::memory_order_release);
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_installedMutex);
+            g_installedSnapshot->reset();
+        }
     }
 
     void DetachWorkerThreads()
     {
-        g_installedScannerPool.Detach();
-        g_autoSyncWorkerPool.Detach();
+        g_installedScannerPool->Detach();
+        g_autoSyncWorkerPool->Detach();
     }
 
 
     void QueueRemoval(AppId_t appId)
     {
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        std::erase(g_pendingAdditions, appId);
-        g_removedAppIds.insert(appId);
+        std::erase(*g_pendingAdditions, appId);
+        g_removedAppIds->insert(appId);
         g_hasRemovedAppIds.store(true, std::memory_order_release);
-        if (std::ranges::find(g_pendingRemovals, appId) == g_pendingRemovals.end()) {
-            g_pendingRemovals.push_back(appId);
+        if (std::ranges::find(*g_pendingRemovals, appId) == g_pendingRemovals->end()) {
+            g_pendingRemovals->push_back(appId);
         }
     }
 
     void CancelRemoval(AppId_t appId)
     {
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        if (!g_pendingRemovals.empty()) {
-            std::erase(g_pendingRemovals, appId);
+        if (!g_pendingRemovals->empty()) {
+            std::erase(*g_pendingRemovals, appId);
         }
         if (g_hasRemovedAppIds.load(std::memory_order_relaxed)) {
-            g_removedAppIds.erase(appId);
-            g_hasRemovedAppIds.store(!g_removedAppIds.empty(), std::memory_order_release);
+            g_removedAppIds->erase(appId);
+            g_hasRemovedAppIds.store(!g_removedAppIds->empty(), std::memory_order_release);
         }
     }
 
     void QueueAddition(AppId_t appId)
     {
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        if (!g_pendingRemovals.empty()) {
-            std::erase(g_pendingRemovals, appId);
+        if (!g_pendingRemovals->empty()) {
+            std::erase(*g_pendingRemovals, appId);
         }
         if (g_hasRemovedAppIds.load(std::memory_order_relaxed)) {
-            g_removedAppIds.erase(appId);
-            g_hasRemovedAppIds.store(!g_removedAppIds.empty(), std::memory_order_release);
+            g_removedAppIds->erase(appId);
+            g_hasRemovedAppIds.store(!g_removedAppIds->empty(), std::memory_order_release);
         }
-        if (std::ranges::find(g_pendingAdditions, appId) == g_pendingAdditions.end()) {
-            g_pendingAdditions.push_back(appId);
+        if (std::ranges::find(*g_pendingAdditions, appId) == g_pendingAdditions->end()) {
+            g_pendingAdditions->push_back(appId);
         }
     }
 
@@ -1024,22 +1095,18 @@ namespace Hooks_SteamUI
     {
         if (appIds.empty()) return;
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        std::unordered_set<AppId_t> existing(g_pendingAdditions.begin(), g_pendingAdditions.end());
-        existing.reserve(existing.size() + appIds.size());
-        g_pendingAdditions.reserve(g_pendingAdditions.size() + appIds.size());
-        for (AppId_t id : appIds) {
-            if (existing.insert(id).second) {
-                g_pendingAdditions.push_back(id);
-            }
-        }
-        if (!g_pendingRemovals.empty() || !g_removedAppIds.empty()) {
+        g_pendingAdditions->insert(g_pendingAdditions->end(), appIds.begin(), appIds.end());
+        std::ranges::sort(*g_pendingAdditions);
+        const auto dup = std::ranges::unique(*g_pendingAdditions);
+        g_pendingAdditions->erase(dup.begin(), dup.end());
+        if (!g_pendingRemovals->empty() || !g_removedAppIds->empty()) {
             for (AppId_t id : appIds) {
-                if (!g_pendingRemovals.empty()) {
-                    std::erase(g_pendingRemovals, id);
+                if (!g_pendingRemovals->empty()) {
+                    std::erase(*g_pendingRemovals, id);
                 }
-                g_removedAppIds.erase(id);
+                g_removedAppIds->erase(id);
             }
-            g_hasRemovedAppIds.store(!g_removedAppIds.empty(), std::memory_order_release);
+            g_hasRemovedAppIds.store(!g_removedAppIds->empty(), std::memory_order_release);
         }
     }
 
@@ -1049,11 +1116,11 @@ namespace Hooks_SteamUI
             return false;
         }
         std::lock_guard<std::mutex> lock(g_removalMutex);
-        return g_removedAppIds.contains(appId);
+        return g_removedAppIds->contains(appId);
     }
 
     void TriggerInstalledScanner()
     {
-        g_installedScannerPool.TriggerRescan();
+        g_installedScannerPool->TriggerRescan();
     }
 }

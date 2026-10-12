@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <mutex>
+#include <shared_mutex>
 
 namespace Config {
 namespace {
@@ -26,7 +27,7 @@ namespace {
         bool manifestAutoSyncOnUpdate = true;
     };
 
-    std::mutex g_mutex;
+    std::shared_mutex g_mutex;
     bool g_loadedOnce = false;
 
     uint32_t manifestTimeoutResolve = 5000;
@@ -105,7 +106,7 @@ namespace {
     }
 
     LoadResult ApplySnapshotLocked(const Snapshot& snapshot) {
-        std::lock_guard lock(g_mutex);
+        std::unique_lock lock(g_mutex);
         LoadResult result;
         result.luaPathsChanged = luaPaths != snapshot.luaPaths;
         ApplySnapshot(snapshot);
@@ -140,14 +141,22 @@ namespace {
                 if (auto val = (*manifest)["url"].value<std::string>()) {
                     snapshot.manifestProvider = *val;
                 }
-                if (auto val = (*manifest)["timeout_resolve_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.resolve = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_connect_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.connect = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_send_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.send = static_cast<uint32_t>(*val);
-                if (auto val = (*manifest)["timeout_recv_ms"].value<int64_t>())
-                    snapshot.manifestTimeouts.recv = static_cast<uint32_t>(*val);
+                if (auto val = (*manifest)["timeout_resolve_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.resolve = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_connect_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.connect = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_send_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.send = static_cast<uint32_t>(*val);
+                }
+                if (auto val = (*manifest)["timeout_recv_ms"].value<int64_t>()) {
+                    if (*val > 0 && *val <= 300000)
+                        snapshot.manifestTimeouts.recv = static_cast<uint32_t>(*val);
+                }
                 if (auto val = (*manifest)["lock_owned_games"].value<bool>())
                     snapshot.manifestLockOwnedGames = *val;
                 if (auto val = (*manifest)["auto_sync_on_update"].value<bool>())
@@ -169,13 +178,13 @@ namespace {
                         const char* storageDir = GetStorageDirectory();
                         if (storageDir && storageDir[0] != '\0') {
                             snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(
-                                OSTPlatform::Encoding::PathFromUtf8(storageDir) / p);
+                                (OSTPlatform::Encoding::PathFromUtf8(storageDir) / p).lexically_normal());
                         } else {
                             snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(
-                                OSTPlatform::Encoding::PathFromUtf8(configPath).parent_path() / p);
+                                (OSTPlatform::Encoding::PathFromUtf8(configPath).parent_path() / p).lexically_normal());
                         }
                     } else {
-                        snapshot.logDir = *val;
+                        snapshot.logDir = OSTPlatform::Encoding::PathToUtf8(p.lexically_normal());
                     }
                 }
             }
@@ -214,7 +223,7 @@ namespace {
                     if (auto ids = (*tblNode)[key].as_array()) {
                         hasGlobalExclude = true;
                         for (auto& id : *ids) {
-                            if (auto v = id.value<int64_t>()) {
+                            if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
                                 globalExcludeAppids.insert(static_cast<AppId_t>(*v));
                             }
                         }
@@ -235,7 +244,7 @@ namespace {
             } else if (auto arr = tbl["exclude_appids"].as_array()) {
                 hasGlobalExclude = true;
                 for (auto& id : *arr) {
-                    if (auto v = id.value<int64_t>()) {
+                    if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
                         globalExcludeAppids.insert(static_cast<AppId_t>(*v));
                     }
                 }
@@ -265,6 +274,7 @@ namespace {
                             full = candidate;
                         }
                     }
+                    full = full.lexically_normal();
                     std::error_code ec;
                     if (!std::filesystem::exists(full, ec)) {
                         LOG_WARN("inject dll not found: {}", OSTPlatform::Encoding::PathToUtf8(full));
@@ -278,7 +288,7 @@ namespace {
                     else                                                      dll.allGames   = false;
                     if (auto ids = (*t)["when_appids"].as_array()) {
                         for (auto& id : *ids) {
-                            if (auto v = id.value<int64_t>()) {
+                            if (auto v = id.value<int64_t>(); v && *v > 0 && *v <= UINT32_MAX) {
                                 dll.whenAppids.insert(static_cast<AppId_t>(*v));
                             }
                         }
@@ -324,12 +334,12 @@ namespace {
         }
         bool shouldApplyDefault = false;
         {
-            std::lock_guard lock(g_mutex);
+            std::unique_lock lock(g_mutex);
             shouldApplyDefault = !g_loadedOnce;
         }
         if (shouldApplyDefault) {
             ApplyManifestProvider(snapshot.manifestProvider);
-            std::lock_guard lock(g_mutex);
+            std::unique_lock lock(g_mutex);
             const bool luaChanged = luaPaths != snapshot.luaPaths;
             ApplySnapshot(snapshot);
             g_loadedOnce = true;
@@ -339,7 +349,7 @@ namespace {
     }
 
     ManifestTimeouts GetManifestTimeouts() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return {
             manifestTimeoutResolve,
             manifestTimeoutConnect,
@@ -349,32 +359,32 @@ namespace {
     }
 
     LogLevel GetLogLevel() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return logLevel;
     }
 
     std::string GetLogDir() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return logDir;
     }
 
     std::vector<std::string> GetLuaPaths() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return luaPaths;
     }
 
     std::string GetRemoteUrlTemplate() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return remoteUrlTemplate;
     }
 
     bool GetStatsEnableApi() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return statsEnableApi;
     }
 
     CloudSettings GetCloudSettings() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return {
             cloudEnabled,
             cloudLibrary,
@@ -382,17 +392,17 @@ namespace {
     }
 
     std::vector<InjectDll> GetInjectDlls() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return injectDlls;
     }
 
     bool GetManifestLockOwnedGames() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return manifestLockOwnedGames;
     }
 
     bool GetManifestAutoSyncOnUpdate() {
-        std::lock_guard lock(g_mutex);
+        std::shared_lock lock(g_mutex);
         return manifestAutoSyncOnUpdate;
     }
 

@@ -31,10 +31,12 @@ extern "C" {
 
 namespace LuaConfig{
     static std::shared_mutex g_configSharedMutex;
-    static std::mutex g_luaStateMutex;
+    static std::recursive_mutex g_luaStateMutex;
     static lua_State* g_lua_state = nullptr;
     static std::atomic<bool> g_hasManifestCodeFunc{false};
     static std::atomic<bool> g_hasManifestCodeFuncEx{false};
+    static std::string g_manifestCodeFuncFile;
+    static std::string g_manifestCodeFuncExFile;
     static std::unordered_map<AppId_t, std::string> DepotKeySet{};
     static std::unordered_map<AppId_t, uint64_t> AccessTokenSet{};
     static std::unordered_map<AppId_t, std::string>LegacyCDKeySet{};
@@ -282,10 +284,12 @@ namespace LuaConfig{
         if (idx < 1 || !lua_istable(L, idx)) return headers;
         lua_pushnil(L);
         while (lua_next(L, idx)) {
-            std::string key(lua_tostring(L, -2));
-            std::string val(lua_tostring(L, -1));
-            headers += std::wstring(key.begin(), key.end())
-                    + L": " + std::wstring(val.begin(), val.end()) + L"\r\n";
+            const char* kStr = lua_tostring(L, -2);
+            const char* vStr = lua_tostring(L, -1);
+            if (kStr && vStr) {
+                headers += OSTPlatform::Encoding::Utf8ToWide(kStr)
+                        + L": " + OSTPlatform::Encoding::Utf8ToWide(vStr) + L"\r\n";
+            }
             lua_pop(L, 1);
         }
         return headers;
@@ -356,30 +360,30 @@ namespace LuaConfig{
 
     // ── Lua: addappid / addtoken / pinApp / setManifestid ────────
     static int lua_addappid(lua_State* L) {
-        // addappid(integer, integer, string)
+        // addappid(integer [, integer, string] or [integer, string])
         int argc = lua_gettop(L);
-        // Validate argument count and required argument types.
-        if (argc == 0) {
-            return luaL_error(L, "");
-        }
-        if (!lua_isinteger(L, 1)) {
-            return luaL_error(L, "");
+        if (argc == 0 || !lua_isinteger(L, 1)) {
+            return luaL_error(L, "addappid requires (appid: integer [, type: integer, key: string])");
         }
 
-        // Read the first argument as app/depot id.
         lua_Integer value = lua_tointeger(L, 1);
-        // Ensure the value fits into uint32_t range.
         if (value < 0 || value > UINT32_MAX)
-            return luaL_error(L, "");
-        AppId_t DepotId = (uint32_t)value;
-        // Read the optional third argument as a key.
+            return luaL_error(L, "addappid: appid out of range");
+
+        if (argc > 2 && !lua_isstring(L, 3)) {
+            return luaL_error(L, "addappid: key must be string");
+        }
+
+        AppId_t DepotId = static_cast<uint32_t>(value);
         std::string Key = "";
         if (argc > 2) {
-            if (!lua_isstring(L, 3))
-                return luaL_error(L, "");
             const char* key = lua_tostring(L, 3);
-            // Keep only keys with exactly 64 characters.
-            if (strlen(key) == 64) {
+            if (key && strlen(key) == 64) {
+                Key = std::string(key);
+            }
+        } else if (argc == 2 && lua_isstring(L, 2)) {
+            const char* key = lua_tostring(L, 2);
+            if (key && strlen(key) == 64) {
                 Key = std::string(key);
             }
         }
@@ -625,7 +629,6 @@ namespace LuaConfig{
             g_fileManifestOverrides[g_currentFile][depotId] = override;
             RebuildManifestOverride(depotId);
         } else {
-            std::unique_lock lock(g_configSharedMutex);
             SetActiveManifestOverride(depotId, override);
         }
         return 0;
@@ -718,7 +721,6 @@ namespace LuaConfig{
             g_fileStats[g_currentFile][appId] = steamId;
             RebuildStatSteamId(appId);
         } else {
-            std::unique_lock lock(g_configSharedMutex);
             StatSteamIdSet[appId] = steamId;
         }
         return 0;
@@ -768,7 +770,7 @@ namespace LuaConfig{
         return true;
     }
 
-    static void Cleanup() {
+    void Shutdown() {
         std::lock_guard lock(g_luaStateMutex);
         if (g_lua_state) {
             lua_close(g_lua_state);
@@ -776,10 +778,12 @@ namespace LuaConfig{
         }
         g_hasManifestCodeFunc = false;
         g_hasManifestCodeFuncEx = false;
+        g_manifestCodeFuncFile.clear();
+        g_manifestCodeFuncExFile.clear();
     }
 
     // ── public query API ─────────────────────────────────────────
-    AppId_t GetAppIdForProcess(const std::string& imageName) {
+    AppId_t GetAppIdForProcess(std::string_view imageName) {
         std::string lower(imageName);
         for (char& ch : lower)
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -944,12 +948,12 @@ namespace LuaConfig{
         return ManifestOverrides;
     }
 
-    bool HasManifestCodeFunc() {
+    bool HasManifestCodeFunc() noexcept {
         return g_hasManifestCodeFunc.load(std::memory_order_relaxed);
     }
 
     bool CallManifestFetchCode(uint64_t gid, uint64_t* outCode) {
-        if (!g_hasManifestCodeFunc.load(std::memory_order_relaxed))
+        if (!outCode || !g_hasManifestCodeFunc.load(std::memory_order_relaxed))
             return false;
 
         std::lock_guard lock(g_luaStateMutex);
@@ -957,6 +961,11 @@ namespace LuaConfig{
             return false;
 
         lua_getglobal(g_lua_state, "fetch_manifest_code");
+        if (!lua_isfunction(g_lua_state, -1)) {
+            lua_pop(g_lua_state, 1);
+            g_hasManifestCodeFunc.store(false, std::memory_order_relaxed);
+            return false;
+        }
         lua_pushinteger(g_lua_state, static_cast<lua_Integer>(gid));
 
         if (lua_pcall(g_lua_state, 1, 1, 0) != LUA_OK) {
@@ -999,12 +1008,12 @@ namespace LuaConfig{
         return true;
     }
 
-    bool HasManifestCodeFuncEx() {
+    bool HasManifestCodeFuncEx() noexcept {
         return g_hasManifestCodeFuncEx.load(std::memory_order_relaxed);
     }
 
     bool CallManifestFetchCodeEx(uint64_t app_id, uint64_t depot_id, uint64_t gid, uint64_t* outCode) {
-        if (!g_hasManifestCodeFuncEx.load(std::memory_order_relaxed))
+        if (!outCode || !g_hasManifestCodeFuncEx.load(std::memory_order_relaxed))
             return false;
 
         std::lock_guard lock(g_luaStateMutex);
@@ -1012,6 +1021,11 @@ namespace LuaConfig{
             return false;
 
         lua_getglobal(g_lua_state, "fetch_manifest_code_ex");
+        if (!lua_isfunction(g_lua_state, -1)) {
+            lua_pop(g_lua_state, 1);
+            g_hasManifestCodeFuncEx.store(false, std::memory_order_relaxed);
+            return false;
+        }
         lua_pushinteger(g_lua_state, static_cast<lua_Integer>(app_id));
         lua_pushinteger(g_lua_state, static_cast<lua_Integer>(depot_id));
         lua_pushinteger(g_lua_state, static_cast<lua_Integer>(gid));
@@ -1242,6 +1256,26 @@ namespace LuaConfig{
         if (eticketUrlIt != g_fileEticketUrl.end()) {
             g_fileEticketUrl.erase(eticketUrlIt);
             RebuildEticketUrl();
+        }
+
+        if (!g_manifestCodeFuncFile.empty() && filePath == g_manifestCodeFuncFile) {
+            std::lock_guard luaLock(g_luaStateMutex);
+            if (g_lua_state) {
+                lua_pushnil(g_lua_state);
+                lua_setglobal(g_lua_state, "fetch_manifest_code");
+            }
+            g_hasManifestCodeFunc.store(false, std::memory_order_relaxed);
+            g_manifestCodeFuncFile.clear();
+        }
+
+        if (!g_manifestCodeFuncExFile.empty() && filePath == g_manifestCodeFuncExFile) {
+            std::lock_guard luaLock(g_luaStateMutex);
+            if (g_lua_state) {
+                lua_pushnil(g_lua_state);
+                lua_setglobal(g_lua_state, "fetch_manifest_code_ex");
+            }
+            g_hasManifestCodeFuncEx.store(false, std::memory_order_relaxed);
+            g_manifestCodeFuncExFile.clear();
         }
 
         g_fileParseSequence.erase(filePath);
@@ -1572,14 +1606,12 @@ namespace LuaConfig{
 
         // Capture the file's last-modified time (unix epoch, seconds) so
         // lua_addappid can stamp it onto every appId this file contributes.
-        // Portable conversion that does not require C++20 clock_cast.
         uint32_t mtime = 0;
         {
             std::error_code ec;
             auto ftime = std::filesystem::last_write_time(path, ec);
             if (!ec) {
-                auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                    ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
+                auto sctp = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
                 mtime = static_cast<uint32_t>(std::chrono::system_clock::to_time_t(sctp));
             }
         }
@@ -1618,6 +1650,7 @@ namespace LuaConfig{
                         const char* err = lua_tostring(g_lua_state, -1);
                         LOG_WARN("{}:{}: {}", filenameUtf8, lineNo,
                                  err ? err : "unknown");
+                        lua_pop(g_lua_state, 1);
                     }
                     chunk.clear();
                 } else if (rc == LUA_ERRSYNTAX) {
@@ -1647,23 +1680,25 @@ namespace LuaConfig{
         }
 
         // Check for manifest code functions after parsing.
-        bool hasCode = false;
         lua_getglobal(g_lua_state, "fetch_manifest_code");
         if (lua_isfunction(g_lua_state, -1)) {
-            hasCode = true;
-            LOG_INFO("manifest.lua: fetch_manifest_code found");
+            if (g_manifestCodeFuncFile.empty() || g_manifestCodeFuncFile == filePath) {
+                g_manifestCodeFuncFile = filePath;
+                g_hasManifestCodeFunc.store(true, std::memory_order_relaxed);
+                LOG_INFO("LuaConfig: fetch_manifest_code found in {}", filenameUtf8);
+            }
         }
         lua_pop(g_lua_state, 1);
-        g_hasManifestCodeFunc.store(hasCode, std::memory_order_relaxed);
 
-        bool hasCodeEx = false;
         lua_getglobal(g_lua_state, "fetch_manifest_code_ex");
         if (lua_isfunction(g_lua_state, -1)) {
-            hasCodeEx = true;
-            LOG_INFO("manifest.lua: fetch_manifest_code_ex found");
+            if (g_manifestCodeFuncExFile.empty() || g_manifestCodeFuncExFile == filePath) {
+                g_manifestCodeFuncExFile = filePath;
+                g_hasManifestCodeFuncEx.store(true, std::memory_order_relaxed);
+                LOG_INFO("LuaConfig: fetch_manifest_code_ex found in {}", filenameUtf8);
+            }
         }
         lua_pop(g_lua_state, 1);
-        g_hasManifestCodeFuncEx.store(hasCodeEx, std::memory_order_relaxed);
 
         g_currentFile.clear();
         if (rebuildSnapshot) {

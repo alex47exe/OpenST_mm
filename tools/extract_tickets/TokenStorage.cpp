@@ -1,6 +1,12 @@
 #include "TokenStorage.h"
+#include "Crypto.h"
 #include "Log.h"
+#include "RaiiGuards.h"
+#include "Utils.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -11,9 +17,11 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <mutex>
 
 #pragma comment(lib, "crypt32.lib")
 
@@ -31,25 +39,126 @@ namespace {
         0x2D, 0x4B, 0x65, 0x79, 0x32, 0x30, 0x32, 0x36
     };
 
-    std::vector<std::string>& GetQuarantineLines() {
-        static std::vector<std::string> s_quarantine;
+    std::recursive_mutex g_storageMutex;
+
+    void WipeString(std::string& s) noexcept {
+        if (s.capacity() > 0) {
+            SecureZeroMemory(s.data(), s.capacity());
+            s.clear();
+        }
+    }
+
+    void WipeAccountTokens(CachedAccount& acc) noexcept {
+        WipeString(acc.refreshToken);
+        WipeString(acc.accessToken);
+    }
+
+    struct ScopedAccountsWiper {
+        std::vector<CachedAccount>& accounts;
+        explicit ScopedAccountsWiper(std::vector<CachedAccount>& accs) noexcept : accounts(accs) {}
+        ~ScopedAccountsWiper() noexcept {
+            for (auto& acc : accounts) {
+                WipeAccountTokens(acc);
+            }
+        }
+        ScopedAccountsWiper(const ScopedAccountsWiper&) = delete;
+        ScopedAccountsWiper& operator=(const ScopedAccountsWiper&) = delete;
+    };
+
+    struct ScopedDataBlob {
+        DATA_BLOB blob{0, nullptr};
+        bool wipeOnFree{false};
+
+        explicit ScopedDataBlob(bool wipe = false) noexcept : wipeOnFree(wipe) {}
+        ~ScopedDataBlob() noexcept {
+            if (blob.pbData) {
+                if (wipeOnFree && blob.cbData > 0) {
+                    SecureZeroMemory(blob.pbData, blob.cbData);
+                }
+                LocalFree(blob.pbData);
+                blob.pbData = nullptr;
+                blob.cbData = 0;
+            }
+        }
+        ScopedDataBlob(const ScopedDataBlob&) = delete;
+        ScopedDataBlob& operator=(const ScopedDataBlob&) = delete;
+    };
+
+    struct QuarantineStore {
+        std::vector<std::string> lines;
+
+        ~QuarantineStore() noexcept {
+            Clear();
+        }
+
+        void Clear() noexcept {
+            for (auto& line : lines) {
+                WipeString(line);
+            }
+            lines.clear();
+        }
+    };
+
+    QuarantineStore& GetQuarantineStore() {
+        static QuarantineStore s_quarantine;
         return s_quarantine;
     }
 
-    std::string SerializeAccounts(const std::vector<CachedAccount>& accounts) {
-        std::string result;
-        result.reserve(accounts.size() * 256);
-        for (const auto& acc : accounts) {
-            std::format_to(std::back_inserter(result), "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                           acc.accountName, acc.steamId, acc.lastLoginTime,
-                           acc.refreshToken, acc.accessToken,
-                           acc.isInvalid ? 1 : 0,
-                           TokenStorage::SanitizeAlias(acc.alias));
+    void AppendSanitizedField(std::string& out, std::string_view sv) {
+        for (char c : sv) {
+            if (c != '\t' && c != '\r' && c != '\n') {
+                out.push_back(c);
+            }
         }
-        for (const auto& qLine : GetQuarantineLines()) {
+    }
+
+    std::string SerializeAccounts(const std::vector<CachedAccount>& accounts) {
+        size_t totalBytes = 64;
+        for (const auto& acc : accounts) {
+            totalBytes += acc.accountName.size() + acc.refreshToken.size() +
+                          acc.accessToken.size() + acc.alias.size() + 64;
+        }
+        for (const auto& qLine : GetQuarantineStore().lines) {
+            totalBytes += qLine.size() + 2;
+        }
+
+        std::string result;
+        result.reserve(totalBytes);
+
+        char numBuf[32];
+        for (const auto& acc : accounts) {
+            AppendSanitizedField(result, acc.accountName);
+            result.push_back('\t');
+
+            auto [p1, ec1] = std::to_chars(numBuf, numBuf + sizeof(numBuf), acc.steamId);
+            if (ec1 == std::errc{}) {
+                result.append(numBuf, static_cast<size_t>(p1 - numBuf));
+            } else {
+                result.push_back('0');
+            }
+            result.push_back('\t');
+
+            auto [p2, ec2] = std::to_chars(numBuf, numBuf + sizeof(numBuf), acc.lastLoginTime);
+            if (ec2 == std::errc{}) {
+                result.append(numBuf, static_cast<size_t>(p2 - numBuf));
+            } else {
+                result.push_back('0');
+            }
+            result.push_back('\t');
+
+            AppendSanitizedField(result, acc.refreshToken);
+            result.push_back('\t');
+            AppendSanitizedField(result, acc.accessToken);
+            result.push_back('\t');
+            result.push_back(acc.isInvalid ? '1' : '0');
+            result.push_back('\t');
+            result.append(TokenStorage::SanitizeAlias(acc.alias));
+            result.push_back('\n');
+        }
+        for (const auto& qLine : GetQuarantineStore().lines) {
             if (!qLine.empty()) {
-                result += qLine;
-                result += '\n';
+                result.append(qLine);
+                result.push_back('\n');
             }
         }
         return result;
@@ -57,35 +166,40 @@ namespace {
 
     std::vector<CachedAccount> DeserializeAccounts(std::string_view plaintext) {
         std::vector<CachedAccount> result;
-        GetQuarantineLines().clear();
-        std::istringstream iss(std::string{plaintext});
-        std::string line;
+        GetQuarantineStore().Clear();
 
-        while (std::getline(iss, line)) {
+        size_t lineStart = 0;
+        while (lineStart < plaintext.size()) {
+            size_t lineEnd = plaintext.find('\n', lineStart);
+            if (lineEnd == std::string_view::npos) {
+                lineEnd = plaintext.size();
+            }
+            std::string_view line = plaintext.substr(lineStart, lineEnd - lineStart);
+            lineStart = lineEnd + 1;
+
+            if (!line.empty() && line.back() == '\r') {
+                line.remove_suffix(1);
+            }
             if (line.empty()) continue;
-            std::istringstream lineStream(line);
-            std::vector<std::string> fields;
-            std::string token;
-            while (std::getline(lineStream, token, '\t')) {
-                fields.push_back(token);
+
+            std::array<std::string_view, 8> fields{};
+            size_t fieldCount = 0;
+            size_t colStart = 0;
+            while (fieldCount < fields.size()) {
+                size_t tabPos = line.find('\t', colStart);
+                if (tabPos == std::string_view::npos) {
+                    fields[fieldCount++] = line.substr(colStart);
+                    break;
+                }
+                fields[fieldCount++] = line.substr(colStart, tabPos - colStart);
+                colStart = tabPos + 1;
             }
 
-            if (fields.size() >= 4) {
-                CachedAccount acc;
-                acc.accountName = fields[0];
-                const std::string& steamIdStr = fields[1];
-                const std::string& timeStr = fields[2];
-                acc.refreshToken = fields[3];
-
-                if (fields.size() >= 5) {
-                    acc.accessToken = fields[4];
-                }
-                if (fields.size() >= 6) {
-                    acc.isInvalid = (fields[5] == "1" || fields[5] == "true");
-                }
-                if (fields.size() >= 7) {
-                    acc.alias = TokenStorage::SanitizeAlias(fields[6]);
-                }
+            if (fieldCount >= 4) {
+                const std::string_view accountNameSv = fields[0];
+                const std::string_view steamIdStr = fields[1];
+                const std::string_view timeStr = fields[2];
+                const std::string_view refreshTokenSv = fields[3];
 
                 uint64_t sId = 0;
                 const auto [p1, ec1] = std::from_chars(steamIdStr.data(), steamIdStr.data() + steamIdStr.size(), sId);
@@ -94,37 +208,74 @@ namespace {
 
                 if (ec1 == std::errc{} && p1 == steamIdStr.data() + steamIdStr.size() &&
                     ec2 == std::errc{} && p2 == timeStr.data() + timeStr.size() &&
-                    !acc.accountName.empty() && !acc.refreshToken.empty()) {
+                    !accountNameSv.empty() && !refreshTokenSv.empty()) {
+                    if (sId == 0) {
+                        sId = GetJwtSteamId(refreshTokenSv);
+                    }
+                    CachedAccount acc;
+                    acc.accountName.assign(accountNameSv);
                     acc.steamId = sId;
                     acc.lastLoginTime = loginTime;
+                    acc.refreshToken.assign(refreshTokenSv);
+
+                    if (fieldCount >= 5) {
+                        acc.accessToken.assign(fields[4]);
+                    }
+                    if (fieldCount >= 6) {
+                        acc.isInvalid = (fields[5] == "1" || EqualIgnoreCase(fields[5], "true"));
+                    }
+                    if (fieldCount >= 7) {
+                        acc.alias = TokenStorage::SanitizeAlias(fields[6]);
+                    }
                     result.push_back(std::move(acc));
                 } else {
-                    LOG_WARN("TokenStorage", "暂存解析异常的凭据条目至隔离区，避免覆盖丢失");
-                    GetQuarantineLines().push_back(line);
+                    LOG_WARN("TokenStorage", MsgKey::LogStoreQuarantineAbnormal);
+                    GetQuarantineStore().lines.emplace_back(line);
                 }
             } else {
-                LOG_WARN("TokenStorage", "跳过格式严重缺损的凭据条目 (列数={})", fields.size());
-                GetQuarantineLines().push_back(line);
+                LOG_WARN("TokenStorage", MsgKey::LogStoreSkipMalformed, fieldCount);
+                GetQuarantineStore().lines.emplace_back(line);
             }
         }
         return result;
+    }
+
+    bool WriteAllBytes(HANDLE hFile, const void* data, DWORD bytesToWrite) noexcept {
+        const auto* ptr = static_cast<const uint8_t*>(data);
+        DWORD totalWritten = 0;
+        while (totalWritten < bytesToWrite) {
+            DWORD written = 0;
+            if (!WriteFile(hFile, ptr + totalWritten, bytesToWrite - totalWritten, &written, nullptr) || written == 0) {
+                return false;
+            }
+            totalWritten += written;
+        }
+        return true;
     }
 
     void SecureWipeFile(const std::filesystem::path& p) {
         std::error_code ec;
         auto fileSize = std::filesystem::file_size(p, ec);
         if (!ec && fileSize > 0) {
-            std::ofstream ofs(p, std::ios::binary | std::ios::in | std::ios::out);
-            if (ofs.is_open()) {
-                constexpr std::array<char, 1024> zeros{};
-                size_t remaining = fileSize;
+            ScopedHandle hFile(CreateFileW(
+                p.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+            if (hFile.IsValid()) {
+                constexpr std::array<uint8_t, 1024> zeros{};
+                uint64_t remaining = fileSize;
                 while (remaining > 0) {
-                    size_t toWrite = (std::min)(remaining, zeros.size());
-                    ofs.write(zeros.data(), toWrite);
+                    const DWORD toWrite = static_cast<DWORD>((std::min)(remaining, static_cast<uint64_t>(zeros.size())));
+                    if (!WriteAllBytes(hFile, zeros.data(), toWrite)) {
+                        break;
+                    }
                     remaining -= toWrite;
                 }
-                ofs.flush();
-                ofs.close();
+                FlushFileBuffers(hFile);
             }
         }
         std::filesystem::remove(p, ec);
@@ -132,13 +283,19 @@ namespace {
 } // namespace
 
 std::filesystem::path TokenStorage::GetStorageFilePath() {
-    wchar_t localAppData[32768]{0};
+    wchar_t localAppData[MAX_PATH * 2]{0};
     DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, static_cast<DWORD>(std::size(localAppData)));
     if (len == 0 || len >= std::size(localAppData)) {
         PWSTR pPath = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &pPath)) && pPath) {
+            struct CoTaskMemGuard {
+                PWSTR ptr{nullptr};
+                explicit CoTaskMemGuard(PWSTR p) noexcept : ptr(p) {}
+                ~CoTaskMemGuard() noexcept { if (ptr) CoTaskMemFree(ptr); }
+                CoTaskMemGuard(const CoTaskMemGuard&) = delete;
+                CoTaskMemGuard& operator=(const CoTaskMemGuard&) = delete;
+            } guard{pPath};
             std::filesystem::path dir = std::filesystem::path(pPath) / L"OpenSteamTool" / L"credentials";
-            CoTaskMemFree(pPath);
             std::error_code ec;
             std::filesystem::create_directories(dir, ec);
             return dir / L"accounts.enc";
@@ -153,6 +310,8 @@ std::filesystem::path TokenStorage::GetStorageFilePath() {
 }
 
 std::vector<CachedAccount> TokenStorage::LoadAccounts() {
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     const auto filePath = GetStorageFilePath();
     std::error_code ec;
     if (!std::filesystem::exists(filePath, ec)) {
@@ -161,7 +320,7 @@ std::vector<CachedAccount> TokenStorage::LoadAccounts() {
 
     std::ifstream ifs(filePath, std::ios::binary);
     if (!ifs.is_open()) {
-        LOG_WARN("TokenStorage", "无法打开凭据缓存文件: {}", MaskPath(filePath.string()));
+        LOG_WARN("TokenStorage", MsgKey::LogStoreOpenFileFailed, MaskPath(PathToUtf8(filePath)));
         return {};
     }
 
@@ -176,14 +335,14 @@ std::vector<CachedAccount> TokenStorage::LoadAccounts() {
     ifs.read(reinterpret_cast<char*>(&payloadSize), sizeof(payloadSize));
 
     if (!ifs || magic != kHeaderMagic || version != kHeaderVersion || payloadSize == 0 || payloadSize > 10 * 1024 * 1024) {
-        LOG_WARN("TokenStorage", "凭据文件头部校验失败或文件已损坏");
+        LOG_WARN("TokenStorage", MsgKey::LogStoreHeaderCorrupt);
         return {};
     }
 
     std::vector<uint8_t> encryptedBlob(payloadSize);
     ifs.read(reinterpret_cast<char*>(encryptedBlob.data()), payloadSize);
     if (ifs.gcount() != static_cast<std::streamsize>(payloadSize)) {
-        LOG_WARN("TokenStorage", "凭据密文读取不完整");
+        LOG_WARN("TokenStorage", MsgKey::LogStoreIncompleteRead);
         return {};
     }
 
@@ -195,27 +354,27 @@ std::vector<CachedAccount> TokenStorage::LoadAccounts() {
     entropyBlob.pbData = const_cast<BYTE*>(kAppEntropy);
     entropyBlob.cbData = sizeof(kAppEntropy);
 
-    DATA_BLOB outBlob = {0, nullptr};
-    if (!CryptUnprotectData(&inBlob, nullptr, &entropyBlob, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outBlob)) {
-        LOG_ERROR("TokenStorage", "DPAPI 解密失败 (GetLastError={})", GetLastError());
+    ScopedDataBlob outGuard(true);
+    if (!CryptUnprotectData(&inBlob, nullptr, &entropyBlob, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outGuard.blob)) {
+        LOG_ERROR("TokenStorage", MsgKey::LogStoreDpapiDecryptFailed, GetLastError());
         return {};
     }
 
-    std::string plaintext(reinterpret_cast<char*>(outBlob.pbData), outBlob.cbData);
-    SecureZeroMemory(outBlob.pbData, outBlob.cbData);
-    LocalFree(outBlob.pbData);
+    const std::string_view plaintextView(
+        reinterpret_cast<const char*>(outGuard.blob.pbData),
+        outGuard.blob.cbData);
+    auto accounts = DeserializeAccounts(plaintextView);
 
-    auto accounts = DeserializeAccounts(plaintext);
-    SecureZeroMemory(plaintext.data(), plaintext.size());
-
-    LOG_DEBUG("TokenStorage", "成功加载 {} 个缓存账号", accounts.size());
+    LOG_DEBUG("TokenStorage", MsgKey::LogStoreLoadedAccounts, accounts.size());
     return accounts;
 }
 
 bool TokenStorage::SaveAccounts(const std::vector<CachedAccount>& accounts) {
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     const auto filePath = GetStorageFilePath();
 
-    if (accounts.empty() && GetQuarantineLines().empty()) {
+    if (accounts.empty() && GetQuarantineStore().lines.empty()) {
         std::error_code ec;
         if (std::filesystem::exists(filePath, ec)) {
             SecureWipeFile(filePath);
@@ -224,6 +383,13 @@ bool TokenStorage::SaveAccounts(const std::vector<CachedAccount>& accounts) {
     }
 
     std::string plaintext = SerializeAccounts(accounts);
+    struct PlaintextWiper {
+        std::string& str;
+        explicit PlaintextWiper(std::string& s) noexcept : str(s) {}
+        ~PlaintextWiper() noexcept { WipeString(str); }
+        PlaintextWiper(const PlaintextWiper&) = delete;
+        PlaintextWiper& operator=(const PlaintextWiper&) = delete;
+    } plaintextWiper{plaintext};
 
     DATA_BLOB inBlob;
     inBlob.pbData = reinterpret_cast<BYTE*>(plaintext.data());
@@ -233,74 +399,119 @@ bool TokenStorage::SaveAccounts(const std::vector<CachedAccount>& accounts) {
     entropyBlob.pbData = const_cast<BYTE*>(kAppEntropy);
     entropyBlob.cbData = sizeof(kAppEntropy);
 
-    DATA_BLOB outBlob = {0, nullptr};
-    if (!CryptProtectData(&inBlob, L"OST_Steam_Tokens", &entropyBlob, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outBlob)) {
-        LOG_ERROR("TokenStorage", "DPAPI 加密保存失败 (GetLastError={})", GetLastError());
-        SecureZeroMemory(plaintext.data(), plaintext.size());
+    ScopedDataBlob outGuard(false);
+    if (!CryptProtectData(&inBlob, L"OST_Steam_Tokens", &entropyBlob, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outGuard.blob)) {
+        LOG_ERROR("TokenStorage", MsgKey::LogStoreDpapiEncryptFailed, GetLastError());
         return false;
     }
 
-    SecureZeroMemory(plaintext.data(), plaintext.size());
+    WipeString(plaintext);
 
-    const auto tempPath = std::filesystem::path(filePath.wstring() + L".tmp");
+    const auto tempPath = std::filesystem::path(
+        std::format(L"{}.{}.tmp", filePath.native(), GetCurrentProcessId()));
 
     {
-        std::ofstream ofs(tempPath, std::ios::binary | std::ios::trunc);
-        if (!ofs.is_open()) {
-            LOG_ERROR("TokenStorage", "无法创建临时凭据文件: {}", MaskPath(tempPath.string()));
-            LocalFree(outBlob.pbData);
+        ScopedHandle hTemp(CreateFileW(
+            tempPath.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!hTemp.IsValid()) {
+            LOG_ERROR("TokenStorage", MsgKey::LogStoreCreateTempFailed, MaskPath(PathToUtf8(tempPath)));
             return false;
         }
 
         const uint32_t magic = kHeaderMagic;
         const uint16_t version = kHeaderVersion;
         const uint16_t reserved = 0;
-        const uint32_t payloadSize = outBlob.cbData;
+        const uint32_t payloadSize = outGuard.blob.cbData;
 
-        ofs.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-        ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
-        ofs.write(reinterpret_cast<const char*>(&reserved), sizeof(reserved));
-        ofs.write(reinterpret_cast<const char*>(&payloadSize), sizeof(payloadSize));
-        ofs.write(reinterpret_cast<const char*>(outBlob.pbData), payloadSize);
-        ofs.flush();
-        ofs.close();
-    }
+        uint8_t header[12]{};
+        std::memcpy(header + 0, &magic, sizeof(magic));
+        std::memcpy(header + 4, &version, sizeof(version));
+        std::memcpy(header + 6, &reserved, sizeof(reserved));
+        std::memcpy(header + 8, &payloadSize, sizeof(payloadSize));
 
-    LocalFree(outBlob.pbData);
-
-    if (!ReplaceFileW(filePath.c_str(), tempPath.c_str(), nullptr, 0, nullptr, nullptr)) {
-        DWORD err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND) {
-            if (!MoveFileExW(tempPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                LOG_ERROR("TokenStorage", "首次建立凭据文件失败 (MoveFileExW GetLastError={})", GetLastError());
-                std::error_code ec;
-                std::filesystem::remove(tempPath, ec);
-                return false;
-            }
-        } else {
-            LOG_ERROR("TokenStorage", "原子替换凭据文件失败 (ReplaceFileW GetLastError={})", err);
+        if (!WriteAllBytes(hTemp, header, sizeof(header)) ||
+            !WriteAllBytes(hTemp, outGuard.blob.pbData, payloadSize) ||
+            !FlushFileBuffers(hTemp)) {
+            const DWORD writeErr = GetLastError();
+            LOG_ERROR("TokenStorage", MsgKey::LogStoreWriteTempFailed,
+                      writeErr, MaskPath(PathToUtf8(tempPath)));
+            CloseHandle(hTemp.handle);
+            hTemp.handle = INVALID_HANDLE_VALUE;
             std::error_code ec;
             std::filesystem::remove(tempPath, ec);
             return false;
         }
     }
 
-    LOG_DEBUG("TokenStorage", "成功原子持久化 {} 个账号到 DPAPI 存储", accounts.size());
+    bool replaced = false;
+    DWORD lastErr = 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (ReplaceFileW(filePath.c_str(), tempPath.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+            replaced = true;
+            break;
+        }
+        lastErr = GetLastError();
+        if (lastErr == ERROR_FILE_NOT_FOUND) {
+            if (MoveFileExW(tempPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                replaced = true;
+            } else {
+                lastErr = GetLastError();
+                LOG_ERROR("TokenStorage", MsgKey::LogStoreInitMoveFailed, lastErr);
+            }
+            break;
+        }
+        if (lastErr == ERROR_SHARING_VIOLATION ||
+            lastErr == ERROR_LOCK_VIOLATION ||
+            lastErr == ERROR_UNABLE_TO_MOVE_REPLACEMENT) {
+            Sleep(static_cast<DWORD>(15U << attempt));
+            continue;
+        }
+        break;
+    }
+
+    if (!replaced) {
+        if (lastErr != ERROR_FILE_NOT_FOUND) {
+            LOG_ERROR("TokenStorage", MsgKey::LogStoreAtomicReplaceFailed, lastErr);
+        }
+        std::error_code ec;
+        std::filesystem::remove(tempPath, ec);
+        return false;
+    }
+
+    LOG_DEBUG("TokenStorage", MsgKey::LogStorePersistedAccounts, accounts.size());
     return true;
 }
 
 bool TokenStorage::UpsertAccount(const CachedAccount& account) {
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
     auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
         return (account.steamId != 0 && a.steamId == account.steamId) ||
-               (!account.accountName.empty() && a.accountName == account.accountName);
+               (!account.accountName.empty() && EqualIgnoreCase(a.accountName, account.accountName));
     });
 
     if (it != accounts.end()) {
-        it->accountName = account.accountName;
+        if (!account.accountName.empty()) {
+            it->accountName = account.accountName;
+        }
         if (account.steamId != 0) it->steamId = account.steamId;
-        if (!account.refreshToken.empty()) it->refreshToken = account.refreshToken;
-        if (!account.accessToken.empty()) it->accessToken = account.accessToken;
+        if (!account.refreshToken.empty()) {
+            WipeString(it->refreshToken);
+            it->refreshToken = account.refreshToken;
+        }
+        if (!account.accessToken.empty()) {
+            WipeString(it->accessToken);
+            it->accessToken = account.accessToken;
+        }
         if (account.lastLoginTime > 0) it->lastLoginTime = account.lastLoginTime;
         // Merge policy for alias:
         // Ordinary logins pass empty alias, so NEVER overwrite an existing user-configured alias!
@@ -311,14 +522,19 @@ bool TokenStorage::UpsertAccount(const CachedAccount& account) {
     } else {
         CachedAccount sanitized = account;
         sanitized.alias = SanitizeAlias(account.alias);
-        accounts.push_back(sanitized);
+        accounts.push_back(std::move(sanitized));
     }
 
     return SaveAccounts(accounts);
 }
 
 bool TokenStorage::UpdateAccountAlias(uint64_t steamId, std::string_view newAlias) {
+    if (steamId == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
     auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
         return a.steamId == steamId;
     });
@@ -331,10 +547,57 @@ bool TokenStorage::UpdateAccountAlias(uint64_t steamId, std::string_view newAlia
     return SaveAccounts(accounts);
 }
 
-bool TokenStorage::MarkAccountInvalid(uint64_t steamId, bool isInvalid) {
+bool TokenStorage::UpdateAccountAlias(std::string_view accountName, std::string_view newAlias) {
+    if (accountName.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
+    auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
+        return EqualIgnoreCase(a.accountName, accountName);
+    });
+
+    if (it == accounts.end()) {
+        return false;
+    }
+
+    it->alias = SanitizeAlias(newAlias);
+    return SaveAccounts(accounts);
+}
+
+bool TokenStorage::MarkAccountInvalid(uint64_t steamId, bool isInvalid) {
+    if (steamId == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
+    auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
     auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
         return a.steamId == steamId;
+    });
+
+    if (it == accounts.end()) {
+        return false;
+    }
+
+    if (it->isInvalid == isInvalid) {
+        return true;
+    }
+
+    it->isInvalid = isInvalid;
+    return SaveAccounts(accounts);
+}
+
+bool TokenStorage::MarkAccountInvalid(std::string_view accountName, bool isInvalid) {
+    if (accountName.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
+    auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
+    auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
+        return EqualIgnoreCase(a.accountName, accountName);
     });
 
     if (it == accounts.end()) {
@@ -397,12 +660,15 @@ std::string TokenStorage::SanitizeAlias(std::string_view raw) {
             if ((lead & 0xE0) == 0xC0) needed = 1;
             else if ((lead & 0xF0) == 0xE0) needed = 2;
             else if ((lead & 0xF8) == 0xF0) needed = 3;
-            if (seqLen >= needed) {
+            if (needed > 0 && seqLen >= needed) {
                 break;
             } else {
                 trimmed.erase(idx);
                 break;
             }
+        }
+        while (!trimmed.empty() && trimmed.back() == ' ') {
+            trimmed.pop_back();
         }
     }
 
@@ -411,7 +677,11 @@ std::string TokenStorage::SanitizeAlias(std::string_view raw) {
 
 bool TokenStorage::DeleteAccount(uint64_t steamId) {
     if (steamId == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
     auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
         return a.steamId == steamId;
     });
@@ -420,53 +690,54 @@ bool TokenStorage::DeleteAccount(uint64_t steamId) {
         return false;
     }
 
-    if (!it->refreshToken.empty()) {
-        SecureZeroMemory(it->refreshToken.data(), it->refreshToken.size());
-    }
-    if (!it->accessToken.empty()) {
-        SecureZeroMemory(it->accessToken.data(), it->accessToken.size());
-    }
+    WipeAccountTokens(*it);
     accounts.erase(it);
 
-    LOG_INFO("TokenStorage", "已安全删除 SteamID {} 的本地凭据缓存", steamId);
+    LOG_INFO("TokenStorage", MsgKey::LogStoreDeletedSteamId, MaskSteamId(steamId));
     return SaveAccounts(accounts);
 }
 
 bool TokenStorage::DeleteAccount(std::string_view accountName) {
+    if (accountName.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     auto accounts = LoadAccounts();
+    ScopedAccountsWiper wiper{accounts};
+
     auto it = std::find_if(accounts.begin(), accounts.end(), [&](const CachedAccount& a) {
-        return a.accountName == accountName;
+        return EqualIgnoreCase(a.accountName, accountName);
     });
 
     if (it == accounts.end()) {
         return false;
     }
 
-    // Zero out memory of tokens before removal
-    if (!it->refreshToken.empty()) {
-        SecureZeroMemory(it->refreshToken.data(), it->refreshToken.size());
-    }
-    if (!it->accessToken.empty()) {
-        SecureZeroMemory(it->accessToken.data(), it->accessToken.size());
-    }
+    WipeAccountTokens(*it);
     accounts.erase(it);
 
-    LOG_INFO("TokenStorage", "已安全删除账号 {} 的本地凭据缓存", MaskAccount(accountName));
+    LOG_INFO("TokenStorage", MsgKey::LogStoreDeletedAccount, MaskAccount(accountName));
     return SaveAccounts(accounts);
 }
 
 bool TokenStorage::WipeAll() {
+    std::lock_guard<std::recursive_mutex> lock(g_storageMutex);
+
     const auto filePath = GetStorageFilePath();
     std::error_code ec;
     if (std::filesystem::exists(filePath, ec)) {
         SecureWipeFile(filePath);
-        LOG_INFO("TokenStorage", "已彻底粉碎并清理全部本地凭据缓存文件");
+        LOG_INFO("TokenStorage", MsgKey::LogStoreWipedAll);
     }
-    const auto tempPath = std::filesystem::path(filePath.wstring() + L".tmp");
-    if (std::filesystem::exists(tempPath, ec)) {
-        SecureWipeFile(tempPath);
+    const auto legacyTempPath = std::filesystem::path(filePath.wstring() + L".tmp");
+    if (std::filesystem::exists(legacyTempPath, ec)) {
+        SecureWipeFile(legacyTempPath);
     }
-    GetQuarantineLines().clear();
+    const auto pidTempPath = std::filesystem::path(
+        std::format(L"{}.{}.tmp", filePath.native(), GetCurrentProcessId()));
+    if (std::filesystem::exists(pidTempPath, ec)) {
+        SecureWipeFile(pidTempPath);
+    }
+    GetQuarantineStore().Clear();
     return true;
 }
 

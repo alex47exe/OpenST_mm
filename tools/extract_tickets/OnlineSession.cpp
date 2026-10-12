@@ -14,9 +14,6 @@
 #include <format>
 #include <iostream>
 #include <thread>
-#if defined(_WIN32)
-#include <conio.h>
-#endif
 
 namespace OST::ExtractTickets {
 
@@ -33,6 +30,22 @@ namespace {
         return std::format("{:04d}-{:02d}-{:02d} {:02d}:{:02d}",
                            tmVal.tm_year + 1900, tmVal.tm_mon + 1, tmVal.tm_mday,
                            tmVal.tm_hour, tmVal.tm_min);
+    }
+
+    [[nodiscard]] constexpr bool IsCredentialInvalidEResult(int32_t eresult) noexcept {
+        switch (eresult) {
+            case 5:  // k_EResultInvalidPassword
+            case 8:  // k_EResultInvalidParam / InvalidToken
+            case 15: // k_EResultAccessDenied
+            case 27: // k_EResultExpired
+            case 63: // k_EResultAccountLogonDenied
+            case 79: // k_EResultRequirePasswordReEntry
+            case 82: // k_EResultInvalidSignature
+            case 85: // k_EResultAccountLoginDeniedNeedTwoFactor
+                return true;
+            default:
+                return false;
+        }
     }
 
     void RenderLevel2Tui(const std::vector<CachedAccount>& accounts, size_t selected, bool fullClear = false) {
@@ -99,8 +112,10 @@ namespace {
             }
             std::string timeStr = std::format("({})", FormatTimestamp(acc.lastLoginTime));
             std::string statusTag = acc.isInvalid ? std::string{TR(MsgKey::L2TagInvalidCredential)}
-                                                  : std::string{TR(MsgKey::L2TagValidCredential)};
-            std::string rightPart = std::format("  {}  {}", timeStr, statusTag);
+                                                  : std::string{};
+            std::string rightPart = statusTag.empty()
+                                        ? std::format("  {}", timeStr)
+                                        : std::format("  {}  {}", timeStr, statusTag);
             size_t rightW = TuiEngine::GetDisplayWidth(rightPart);
             size_t prefixW = TuiEngine::GetDisplayWidth(prefix);
 
@@ -138,7 +153,7 @@ namespace {
             } else {
                 std::string fallbackLeft = prefix + acc.accountName;
                 size_t tagW = TuiEngine::GetDisplayWidth(statusTag);
-                if (innerW > tagW + 2) {
+                if (!statusTag.empty() && innerW > tagW + 2) {
                     std::string truncFb = TuiEngine::TruncateToWidth(fallbackLeft, innerW - tagW - 1);
                     size_t curW = TuiEngine::GetDisplayWidth(truncFb);
                     size_t pad = (innerW >= curW + tagW) ? (innerW - curW - tagW) : 0;
@@ -413,7 +428,11 @@ void OnlineSession::RunAccountSelectionMenu() {
                     needFullClear = true;
                     needRender = true;
                     if (newAlias) {
-                        TokenStorage::UpdateAccountAlias(targetAcc.steamId, *newAlias);
+                        if (targetAcc.steamId != 0) {
+                            TokenStorage::UpdateAccountAlias(targetAcc.steamId, *newAlias);
+                        } else {
+                            TokenStorage::UpdateAccountAlias(targetAcc.accountName, *newAlias);
+                        }
                         break; // Reload accounts & redraw menu with cursor preserved on 'selected'
                     }
                 }
@@ -435,7 +454,11 @@ void OnlineSession::RunAccountSelectionMenu() {
                     needFullClear = true;
                     needRender = true;
                     if (confirmed) {
-                        TokenStorage::DeleteAccount(targetAcc.steamId);
+                        if (targetAcc.steamId != 0) {
+                            TokenStorage::DeleteAccount(targetAcc.steamId);
+                        } else {
+                            TokenStorage::DeleteAccount(targetAcc.accountName);
+                        }
                         if (selected > accounts.size() - 1) {
                             selected = (accounts.size() > 1) ? (accounts.size() - 1) : 0;
                         }
@@ -472,7 +495,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                     }
 
                     SecureString secPwd(*pwdStr);
-                    SecureZeroMemory(pwdStr->data(), pwdStr->size());
+                    SecureWipeString(*pwdStr);
 
                     TuiEngine::ClearScreen();
                     auto loginRes = authService.LoginWithCredentials(*accName, secPwd);
@@ -515,7 +538,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                                 true);
                             if (pwdStr && !pwdStr->empty()) {
                                 SecureString secPwd(*pwdStr);
-                                SecureZeroMemory(pwdStr->data(), pwdStr->size());
+                                SecureWipeString(*pwdStr);
                                 TuiEngine::ClearScreen();
                                 auto loginRes = authService.LoginWithCredentials(acc.accountName, secPwd);
                                 secPwd.Clear();
@@ -537,27 +560,8 @@ void OnlineSession::RunAccountSelectionMenu() {
                         break;
                     }
 
-                    // Zero-network precheck on JWT expiration
-                    std::string activeToken = acc.accessToken;
-                    const auto nowSec = std::time(nullptr);
-                    int64_t exp = GetJwtExpiration(activeToken);
-                    bool needRefresh = activeToken.empty() || (exp > 0 && exp <= nowSec + 60);
-
-                    if (needRefresh && !acc.refreshToken.empty()) {
-                        auto accessOpt = authService.RefreshAccessToken(acc.steamId, acc.refreshToken);
-                        if (accessOpt && !accessOpt->empty()) {
-                            activeToken = *accessOpt;
-                            CachedAccount updated = acc;
-                            updated.accessToken = activeToken;
-                            updated.lastLoginTime = nowSec;
-                            TokenStorage::UpsertAccount(updated);
-                        }
-                        // Note: If refresh fails due to network/offline, do NOT mark invalid here!
-                        // CM ConnectAndLogon will determine validity authoritatively via EResult.
-                    }
-
                     TuiEngine::ClearScreen();
-                    RunInSessionExtraction(acc.accountName, acc.steamId, acc.refreshToken, activeToken);
+                    RunInSessionExtraction(acc.accountName, acc.steamId, acc.refreshToken, acc.accessToken);
                     needFullClear = true;
                     break;
                 } else if (!accounts.empty() && selected == accounts.size() + 1) {
@@ -568,6 +572,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                         TR(MsgKey::WipeAllDetail).data(),
                         false);
                     needFullClear = true;
+                    needRender = true;
                     if (confirmed) {
                         TokenStorage::WipeAll();
                         break;
@@ -600,105 +605,127 @@ void OnlineSession::RunInSessionExtraction(
     std::cout.flush();
 
     std::string curAccountName = accountName;
-    uint64_t curSteamId = steamId;
+    uint64_t curSteamId = steamId != 0 ? steamId : GetJwtSteamId(refreshToken);
     std::string curRefreshToken = refreshToken;
     std::string curAccessToken = accessToken;
 
-    if (!cmClient.ConnectAndLogon(curSteamId, curRefreshToken, curAccessToken)) {
-        // Attempt automatic refresh if token was stale
-        bool logonOk = false;
-        if (!curRefreshToken.empty()) {
-            TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::ConnectingRefreshingMsg), innerW, "\x1b[1;33m");
-            std::cout.flush();
-            auto accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken);
-            if (accessOpt && !accessOpt->empty()) {
-                curAccessToken = *accessOpt;
-                CachedAccount updated;
-                updated.accountName = curAccountName;
-                updated.steamId = curSteamId;
-                updated.refreshToken = curRefreshToken;
-                updated.accessToken = curAccessToken;
-                updated.lastLoginTime = std::time(nullptr);
-                TokenStorage::UpsertAccount(updated);
+    struct TokenWipeGuard {
+        std::string& refTok;
+        std::string& accTok;
+        TokenWipeGuard(std::string& r, std::string& a) noexcept : refTok(r), accTok(a) {}
+        ~TokenWipeGuard() noexcept {
+            SecureWipeString(refTok);
+            SecureWipeString(accTok);
+        }
+        TokenWipeGuard(const TokenWipeGuard&) = delete;
+        TokenWipeGuard& operator=(const TokenWipeGuard&) = delete;
+    } tokenGuard{curRefreshToken, curAccessToken};
 
+    if (!cmClient.ConnectAndLogon(curSteamId, curRefreshToken, curAccessToken)) {
+        bool logonOk = false;
+        int32_t lastE = cmClient.GetLastLogonEResult();
+        if (IsCredentialInvalidEResult(lastE) || curRefreshToken.empty()) {
+            if (curSteamId != 0) {
+                TokenStorage::MarkAccountInvalid(curSteamId, true);
+            } else {
+                TokenStorage::MarkAccountInvalid(curAccountName, true);
+            }
+            TuiEngine::ClearScreen();
+            bool relogin = TuiEngine::ShowConfirmModal(
+                TR(MsgKey::TokenExpiredTitle).data(),
+                TR_FMT(MsgKey::TokenExpiredMsg, curAccountName),
+                TR(MsgKey::TokenExpiredPrompt).data(),
+                true);
+            if (!relogin) {
+                return;
+            }
+            TuiEngine::ClearScreen();
+            auto pwdStr = TuiEngine::PromptInputModal(
+                TR(MsgKey::ReloginTitle).data(),
+                TR_FMT(MsgKey::ReloginPrompt, curAccountName),
+                "",
+                true);
+            if (!pwdStr || pwdStr->empty()) {
+                return;
+            }
+            SecureString secPwd(*pwdStr);
+            SecureWipeString(*pwdStr);
+            TuiEngine::ClearScreen();
+            auto loginRes = authService.LoginWithCredentials(curAccountName, secPwd);
+            secPwd.Clear();
+            if (loginRes.success) {
+                TokenStorage::MarkAccountInvalid(loginRes.steamId, false);
+                curSteamId = loginRes.steamId;
+                SecureWipeString(curRefreshToken);
+                SecureWipeString(curAccessToken);
+                curRefreshToken = loginRes.refreshToken;
+                curAccessToken = loginRes.accessToken;
+                TuiEngine::ClearScreen();
+                TuiEngine::DrawBox(top, left, modalW, modalH, TR(MsgKey::ConnectingTitle).data());
+                TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::ConnectingGatewayMsg), innerW, "\x1b[1;36m");
+                std::cout.flush();
                 if (cmClient.ConnectAndLogon(curSteamId, curRefreshToken, curAccessToken)) {
                     logonOk = true;
                 }
+            } else if (loginRes.cancelled) {
+                return;
+            } else {
+                TuiEngine::ClearScreen();
+                TuiEngine::ShowMessageModal(
+                    TR(MsgKey::LoginFailedTitle).data(),
+                    loginRes.errorMessage.empty() ? TR(MsgKey::LoginFailedDefaultMsg).data() : loginRes.errorMessage,
+                    TR(MsgKey::LoginFailedDetail).data());
+                return;
             }
         }
 
         if (!logonOk) {
-            int32_t lastE = cmClient.GetLastLogonEResult();
-            if (lastE == 8 /* InvalidToken */ || lastE == 5 /* AccessDenied */ || lastE == 15 /* AccessDenied */) {
-                TokenStorage::MarkAccountInvalid(curSteamId, true);
-                TuiEngine::ClearScreen();
-                bool relogin = TuiEngine::ShowConfirmModal(
-                    TR(MsgKey::TokenExpiredTitle).data(),
-                    TR_FMT(MsgKey::TokenExpiredMsg, curAccountName),
-                    TR(MsgKey::TokenExpiredPrompt).data(),
-                    true);
-                if (relogin) {
-                    TuiEngine::ClearScreen();
-                    auto pwdStr = TuiEngine::PromptInputModal(
-                        TR(MsgKey::ReloginTitle).data(),
-                        TR_FMT(MsgKey::ReloginPrompt, curAccountName),
-                        "",
-                        true);
-                    if (pwdStr && !pwdStr->empty()) {
-                        SecureString secPwd(*pwdStr);
-                        SecureZeroMemory(pwdStr->data(), pwdStr->size());
-                        TuiEngine::ClearScreen();
-                        auto loginRes = authService.LoginWithCredentials(curAccountName, secPwd);
-                        secPwd.Clear();
-                        if (loginRes.success) {
-                            TokenStorage::MarkAccountInvalid(loginRes.steamId, false);
-                            curSteamId = loginRes.steamId;
-                            curRefreshToken = loginRes.refreshToken;
-                            curAccessToken = loginRes.accessToken;
-                            TuiEngine::ClearScreen();
-                            TuiEngine::DrawBox(top, left, modalW, modalH, TR(MsgKey::ConnectingTitle).data());
-                            TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::ConnectingGatewayMsg), innerW, "\x1b[1;36m");
-                            std::cout.flush();
-                            if (cmClient.ConnectAndLogon(curSteamId, curRefreshToken, curAccessToken)) {
-                                logonOk = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!logonOk) {
-                TuiEngine::ClearScreen();
-                TuiEngine::ShowMessageModal(TR(MsgKey::ConnectingFailedTitle).data(),
-                                            TR(MsgKey::ConnectingFailedMsg).data(),
-                                            TR(MsgKey::ConnectingFailedDetail).data());
-                return;
-            }
+            TuiEngine::ClearScreen();
+            TuiEngine::ShowMessageModal(TR(MsgKey::ConnectingFailedTitle).data(),
+                                        TR(MsgKey::ConnectingFailedMsg).data(),
+                                        TR(MsgKey::ConnectingFailedDetail).data());
+            return;
         }
-    } else {
+    }
+
+    if (curSteamId == 0 && cmClient.GetSteamId() != 0) {
+        curSteamId = cmClient.GetSteamId();
+    }
+
+    // Ensure access token (and rolling refresh token) is fresh over authenticated CM session before WebAPI calls
+    int64_t exp = GetJwtExpiration(curAccessToken);
+    if ((curAccessToken.empty() || (exp > 0 && exp <= std::time(nullptr) + 300)) && !curRefreshToken.empty()) {
+        TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::ConnectingRefreshingMsg), innerW, "\x1b[1;33m");
+        std::cout.flush();
+        std::string newRefreshToken;
+        // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
+        auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
+        if (!accessOpt || accessOpt->empty()) {
+            accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken, &newRefreshToken);
+        }
+        if (accessOpt && !accessOpt->empty()) {
+            SecureWipeString(curAccessToken);
+            curAccessToken = std::move(*accessOpt);
+            SecureWipeString(*accessOpt);
+            cmClient.SetAccessToken(curAccessToken);
+        }
+        if (!newRefreshToken.empty()) {
+            SecureWipeString(curRefreshToken);
+            curRefreshToken = std::move(newRefreshToken);
+            SecureWipeString(newRefreshToken);
+            cmClient.SetRefreshToken(curRefreshToken);
+        }
+    }
+
+    {
         CachedAccount updated;
         updated.accountName = curAccountName;
         updated.steamId = curSteamId;
         updated.refreshToken = curRefreshToken;
         updated.accessToken = curAccessToken;
         updated.lastLoginTime = std::time(nullptr);
+        updated.isInvalid = false;
         TokenStorage::UpsertAccount(updated);
-    }
-
-    // Ensure access token is fresh before FetchOwnedGames WebAPI call
-    int64_t exp = GetJwtExpiration(curAccessToken);
-    if ((curAccessToken.empty() || (exp > 0 && exp <= std::time(nullptr) + 60)) && !curRefreshToken.empty()) {
-        auto accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken);
-        if (accessOpt && !accessOpt->empty()) {
-            curAccessToken = *accessOpt;
-            CachedAccount updated;
-            updated.accountName = curAccountName;
-            updated.steamId = curSteamId;
-            updated.refreshToken = curRefreshToken;
-            updated.accessToken = curAccessToken;
-            updated.lastLoginTime = std::time(nullptr);
-            TokenStorage::UpsertAccount(updated);
-        }
     }
 
     TuiEngine::PrintBounded(top + 2, left + 4, TR(MsgKey::SyncingGamesMsg), innerW, "\x1b[1;32m");
@@ -706,9 +733,39 @@ void OnlineSession::RunInSessionExtraction(
 
     auto games = authService.FetchOwnedGames(curSteamId, curAccessToken, &cmClient);
     if (games.empty() && !curRefreshToken.empty()) {
-        auto accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken);
+        std::string newRefreshToken;
+        // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
+        auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
+        if (!accessOpt || accessOpt->empty()) {
+            accessOpt = authService.RefreshAccessToken(curSteamId, curRefreshToken, &newRefreshToken);
+        }
+        bool refreshRotated = false;
+        if (!newRefreshToken.empty()) {
+            SecureWipeString(curRefreshToken);
+            curRefreshToken = std::move(newRefreshToken);
+            SecureWipeString(newRefreshToken);
+            cmClient.SetRefreshToken(curRefreshToken);
+            refreshRotated = true;
+        }
+        bool accessRefreshed = false;
         if (accessOpt && !accessOpt->empty()) {
-            curAccessToken = *accessOpt;
+            SecureWipeString(curAccessToken);
+            curAccessToken = std::move(*accessOpt);
+            SecureWipeString(*accessOpt);
+            cmClient.SetAccessToken(curAccessToken);
+            accessRefreshed = true;
+        }
+        if (accessRefreshed || refreshRotated) {
+            CachedAccount updated;
+            updated.accountName = curAccountName;
+            updated.steamId = curSteamId;
+            updated.refreshToken = curRefreshToken;
+            updated.accessToken = curAccessToken;
+            updated.lastLoginTime = std::time(nullptr);
+            updated.isInvalid = false;
+            TokenStorage::UpsertAccount(updated);
+        }
+        if (accessRefreshed) {
             games = authService.FetchOwnedGames(curSteamId, curAccessToken, &cmClient);
         }
     }
@@ -801,6 +858,12 @@ void OnlineSession::RunInSessionExtraction(
                         TR(MsgKey::CsvExportSuccessTitle).data(),
                         TR_FMT(MsgKey::CsvExportSuccessMsg, outPath),
                         TR(MsgKey::CsvExportSuccessDetail).data());
+                } else {
+                    TuiEngine::ClearScreen();
+                    TuiEngine::ShowMessageModal(
+                        TR(MsgKey::CsvExportFailedTitle).data(),
+                        TR_FMT(MsgKey::CsvExportFailedMsg, outPath.empty() ? curAccountName : outPath),
+                        TR(MsgKey::CsvExportFailedDetail).data());
                 }
             }
             continue;
@@ -816,6 +879,7 @@ void OnlineSession::RunInSessionExtraction(
                 TR(MsgKey::BatchConfirmDetail).data(),
                 false);
             needFullClear = true;
+            needRender = true;
             if (confirmed) {
                 int scrW = 80, scrH = 25;
                 TuiEngine::GetScreenSize(scrW, scrH);
@@ -834,8 +898,8 @@ void OnlineSession::RunInSessionExtraction(
 
                 for (const auto& game : gameMgr.Games()) {
                     if (TuiEngine::HasInputPending()) {
-                        auto ev = TuiEngine::ReadKey();
-                        if (ev.code == KeyCode::Escape) {
+                        KeyEvent checkKey = TuiEngine::ReadKey();
+                        if (checkKey.code == KeyCode::Escape) {
                             TuiEngine::FlushInputBuffer();
                             aborted = true;
                             break;
@@ -913,6 +977,7 @@ void OnlineSession::RunInSessionExtraction(
                     gameName = std::format("AppID {}", targetAppId);
                 }
                 inputAppId.clear();
+                UpdateLevel3Input(inputAppId);
             } else {
                 const auto pageItems = gameMgr.GetPageItems(gameMgr.CurrentPage());
                 if (selectedRow < pageItems.size()) {
@@ -938,15 +1003,34 @@ void OnlineSession::RunInSessionExtraction(
                 std::cout.flush();
 
                 auto progressCallback = [&](std::string_view stage, size_t current, size_t total, uint32_t depotId) {
-                    if (stage == "manifest" && total > 0) {
+                    if (stage == "tickets") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageTickets), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "meta") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageMeta), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "keys") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageKeys), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "tokens") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageTokens), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "manifests_start") {
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageManifests), eInnerW, "\x1b[1;33m");
+                        std::cout.flush();
+                    } else if (stage == "manifest" && total > 0) {
                         std::string progStr = TR_FMT(MsgKey::ExtractingManifestProgress, current, total, depotId);
                         TuiEngine::PrintBounded(eTop + 4, eLeft + 4, progStr, eInnerW, "\x1b[1;33m");
                         TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), current, total, std::format("Depot {}", depotId));
                         std::cout.flush();
                     } else if (stage == "done") {
-                        TuiEngine::PrintBounded(eTop + 4, eLeft + 4, TR(MsgKey::ExtractingManifestsDone), eInnerW, "\x1b[1;32m");
-                        TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), total, total, "Done");
+                        TuiEngine::PrintBounded(eTop + 3, eLeft + 4, TR(MsgKey::ExtractingStageComplete), eInnerW, "\x1b[1;32m");
+                        if (total > 0) {
+                            TuiEngine::PrintBounded(eTop + 4, eLeft + 4, TR(MsgKey::ExtractingManifestsDone), eInnerW, "\x1b[1;32m");
+                            TuiEngine::DrawProgressBar(eTop + 5, eLeft + 4, static_cast<int>(eInnerW), total, total, TR(MsgKey::ProgressDone));
+                        }
                         std::cout.flush();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                 };
 
@@ -1052,33 +1136,72 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
                                 MaskAccount(curAcc->accountName), appId) << "\n";
         }
 
+        uint64_t curSteamId = curAcc->steamId != 0 ? curAcc->steamId : GetJwtSteamId(curAcc->refreshToken);
+        std::string activeRefreshToken = curAcc->refreshToken;
         std::string activeToken = curAcc->accessToken;
-        bool logonOk = false;
-        if (!curAcc->isInvalid) {
-            logonOk = cmClient.ConnectAndLogon(curAcc->steamId, curAcc->refreshToken, activeToken);
-        }
+        struct SilentTokenWipeGuard {
+            std::string& refTok;
+            std::string& accTok;
+            SilentTokenWipeGuard(std::string& r, std::string& a) noexcept : refTok(r), accTok(a) {}
+            ~SilentTokenWipeGuard() noexcept {
+                SecureWipeString(refTok);
+                SecureWipeString(accTok);
+            }
+            SilentTokenWipeGuard(const SilentTokenWipeGuard&) = delete;
+            SilentTokenWipeGuard& operator=(const SilentTokenWipeGuard&) = delete;
+        } silentGuard{activeRefreshToken, activeToken};
 
-        if (!logonOk && !curAcc->refreshToken.empty()) {
-            std::cout << TR(MsgKey::CliExtractTokenExpired) << "\n";
-            auto refreshed = authService.RefreshAccessToken(curAcc->steamId, curAcc->refreshToken);
-            if (refreshed && !refreshed->empty()) {
-                activeToken = *refreshed;
-                logonOk = cmClient.ConnectAndLogon(curAcc->steamId, curAcc->refreshToken, activeToken);
-                if (logonOk) {
-                    TokenStorage::MarkAccountInvalid(curAcc->steamId, false);
+        bool logonOk = cmClient.ConnectAndLogon(curSteamId, activeRefreshToken, activeToken);
+
+        if (!logonOk) {
+            int32_t lastE = cmClient.GetLastLogonEResult();
+            if (IsCredentialInvalidEResult(lastE) || activeRefreshToken.empty()) {
+                if (curSteamId != 0) {
+                    TokenStorage::MarkAccountInvalid(curSteamId, true);
+                } else {
+                    TokenStorage::MarkAccountInvalid(curAcc->accountName, true);
                 }
             }
         }
 
-        if (!logonOk) {
-            int32_t lastE = cmClient.GetLastLogonEResult();
-            if (lastE == 8 /* InvalidToken */ || lastE == 5 /* AccessDenied */ || lastE == 15 /* AccessDenied */) {
-                TokenStorage::MarkAccountInvalid(curAcc->steamId, true);
-            }
-        }
-
         if (logonOk) {
+            if (curSteamId == 0 && cmClient.GetSteamId() != 0) {
+                curSteamId = cmClient.GetSteamId();
+            }
             std::cout << TR(MsgKey::CliExtractLoginSuccess) << "\n";
+
+            int64_t exp = GetJwtExpiration(activeToken);
+            if ((activeToken.empty() || (exp > 0 && exp <= std::time(nullptr) + 300)) && !activeRefreshToken.empty()) {
+                std::string newRefreshToken;
+                // Dual-Track Token Renewal: Track 1 (Native CM WebSocket RPC, immune to WebAPI 429) -> Track 2 (WebAPI HTTPS fallback)
+                auto accessOpt = cmClient.RefreshAccessTokenViaCm(&newRefreshToken);
+                if (!accessOpt || accessOpt->empty()) {
+                    accessOpt = authService.RefreshAccessToken(curSteamId, activeRefreshToken, &newRefreshToken);
+                }
+                if (accessOpt && !accessOpt->empty()) {
+                    SecureWipeString(activeToken);
+                    activeToken = std::move(*accessOpt);
+                    SecureWipeString(*accessOpt);
+                    cmClient.SetAccessToken(activeToken);
+                }
+                if (!newRefreshToken.empty()) {
+                    SecureWipeString(activeRefreshToken);
+                    activeRefreshToken = std::move(newRefreshToken);
+                    SecureWipeString(newRefreshToken);
+                    cmClient.SetRefreshToken(activeRefreshToken);
+                }
+            }
+
+            {
+                CachedAccount updated = *curAcc;
+                updated.steamId = curSteamId;
+                updated.refreshToken = activeRefreshToken;
+                updated.accessToken = activeToken;
+                updated.lastLoginTime = std::time(nullptr);
+                updated.isInvalid = false;
+                TokenStorage::UpsertAccount(updated);
+            }
+
             auto curCreds = cmClient.ExtractFullCredentials(appId, forceEticket);
 
             const bool hasTicket = curCreds.appOwnershipTicket.has_value() || curCreds.encryptedAppTicket.has_value();
@@ -1089,11 +1212,6 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
                 // 当前账号拥有正版授权，或者为用户显式指定/唯一账号
                 activeAcc = curAcc;
                 creds = std::move(curCreds);
-
-                CachedAccount updated = *curAcc;
-                updated.accessToken = activeToken;
-                updated.lastLoginTime = std::time(nullptr);
-                TokenStorage::UpsertAccount(updated);
                 break;
             }
 
@@ -1120,7 +1238,7 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
         if (fallbackAcc && fallbackCreds.has_value()) {
             activeAcc = fallbackAcc;
             creds = std::move(*fallbackCreds);
-            LOG_INFO("OnlineSession", "{}", TR_FMT(MsgKey::CliExtractFallbackBase, appId));
+            LOG_INFO("OnlineSession", MsgKey::CliExtractFallbackBase, appId);
         } else {
             std::cerr << TR(MsgKey::CliExtractFailedAll) << "\n";
             std::cerr << TR(MsgKey::CliExtractFailedAllTip) << "\n";

@@ -6,19 +6,20 @@
 namespace PipeManager::DenuvoAuth {
 
     // Checks whether cmdLine contains a specific argument (case-insensitive, token boundary aware).
-    bool HasCmdLineArg(const char* cmdLine, const char* arg);
+    [[nodiscard]] bool HasCmdLineArg(std::string_view cmdLine, std::string_view arg) noexcept;
+    [[nodiscard]] bool HasCmdLineArg(const char* cmdLine, const char* arg);
 
-    // Checks whether cmdLine contains any variant of -nodenuvo (-nodenuvo, -no-denuvo, -no_denuvo).
-    bool HasNoDenuvoArg(const char* cmdLine);
+    // Checks whether cmdLine contains any variant of -nodenuvo (-nodenuvo, -no-denuvo, -no_denuvo, /nodenuvo...).
+    [[nodiscard]] bool HasNoDenuvoArg(const char* cmdLine);
 
-    // Checks whether cmdLine contains any variant of -forcedenuvo (-forcedenuvo, -force-denuvo, -force_denuvo).
-    bool HasForcedDenuvoArg(const char* cmdLine);
+    // Checks whether cmdLine contains any variant of -forcedenuvo (-forcedenuvo, -force-denuvo, -force_denuvo, /forcedenuvo...).
+    [[nodiscard]] bool HasForcedDenuvoArg(const char* cmdLine);
 
-    // Checks whether cmdLine contains any variant of -dauth2 (-dauth2, --dauth2, -dauth-2, -dauth_2).
-    bool HasDAuth2Arg(const char* cmdLine);
+    // Checks whether cmdLine contains any variant of -dauth2 (-dauth2, --dauth2, -dauth-2, -dauth_2, /dauth2...).
+    [[nodiscard]] bool HasDAuth2Arg(const char* cmdLine);
 
-    // Checks whether cmdLine contains any variant of -lua (-lua, --lua, -d+).
-    bool HasLuaArg(const char* cmdLine);
+    // Checks whether cmdLine contains any variant of -lua (-lua, --lua, -d+, /lua, /d+).
+    [[nodiscard]] bool HasLuaArg(const char* cmdLine);
 
     // Called when CUser_SpawnProcess is intercepted in Hooks_Misc.
     // Checks the zero-operation gatekeeper (!hasLua && !hasDPlus -> returns immediately).
@@ -26,7 +27,7 @@ namespace PipeManager::DenuvoAuth {
     void OnSpawnProcess(AppId_t appId, const char* pExePath, const char* cmdLine);
 
     // Checks if the given app was launched with -d+ in this session.
-    bool IsDPlusLaunch(AppId_t appId);
+    [[nodiscard]] bool IsDPlusLaunch(AppId_t appId);
 
     // Clears the -d+ launch flag for the given app.
     void ClearDPlusLaunch(AppId_t appId);

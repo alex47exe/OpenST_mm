@@ -9,6 +9,14 @@ add_executable(ipc_codegen
     ipc_codegen/ipc_codegen.cpp
 )
 target_compile_features(ipc_codegen PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(ipc_codegen PRIVATE /utf-8 /W4 /permissive-)
+else()
+    target_compile_options(ipc_codegen PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+set_target_properties(ipc_codegen PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
 
 
 add_executable(extract_tickets
@@ -37,7 +45,17 @@ add_executable(extract_tickets
 )
 target_compile_features(extract_tickets PRIVATE cxx_std_20)
 if(MSVC)
-    target_compile_options(extract_tickets PRIVATE /utf-8 /Zc:preprocessor)
+    target_compile_options(extract_tickets PRIVATE /utf-8 /Zc:preprocessor /W4 /permissive- /wd4189)
+    set_source_files_properties(
+        extract_tickets/tinflate.c
+        extract_tickets/tinfgzip.c
+        extract_tickets/crc32.c
+        PROPERTIES COMPILE_OPTIONS "/W3"
+    )
+    set_source_files_properties(
+        extract_tickets/LuaFallbackParser.cpp
+        PROPERTIES COMPILE_OPTIONS "/wd4456"
+    )
 endif()
 target_link_libraries(extract_tickets PRIVATE
     advapi32
@@ -61,8 +79,11 @@ if(WIN32)
         Injector/ost-Injector.rc
     )
     target_compile_features(ost-Injector PRIVATE cxx_std_20)
+    target_include_directories(ost-Injector PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src/OSTPlatform/include"
+    )
     if(MSVC)
-        target_compile_options(ost-Injector PRIVATE /utf-8)
+        target_compile_options(ost-Injector PRIVATE /utf-8 /W4 /permissive-)
     endif()
     set_target_properties(ost-Injector PROPERTIES
         OUTPUT_NAME "ost-Injector"

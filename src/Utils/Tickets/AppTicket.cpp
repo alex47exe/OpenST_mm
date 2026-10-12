@@ -21,11 +21,12 @@ namespace AppTicket {
         std::unordered_map<AppId_t, AppTicketEntry> g_tickets;
     } // namespace
 
-    void SetSourceTicketProvider(SourceTicketProvider provider) {
+    void SetSourceTicketProvider(SourceTicketProvider provider) noexcept {
         g_sourceTicketProvider.store(provider, std::memory_order_release);
     }
 
     std::vector<uint8_t> GetSteamConfigStoreTicket(AppId_t appId) {
+        if (appId == 0) return {};
         if (auto provider = g_sourceTicketProvider.load(std::memory_order_acquire)) {
             return provider(appId);
         }
@@ -81,8 +82,9 @@ namespace AppTicket {
                 std::memcpy(&ticket.signatureOffset, ticket.data.data(), sizeof(uint32));
                 ticket.signatureSize = kAppTicketSignatureSize;
                 if (ticket.signatureOffset > ticket.totalSize ||
-                    ticket.signatureSize > (ticket.totalSize - ticket.signatureOffset)) {
-                    LOG_WARN("AppTicket: corrupted signature bounds for appId={}, sigOffset={}, sigSize={}, totalSize={}",
+                    ticket.signatureSize > (ticket.totalSize - ticket.signatureOffset) ||
+                    (ticket.appIdOffset + sizeof(AppId_t)) > ticket.totalSize) {
+                    LOG_WARN("AppTicket: corrupted signature or layout bounds for appId={}, sigOffset={}, sigSize={}, totalSize={}",
                              appId, ticket.signatureOffset, ticket.signatureSize, ticket.totalSize);
                     return false;
                 }
@@ -123,7 +125,7 @@ namespace AppTicket {
         return it != g_tickets.end() && !it->second.eTicket.empty();
     }
 
-    bool WriteAppOwnershipTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+    bool WriteAppOwnershipTicket(AppId_t appId, std::span<const uint8_t> data) {
         if (appId == 0 || data.size() < kSteamIdTicketMinimumSize) {
             LOG_WARN("WriteAppOwnershipTicket: invalid parameters (appId={}, size={})", appId, data.size());
             return false;
@@ -133,7 +135,9 @@ namespace AppTicket {
         {
             std::shared_lock lock(g_ticketMutex);
             auto it = g_tickets.find(appId);
-            if (it != g_tickets.end() && it->second.appTicket == data) {
+            if (it != g_tickets.end() &&
+                it->second.appTicket.size() == data.size() &&
+                std::memcmp(it->second.appTicket.data(), data.data(), data.size()) == 0) {
                 LOG_DEBUG("WriteAppOwnershipTicket: AppId {} ticket already up-to-date, skipping redundant write", appId);
                 return true;
             }
@@ -142,10 +146,14 @@ namespace AppTicket {
         {
             std::unique_lock lock(g_ticketMutex);
             auto& entry = g_tickets[appId];
-            entry.appTicket = data;
+            entry.appTicket.assign(data.begin(), data.end());
         }
         LOG_INFO("Wrote AppTicket for AppId {} ({} bytes)", appId, data.size());
         return true;
+    }
+
+    bool WriteAppOwnershipTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+        return WriteAppOwnershipTicket(appId, std::span<const uint8_t>(data));
     }
 
     bool RemoveAppOwnershipTicket(AppId_t appId) {
@@ -159,14 +167,16 @@ namespace AppTicket {
         return true;
     }
 
-    bool WriteEncryptedTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+    bool WriteEncryptedTicket(AppId_t appId, std::span<const uint8_t> data) {
         if (appId == 0 || data.empty()) return false;
 
         // Fast-path: if the identical ticket is already cached in memory, skip redundant write
         {
             std::shared_lock lock(g_ticketMutex);
             auto it = g_tickets.find(appId);
-            if (it != g_tickets.end() && it->second.eTicket == data) {
+            if (it != g_tickets.end() &&
+                it->second.eTicket.size() == data.size() &&
+                std::memcmp(it->second.eTicket.data(), data.data(), data.size()) == 0) {
                 LOG_DEBUG("WriteEncryptedTicket: AppId {} ticket already up-to-date, skipping redundant write", appId);
                 return true;
             }
@@ -175,10 +185,14 @@ namespace AppTicket {
         {
             std::unique_lock lock(g_ticketMutex);
             auto& entry = g_tickets[appId];
-            entry.eTicket = data;
+            entry.eTicket.assign(data.begin(), data.end());
         }
         LOG_INFO("Wrote ETicket for AppId {} ({} bytes)", appId, data.size());
         return true;
+    }
+
+    bool WriteEncryptedTicket(AppId_t appId, const std::vector<uint8_t>& data) {
+        return WriteEncryptedTicket(appId, std::span<const uint8_t>(data));
     }
 
     bool RemoveEncryptedTicket(AppId_t appId) {
@@ -199,20 +213,21 @@ namespace AppTicket {
         return g_tickets.erase(appId) > 0;
     }
 
-    uint64_t ExtractSteamIdFromTicketBytes(const uint8_t* data, size_t size) {
+    uint64_t ExtractSteamIdFromTicketBytes(std::span<const uint8_t> ticket) noexcept {
         // Layout: ticket bytes start with [uint32 Size][uint32 Version][uint64 SteamID][...].
-        if (!data || size < kSteamIdTicketMinimumSize) return 0;
+        if (ticket.size() < kSteamIdTicketMinimumSize) return 0;
         uint64_t steamId = 0;
-        std::memcpy(&steamId, data + kAppTicketSteamIdOffset, sizeof(uint64_t));
+        std::memcpy(&steamId, ticket.data() + kAppTicketSteamIdOffset, sizeof(uint64_t));
         return steamId;
     }
 
-    uint64_t ExtractSteamIdFromTicketBytes(const std::vector<uint8_t>& ticket) {
-        return ExtractSteamIdFromTicketBytes(ticket.data(), ticket.size());
+    uint64_t ExtractSteamIdFromTicketBytes(const uint8_t* data, size_t size) noexcept {
+        if (!data || size == 0) return 0;
+        return ExtractSteamIdFromTicketBytes(std::span<const uint8_t>(data, size));
     }
 
-    uint64_t ExtractSteamIdFromTicketBytes(std::span<const uint8_t> ticket) {
-        return ExtractSteamIdFromTicketBytes(ticket.data(), ticket.size());
+    uint64_t ExtractSteamIdFromTicketBytes(const std::vector<uint8_t>& ticket) noexcept {
+        return ExtractSteamIdFromTicketBytes(std::span<const uint8_t>(ticket));
     }
 
     uint64_t GetTicketSteamID(AppId_t appId) {
@@ -220,11 +235,7 @@ namespace AppTicket {
         std::shared_lock lock(g_ticketMutex);
         auto it = g_tickets.find(appId);
         if (it != g_tickets.end() && !it->second.appTicket.empty()) {
-            const uint64_t steamId = ExtractSteamIdFromTicketBytes(
-                it->second.appTicket.data(), it->second.appTicket.size());
-            if (steamId != 0) {
-                return steamId;
-            }
+            return ExtractSteamIdFromTicketBytes(it->second.appTicket);
         }
         return 0;
     }
