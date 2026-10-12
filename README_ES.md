@@ -124,6 +124,9 @@ seteticketurl("https://ejemplo.com/eticket")  -- punto de enlace para generar ET
 
 nodenuvo(1361510)    -- omitir procesamiento de Denuvo (equivalente a -nodenuvo, alias: disallowdenuvo)
 forcedenuvo(1361510) -- forzar procesamiento como Denuvo (equivalente a -forcedenuvo)
+
+setlegacycdkey(1361510, "ABCD-EFGH-JKMN-PQRS") -- sirve esta clave de CD minorista de terceros en el paso "Updating product key"
+-- Si no está configurada, se genera una clave sintética determinista por aplicación+cuenta (solo cumple con el paso local de Steam)
 ```
 Los nombres de todas las funciones **no distinguen entre mayúsculas y minúsculas**.
 

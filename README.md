@@ -127,6 +127,9 @@ seteticketurl("https://example.com/eticket") -- online ETicket minting endpoint 
 
 nodenuvo(1361510)    -- bypass Denuvo handling (same as -nodenuvo, alias: disallowdenuvo)
 forcedenuvo(1361510) -- force treat as Denuvo (same as -forcedenuvo)
+
+setlegacycdkey(1361510, "ABCD-EFGH-JKMN-PQRS") -- serve this third-party retail CD key at the "Updating product key" step
+-- If not configured, a deterministic synthetic key is generated per app+account (satisfies Steam's local step only)
 ```
 All function names are **case-insensitive**.
 

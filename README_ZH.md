@@ -124,6 +124,9 @@ seteticketurl("https://example.com/eticket")  -- 在线动态获取 ETicket 端�
 
 nodenuvo(1361510)    -- 跳过 Denuvo 处理（等价于启动项 -nodenuvo，别名: disallowdenuvo）
 forcedenuvo(1361510) -- 强制标记为 Denuvo（等价于启动项 -forcedenuvo）
+
+setlegacycdkey(1361510, "ABCD-EFGH-JKMN-PQRS") -- 在“Updating product key”步骤中提供此第三方零售 CD 密钥
+-- 如果未配置，则会为每个应用+账户生成一个确定性的合成密钥（仅满足 Steam 的本地步骤）
 ```
 所有函数名**不区分大小写**。
 
