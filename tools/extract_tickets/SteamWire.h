@@ -257,57 +257,60 @@ inline bool UnpackSteamMsg(
     return true;
 }
 
-// Extracts steamid (field 1) from CMsgProtoBufHeader
-inline uint64_t ExtractHeaderSteamId(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 0;
+struct SteamMsgHeader {
+    uint64_t steamId{0};
+    int32_t clientSessionId{0};
+    uint64_t targetJobId{0};
+    int32_t eresult{1};
+};
+
+// Parses all commonly needed fields from CMsgProtoBufHeader in a single pass
+inline SteamMsgHeader ParseSteamMsgHeader(std::span<const uint8_t> hdrBytes) {
+    SteamMsgHeader hdr;
+    if (hdrBytes.empty()) return hdr;
     ProtoReader r(hdrBytes);
     ProtoField f;
     while (r.ReadNext(f)) {
-        if (f.fieldNumber == 1) { // steamid (fixed64)
-            return (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+        switch (f.fieldNumber) {
+            case 1: // steamid (fixed64)
+                hdr.steamId = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+                break;
+            case 2: // client_sessionid (int32)
+                hdr.clientSessionId = static_cast<int32_t>(f.varintVal);
+                break;
+            case 11: { // job_id_target (fixed64)
+                uint64_t id = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
+                hdr.targetJobId = (id == UINT64_MAX) ? 0 : id;
+                break;
+            }
+            case 13: // eresult (int32)
+                hdr.eresult = static_cast<int32_t>(f.varintVal);
+                break;
+            default:
+                break;
         }
     }
-    return 0;
+    return hdr;
+}
+
+// Extracts steamid (field 1) from CMsgProtoBufHeader
+inline uint64_t ExtractHeaderSteamId(std::span<const uint8_t> hdrBytes) {
+    return ParseSteamMsgHeader(hdrBytes).steamId;
 }
 
 // Extracts client_sessionid (field 2) from CMsgProtoBufHeader
 inline int32_t ExtractHeaderClientSessionId(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 0;
-    ProtoReader r(hdrBytes);
-    ProtoField f;
-    while (r.ReadNext(f)) {
-        if (f.fieldNumber == 2) { // client_sessionid (int32)
-            return static_cast<int32_t>(f.varintVal);
-        }
-    }
-    return 0;
+    return ParseSteamMsgHeader(hdrBytes).clientSessionId;
 }
 
 // Extracts EResult (field 13) from CMsgProtoBufHeader
 inline int32_t ExtractHeaderEResult(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 1;
-    ProtoReader r(hdrBytes);
-    ProtoField f;
-    while (r.ReadNext(f)) {
-        if (f.fieldNumber == 13) { // eresult
-            return static_cast<int32_t>(f.varintVal);
-        }
-    }
-    return 1;
+    return ParseSteamMsgHeader(hdrBytes).eresult;
 }
 
 // Extracts job_id_target (field 11) from CMsgProtoBufHeader
 inline uint64_t ExtractHeaderTargetJobId(std::span<const uint8_t> hdrBytes) {
-    if (hdrBytes.empty()) return 0;
-    ProtoReader r(hdrBytes);
-    ProtoField f;
-    while (r.ReadNext(f)) {
-        if (f.fieldNumber == 11) { // job_id_target
-            uint64_t id = (f.wireType == 1) ? f.fixed64Val : f.varintVal;
-            return (id == UINT64_MAX) ? 0 : id;
-        }
-    }
-    return 0;
+    return ParseSteamMsgHeader(hdrBytes).targetJobId;
 }
 
 } // namespace OST::ExtractTickets

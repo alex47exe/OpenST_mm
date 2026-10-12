@@ -102,7 +102,7 @@ private:
     [[nodiscard]] bool ReadMatchingMsg(
         uint32_t expectedEMsg,
         std::vector<uint8_t>& outBody,
-        DWORD timeoutMs = 8000,
+        uint32_t timeoutMs = 8000,
         int32_t* outEResult = nullptr,
         uint64_t expectedJobId = 0);
     void UnpackMultiMsg(std::span<const uint8_t> bodySpan);

@@ -7,36 +7,56 @@
 #include "Utils.h"
 
 #include <chrono>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <thread>
 #include <unordered_set>
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <conio.h>
 #endif
 
 namespace OST::ExtractTickets {
 
 namespace {
-    std::string UrlEncode(std::string_view str) {
-        std::ostringstream escaped;
-        escaped.fill('0');
-        escaped << std::hex;
+    constexpr bool IsUrlUnreserved(unsigned char uc) noexcept {
+        return (uc >= 'A' && uc <= 'Z') ||
+               (uc >= 'a' && uc <= 'z') ||
+               (uc >= '0' && uc <= '9') ||
+               uc == '-' || uc == '_' || uc == '.' || uc == '~';
+    }
 
+    constexpr size_t ComputeUrlEncodedSize(std::string_view str) noexcept {
+        size_t len = 0;
         for (char c : str) {
-            if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
-                escaped << c;
+            len += IsUrlUnreserved(static_cast<unsigned char>(c)) ? 1 : 3;
+        }
+        return len;
+    }
+
+    void AppendUrlEncoded(std::string& dest, std::string_view str) {
+        static constexpr char kHex[] = "0123456789ABCDEF";
+        for (char c : str) {
+            const auto uc = static_cast<unsigned char>(c);
+            if (IsUrlUnreserved(uc)) {
+                dest.push_back(c);
             } else {
-                escaped << '%' << std::setw(2) << std::uppercase
-                        << static_cast<int>(static_cast<unsigned char>(c));
+                dest.push_back('%');
+                dest.push_back(kHex[(uc >> 4) & 0x0F]);
+                dest.push_back(kHex[uc & 0x0F]);
             }
         }
-        return escaped.str();
+    }
+
+    std::string UrlEncode(std::string_view str) {
+        std::string escaped;
+        escaped.reserve(ComputeUrlEncodedSize(str));
+        AppendUrlEncoded(escaped, str);
+        return escaped;
     }
 
     SteamLoginResult RunDualTrack2FaLoop(

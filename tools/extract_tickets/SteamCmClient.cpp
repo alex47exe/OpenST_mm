@@ -17,6 +17,15 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace OST::ExtractTickets {
 
@@ -34,8 +43,8 @@ namespace {
         return nameOpt.value_or("");
     }
 
-    static std::vector<std::string> s_cachedCmList;
-    static std::mutex s_cmListMutex;
+    std::vector<std::string> s_cachedCmList;
+    std::mutex s_cmListMutex;
 
     void PromoteWorkingCmServer(std::string_view endpoint) {
         if (endpoint.empty()) return;
@@ -201,18 +210,15 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
         std::span<const uint8_t> subHdr;
         std::span<const uint8_t> subBody;
         if (UnpackSteamMsg(subPacket, subEMsg, subHdr, subBody)) {
-            int32_t subSessionId = ExtractHeaderClientSessionId(subHdr);
-            if (subSessionId != 0) {
-                m_clientSessionId = subSessionId;
+            const auto hdr = ParseSteamMsgHeader(subHdr);
+            if (hdr.clientSessionId != 0) {
+                m_clientSessionId = hdr.clientSessionId;
             }
-            uint64_t subSteamId = ExtractHeaderSteamId(subHdr);
-            if (m_steamId == 0 && subSteamId != 0) {
-                m_steamId = subSteamId;
+            if (m_steamId == 0 && hdr.steamId != 0) {
+                m_steamId = hdr.steamId;
             }
-            int32_t subEResult = ExtractHeaderEResult(subHdr);
-            uint64_t subTargetJobId = ExtractHeaderTargetJobId(subHdr);
             LOG_TRACE("SteamCM", MsgKey::LogCmMultiSubMsg,
-                      subEMsg, subEResult, subTargetJobId, subBody.size());
+                      subEMsg, hdr.eresult, hdr.targetJobId, subBody.size());
 
             if (subEMsg == static_cast<uint32_t>(ESteamMsg::ClientHeartBeat)) {
                 ProtoWriter hb;
@@ -220,7 +226,7 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
                 continue;
             }
 
-            m_msgQueue.emplace_back(subEMsg, subTargetJobId, subEResult, std::vector<uint8_t>(subBody.begin(), subBody.end()));
+            m_msgQueue.emplace_back(subEMsg, hdr.targetJobId, hdr.eresult, std::vector<uint8_t>(subBody.begin(), subBody.end()));
         }
     }
 }
@@ -228,7 +234,7 @@ void SteamCmClient::UnpackMultiMsg(std::span<const uint8_t> bodySpan) {
 bool SteamCmClient::ReadMatchingMsg(
     uint32_t expectedEMsg,
     std::vector<uint8_t>& outBody,
-    DWORD timeoutMs,
+    uint32_t timeoutMs,
     int32_t* outEResult,
     uint64_t expectedJobId) {
 
@@ -264,7 +270,7 @@ bool SteamCmClient::ReadMatchingMsg(
         std::vector<uint8_t> frame;
         ScopedBufferWiper frameWiper{frame};
         bool isBinary = false;
-        DWORD remainingMs = static_cast<DWORD>(timeoutMs - elapsed);
+        uint32_t remainingMs = static_cast<uint32_t>(timeoutMs - elapsed);
         if (!m_ws.Receive(frame, isBinary, remainingMs)) {
             return false;
         }
@@ -274,18 +280,15 @@ bool SteamCmClient::ReadMatchingMsg(
         std::span<const uint8_t> bodySpan;
 
         if (UnpackSteamMsg(frame, eMsg, hdrSpan, bodySpan)) {
-            int32_t hdrSessionId = ExtractHeaderClientSessionId(hdrSpan);
-            if (hdrSessionId != 0) {
-                m_clientSessionId = hdrSessionId;
+            const auto hdr = ParseSteamMsgHeader(hdrSpan);
+            if (hdr.clientSessionId != 0) {
+                m_clientSessionId = hdr.clientSessionId;
             }
-            uint64_t hdrSteamId = ExtractHeaderSteamId(hdrSpan);
-            if (m_steamId == 0 && hdrSteamId != 0) {
-                m_steamId = hdrSteamId;
+            if (m_steamId == 0 && hdr.steamId != 0) {
+                m_steamId = hdr.steamId;
             }
-            int32_t eresult = ExtractHeaderEResult(hdrSpan);
-            uint64_t targetJobId = ExtractHeaderTargetJobId(hdrSpan);
             LOG_TRACE("SteamCM", MsgKey::LogCmRecvEMsg,
-                      eMsg, eresult, targetJobId, bodySpan.size());
+                      eMsg, hdr.eresult, hdr.targetJobId, bodySpan.size());
 
             // If heartbeat request from server, reply ClientHeartBeat
             if (eMsg == static_cast<uint32_t>(ESteamMsg::ClientHeartBeat)) {
@@ -308,13 +311,13 @@ bool SteamCmClient::ReadMatchingMsg(
                 continue;
             }
 
-            if (isMatch(eMsg, targetJobId)) {
-                if (outEResult) *outEResult = eresult;
+            if (isMatch(eMsg, hdr.targetJobId)) {
+                if (outEResult) *outEResult = hdr.eresult;
                 outBody.assign(bodySpan.begin(), bodySpan.end());
                 return true;
             }
 
-            m_msgQueue.emplace_back(eMsg, targetJobId, eresult, std::vector<uint8_t>(bodySpan.begin(), bodySpan.end()));
+            m_msgQueue.emplace_back(eMsg, hdr.targetJobId, hdr.eresult, std::vector<uint8_t>(bodySpan.begin(), bodySpan.end()));
         }
     }
 }
@@ -1194,16 +1197,9 @@ bool SteamCmClient::DetectDenuvoFromStore(uint32_t appId) {
     bool isDenuvo = false;
     if (resp.IsSuccess()) {
         auto drmNotice = JsonHelper::GetString(resp.body, "drm_notice");
-        if (drmNotice) {
-            std::string_view notice = *drmNotice;
-            constexpr std::string_view target = "denuvo";
-            auto it = std::ranges::search(notice, target, [](char c1, char c2) {
-                return std::tolower(static_cast<unsigned char>(c1)) == std::tolower(static_cast<unsigned char>(c2));
-            });
-            if (!it.empty()) {
-                isDenuvo = true;
-                LOG_INFO("SteamCM", MsgKey::LogCmDetectedDenuvoStore, appId, *drmNotice);
-            }
+        if (drmNotice && FindIgnoreCase(*drmNotice, "denuvo")) {
+            isDenuvo = true;
+            LOG_INFO("SteamCM", MsgKey::LogCmDetectedDenuvoStore, appId, *drmNotice);
         }
         std::lock_guard lock(s_denuvoMutex);
         s_denuvoCache[appId] = isDenuvo;
@@ -1430,8 +1426,8 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         }
 
         if (!downloadTasks.empty()) {
-            const uint32_t cellId = m_cellId;
-            manifestFuture = std::async(std::launch::async, [tasks = downloadTasks, appId, outDir, cellId, onProgress]() {
+            const auto initialCdnServers = GetCdnServers(m_cellId);
+            manifestFuture = std::async(std::launch::async, [tasks = std::move(downloadTasks), initialCdnServers, appId, outDir, onProgress]() {
                 std::vector<std::pair<uint32_t, std::string>> results(tasks.size());
                 std::atomic<size_t> nextIndex{0};
                 std::atomic<size_t> completedCount{0};
@@ -1447,9 +1443,8 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                             size_t idx = nextIndex.fetch_add(1, std::memory_order_relaxed);
                             if (idx >= tasks.size()) break;
                             const auto& t = tasks[idx];
-                            auto currentCdnServers = GetCdnServers(cellId);
                             auto downloaded = DownloadManifestPayload(
-                                appId, t.depotId, t.manifestId, t.reqCode, outDir, currentCdnServers, &http);
+                                appId, t.depotId, t.manifestId, t.reqCode, outDir, initialCdnServers, &http);
                             if (downloaded) {
                                 results[idx] = {t.depotId, std::move(*downloaded)};
                             }
