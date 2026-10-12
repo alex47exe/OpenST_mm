@@ -572,6 +572,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                         TR(MsgKey::WipeAllDetail).data(),
                         false);
                     needFullClear = true;
+                    needRender = true;
                     if (confirmed) {
                         TokenStorage::WipeAll();
                         break;
@@ -872,6 +873,7 @@ void OnlineSession::RunInSessionExtraction(
                 TR(MsgKey::BatchConfirmDetail).data(),
                 false);
             needFullClear = true;
+            needRender = true;
             if (confirmed) {
                 int scrW = 80, scrH = 25;
                 TuiEngine::GetScreenSize(scrW, scrH);
