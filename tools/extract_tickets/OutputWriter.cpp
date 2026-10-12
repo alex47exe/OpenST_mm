@@ -19,36 +19,6 @@ std::string TicketLine(const char* name, const std::optional<std::vector<uint8_t
     return std::format("{}({}bytes):{}\n", name, ticket->size(), ToHexString(*ticket));
 }
 
-bool WriteTextFileAtomic(const std::filesystem::path& targetPath, std::string_view content, bool binaryMode = false) {
-    std::filesystem::path tmpPath = targetPath;
-    tmpPath += ".tmp";
-    std::error_code ec;
-    std::filesystem::remove(tmpPath, ec);
-    {
-        std::ofstream out{tmpPath, binaryMode ? (std::ios::binary | std::ios::trunc) : std::ios::trunc};
-        if (!out || !(out << content)) {
-            std::filesystem::remove(tmpPath, ec);
-            return false;
-        }
-        out.flush();
-        if (!out) {
-            std::filesystem::remove(tmpPath, ec);
-            return false;
-        }
-    }
-
-    std::filesystem::rename(tmpPath, targetPath, ec);
-    if (ec) {
-        std::filesystem::remove(targetPath, ec);
-        ec.clear();
-        std::filesystem::rename(tmpPath, targetPath, ec);
-        if (ec) {
-            std::filesystem::remove(tmpPath, ec);
-            return false;
-        }
-    }
-    return true;
-}
 } // namespace
 
 bool WriteOutputs(uint32_t appId,

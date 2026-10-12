@@ -55,8 +55,9 @@ namespace OST::ExtractTickets {
 // Hex formatting
 [[nodiscard]] std::string ToHexString(std::span<const uint8_t> data);
 
-// File I/O
+// File I/O (INV-04 Transactional Atomic Write)
 bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t> data);
+bool WriteTextFileAtomic(const std::filesystem::path& path, std::string_view content, bool binaryMode = true);
 
 // Unicode & UTF-8 Path helpers
 [[nodiscard]] std::wstring Utf8ToWide(std::string_view utf8);

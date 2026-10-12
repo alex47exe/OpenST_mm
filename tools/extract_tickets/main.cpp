@@ -486,6 +486,11 @@ int Run(int argc, char** argv) {
                         layout = DrawLevel1Frame();
                         UpdateLevel1Input(layout, inputAppId);
                         continue;
+                    } else {
+                        TuiEngine::ClearScreen();
+                        layout = DrawLevel1Frame();
+                        UpdateLevel1Input(layout, inputAppId);
+                        continue;
                     }
                 }
 

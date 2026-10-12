@@ -173,6 +173,9 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(CsvExportSuccessTitle, "Export Successful", "导出成功", "Exportación Exitosa") \
     M(CsvExportSuccessMsg, "Table saved to: {}", "表格已保存至: {}", "Tabla guardada en: {}") \
     M(CsvExportSuccessDetail, "Encoded in UTF-8 with BOM; opens directly in Excel and spreadsheet apps.", "采用 UTF-8 BOM 编码，支持 Excel 或 WPS 直接双击打开查看。", "Codificado en UTF-8 con BOM; se puede abrir directamente en Excel u otros visores.") \
+    M(CsvExportFailedTitle, "Export Failed", "导出失败", "Fallo de Exportación") \
+    M(CsvExportFailedMsg, "Failed to save games table to: {}", "无法保存游戏列表表格至: {}", "No se pudo guardar la tabla en: {}") \
+    M(CsvExportFailedDetail, "Please check if the file is currently open in Excel/WPS or if write permissions are granted.", "请检查该文件是否正被 Excel/WPS 打开占用，或当前目录是否具备写权限。", "Verifique si el archivo está abierto en Excel o si tiene permisos de escritura.") \
     M(BatchConfirmTitle, "Batch Extract Credentials", "批量提取凭据", "Extracción de Credenciales por Lotes") \
     M(BatchConfirmMsg, "Batch extract credentials for all {} games in this account?", "确定要批量提取当前账号下全部 {} 款游戏的凭据吗？", "¿Desea extraer por lotes las credenciales de los {} juegos de esta cuenta?") \
     M(BatchConfirmDetail, "Automatically extracts tickets, keys and Lua scripts (safely rate-limited).", "程序将按序自动提取票据、密钥与 Lua 脚本 (内置限速保护账号安全)", "Se extraerán automáticamente tickets, claves y scripts Lua (con límite seguro).") \

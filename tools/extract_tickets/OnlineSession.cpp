@@ -858,6 +858,12 @@ void OnlineSession::RunInSessionExtraction(
                         TR(MsgKey::CsvExportSuccessTitle).data(),
                         TR_FMT(MsgKey::CsvExportSuccessMsg, outPath),
                         TR(MsgKey::CsvExportSuccessDetail).data());
+                } else {
+                    TuiEngine::ClearScreen();
+                    TuiEngine::ShowMessageModal(
+                        TR(MsgKey::CsvExportFailedTitle).data(),
+                        TR_FMT(MsgKey::CsvExportFailedMsg, outPath.empty() ? curAccountName : outPath),
+                        TR(MsgKey::CsvExportFailedDetail).data());
                 }
             }
             continue;
@@ -971,6 +977,7 @@ void OnlineSession::RunInSessionExtraction(
                     gameName = std::format("AppID {}", targetAppId);
                 }
                 inputAppId.clear();
+                UpdateLevel3Input(inputAppId);
             } else {
                 const auto pageItems = gameMgr.GetPageItems(gameMgr.CurrentPage());
                 if (selectedRow < pageItems.size()) {

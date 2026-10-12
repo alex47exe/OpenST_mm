@@ -17,12 +17,16 @@
 #include "../../src/OSTPlatform/include/OSTPlatform/SteamLocator.hpp"
 #endif
 
+#include "RaiiGuards.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <thread>
 
 namespace OST::ExtractTickets {
 
@@ -136,19 +140,44 @@ std::string ToHexString(std::span<const uint8_t> data) {
 }
 
 bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t> data) {
-    std::ofstream output{path, std::ios::binary | std::ios::trunc};
-    if (!output) {
-        const std::string utf8Path = PathToUtf8(path);
-        if (!TuiEngine::IsActive()) {
-            std::cerr << TR_FMT(MsgKey::OutCreateFileFailed, utf8Path) << "\n";
+    const auto tempPath = std::filesystem::path(
+        std::format(L"{}.{}.tmp", path.native(), GetCurrentProcessId()));
+
+    std::error_code ec;
+    std::filesystem::remove(tempPath, ec);
+
+    bool writeOk = false;
+    {
+        ScopedHandle hTemp{CreateFileW(
+            tempPath.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr)};
+        if (hTemp.IsValid()) {
+            DWORD bytesWritten = 0;
+            const auto* ptr = reinterpret_cast<const char*>(data.data());
+            size_t remaining = data.size();
+            bool hasError = false;
+            while (remaining > 0) {
+                DWORD chunk = static_cast<DWORD>((std::min)(remaining, static_cast<size_t>(MAXDWORD)));
+                if (!WriteFile(hTemp, ptr, chunk, &bytesWritten, nullptr) || bytesWritten == 0) {
+                    hasError = true;
+                    break;
+                }
+                ptr += bytesWritten;
+                remaining -= bytesWritten;
+            }
+            if (!hasError && FlushFileBuffers(hTemp)) {
+                writeOk = true;
+            }
         }
-        LOG_ERROR("Utils", MsgKey::LogUtilsCreateFileFailed, MaskPath(utf8Path));
-        return false;
     }
-    output.write(reinterpret_cast<const char*>(data.data()),
-                 static_cast<std::streamsize>(data.size()));
-    output.flush();
-    if (!output) {
+
+    if (!writeOk) {
+        std::filesystem::remove(tempPath, ec);
         const std::string utf8Path = PathToUtf8(path);
         if (!TuiEngine::IsActive()) {
             std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, utf8Path) << "\n";
@@ -156,7 +185,38 @@ bool WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t>
         LOG_ERROR("Utils", MsgKey::LogUtilsWriteFileFailed, MaskPath(utf8Path));
         return false;
     }
+
+    bool replaced = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (ReplaceFileW(path.c_str(), tempPath.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+            replaced = true;
+            break;
+        }
+        DWORD lastErr = GetLastError();
+        if (lastErr == ERROR_FILE_NOT_FOUND) {
+            if (MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                replaced = true;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (!replaced) {
+        std::filesystem::remove(tempPath, ec);
+        const std::string utf8Path = PathToUtf8(path);
+        if (!TuiEngine::IsActive()) {
+            std::cerr << TR_FMT(MsgKey::OutWriteFileFailed, utf8Path) << "\n";
+        }
+        LOG_ERROR("Utils", MsgKey::LogUtilsWriteFileFailed, MaskPath(utf8Path));
+        return false;
+    }
+
     return true;
+}
+
+bool WriteTextFileAtomic(const std::filesystem::path& path, std::string_view content, [[maybe_unused]] bool binaryMode) {
+    return WriteBinaryFile(path, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(content.data()), content.size()));
 }
 
 std::string JoinPath(std::string_view base, std::string_view name) {

@@ -89,31 +89,23 @@ bool GameListManager::ExportCsv(std::string_view accountName, std::string* outPa
 
     const std::filesystem::path filePath = Utf8Path(filename);
     const std::string filePathUtf8 = PathToUtf8(filePath);
-    std::ofstream ofs(filePath, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) {
-        LOG_ERROR("GameList", MsgKey::LogGameListCreateCsvFailed, filePathUtf8);
-        return false;
-    }
 
+    std::string csvData;
+    csvData.reserve(m_games.size() * 64 + 64);
     // Write UTF-8 BOM
-    const uint8_t bom[] = {0xEF, 0xBB, 0xBF};
-    ofs.write(reinterpret_cast<const char*>(bom), sizeof(bom));
-
-    // Write header
-    ofs << std::format("{},{},{},{}\n", TR(MsgKey::CsvIndex), TR(MsgKey::CsvAppId), TR(MsgKey::CsvName), TR(MsgKey::CsvType));
+    csvData.append("\xEF\xBB\xBF", 3);
+    csvData.append(std::format("{},{},{},{}\n", TR(MsgKey::CsvIndex), TR(MsgKey::CsvAppId), TR(MsgKey::CsvName), TR(MsgKey::CsvType)));
 
     for (size_t i = 0; i < m_games.size(); ++i) {
         const auto& g = m_games[i];
-        ofs << (i + 1) << ',' << g.appId << ',' << EscapeCsv(g.name) << ','
-            << (g.isShared ? TR(MsgKey::CsvShared) : TR(MsgKey::CsvOwned)) << '\n';
+        csvData.append(std::format("{},{},{},{}\n", i + 1, g.appId, EscapeCsv(g.name),
+                                   g.isShared ? TR(MsgKey::CsvShared) : TR(MsgKey::CsvOwned)));
     }
 
-    ofs.flush();
-    if (!ofs.good()) {
+    if (!WriteTextFileAtomic(filePath, csvData)) {
         LOG_ERROR("GameList", MsgKey::LogGameListCreateCsvFailed, filePathUtf8);
         return false;
     }
-    ofs.close();
 
     LOG_INFO("GameList", MsgKey::LogGameListExportCsvSuccess, MaskAccount(accountName), m_games.size());
     return true;
