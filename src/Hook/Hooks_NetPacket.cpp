@@ -2405,6 +2405,7 @@ namespace {
         HookScopeGuard hookGuard;
         if (!hookGuard.Entered() || eWebSocketOpCode != k_eWebSocketOpCode_Binary || !pubData || cubData < sizeof(MsgHdr)) {
             return oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
+        }
 
         // Legacy CD-key request (EMsg 730) is a non-proto struct message that
         // UnpackRaw skips. Intercept it here: if we answer it locally, suppress
@@ -2416,34 +2417,6 @@ namespace {
                 Hooks_NetPacket_LegacyKey::HandleSend(pubData, cubData)) {
                 return true;   // answered locally; report success so Steam treats it as sent
             }
-        }
-
-        std::lock_guard lock(g_SendMutex);
-        EMsg eMsg;
-        const uint8 *pHdr, *pBody;
-        uint32 cbHdr, cbBody;
-        bool result;
-        if (UnpackRaw(pubData, cubData, eMsg, pHdr, cbHdr, pBody, cbBody)) {
-            SendJob(eMsg, pBody, cbBody, pHdr, cbHdr);
-
-            if (g_SuppressSend) {
-                // CloudRedirect answered this RPC locally; do not forward to
-                // Valve. Report success so Steam treats the frame as sent.
-                return true;
-            }
-
-            if (g_NeedReplaceSend) {
-                uint32 newSize = 0;
-                uint8* buf = ReplaceSendPacket(pubData, cbHdr, pHdr,
-                                               g_SendNewBody, g_cbSendNewBody, &newSize);
-                result = buf
-                    ? oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, buf, newSize)
-                    : oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
-            } else {
-                result = oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
-            }
-        } else {
-            result = oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
         }
 
         const auto pkt = UnpackRaw(pubData, cubData);
@@ -2496,22 +2469,6 @@ namespace {
         Hooks_NetPacket_LegacyKey::Drain(
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
-
-        EMsg eMsg;
-        const uint8 *pBody, *pHdr;
-        uint32 cbBody, cbHdr;
-        if (UnpackRaw(pPacket->m_pubData, pPacket->m_cubData,
-                     eMsg, pHdr, cbHdr, pBody, cbBody)) {
-            RecvJob(eMsg, pBody, cbBody, pHdr, cbHdr);
-
-            if (g_NeedReplaceHdr || g_NeedReplaceBody) {
-                ReplaceRecvPacket(pPacket,
-                    g_NeedReplaceHdr  ? g_NewHdr  : pHdr,
-                    g_NeedReplaceHdr  ? g_cbNewHdr : cbHdr,
-                    g_NeedReplaceBody ? g_NewBody : pBody,
-                    g_NeedReplaceBody ? g_cbNewBody : cbBody);
-            }
-        }
 
         return oRecvPkt(pThis, pPacket);
     }
