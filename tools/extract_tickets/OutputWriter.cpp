@@ -19,6 +19,24 @@ std::string TicketLine(const char* name, const std::optional<std::vector<uint8_t
     return std::format("{}({}bytes):{}\n", name, ticket->size(), ToHexString(*ticket));
 }
 
+class EmitTracker {
+public:
+    [[nodiscard]] bool TryEmitAppId(uint32_t id) noexcept {
+        return m_emittedAppIds.insert(id).second;
+    }
+    [[nodiscard]] bool TryEmitManifest(uint32_t depotId) noexcept {
+        return m_emittedManifests.insert(depotId).second;
+    }
+    [[nodiscard]] bool TryEmitToken(uint32_t id) noexcept {
+        return m_emittedTokens.insert(id).second;
+    }
+
+private:
+    std::unordered_set<uint32_t> m_emittedAppIds;
+    std::unordered_set<uint32_t> m_emittedManifests;
+    std::unordered_set<uint32_t> m_emittedTokens;
+};
+
 } // namespace
 
 bool WriteOutputs(uint32_t appId,
@@ -93,20 +111,25 @@ bool WriteOutputs(uint32_t appId,
     std::string text;
     text.reserve(2048);
     std::format_to(std::back_inserter(text), "appid:{}\n", appId);
+    std::unordered_set<uint32_t> emittedTxtDlc;
     for (const auto& dlc : dlcs) {
-        if (!dlc.name.empty()) {
-            std::format_to(std::back_inserter(text), "dlc({}):{}\n", dlc.dlcId, SanitizeComment(dlc.name));
-        } else {
-            std::format_to(std::back_inserter(text), "dlc({})\n", dlc.dlcId);
+        if (emittedTxtDlc.insert(dlc.dlcId).second) {
+            if (!dlc.name.empty()) {
+                std::format_to(std::back_inserter(text), "dlc({}):{}\n", dlc.dlcId, SanitizeComment(dlc.name));
+            } else {
+                std::format_to(std::back_inserter(text), "dlc({})\n", dlc.dlcId);
+            }
         }
     }
+    std::unordered_set<uint32_t> emittedTxtKeys;
     for (const auto& dk : depotKeys) {
-        if (!dk.hexKey.empty()) {
+        if (!dk.hexKey.empty() && emittedTxtKeys.insert(dk.depotId).second) {
             std::format_to(std::back_inserter(text), "depotkey({}):{}\n", dk.depotId, dk.hexKey);
         }
     }
+    std::unordered_set<uint32_t> emittedTxtMans;
     for (const auto& dk : depotKeys) {
-        if (IsValidManifestId(dk.manifestId)) {
+        if (IsValidManifestId(dk.manifestId) && emittedTxtMans.insert(dk.depotId).second) {
             std::format_to(std::back_inserter(text), "manifest({}):{}\n", dk.depotId, dk.manifestId);
         }
     }
@@ -152,6 +175,8 @@ bool WriteOutputs(uint32_t appId,
         return std::filesystem::exists(p, diskEc);
     };
 
+    EmitTracker emitTracker;
+
     // 1. Base Game Unlocks (AppID and base game depots)
     std::format_to(std::back_inserter(luaText), "{}\n", TR(MsgKey::LuaBaseGame));
     const DepotKeyInfo* baseAppDk = nullptr;
@@ -162,19 +187,23 @@ bool WriteOutputs(uint32_t appId,
         }
     }
 
-    if (baseAppDk && !baseAppDk->hexKey.empty()) {
-        std::format_to(std::back_inserter(luaText), "addappid({}, 1, \"{}\")\n", appId, baseAppDk->hexKey);
-    } else {
-        std::format_to(std::back_inserter(luaText), "addappid({})\n", appId);
+    if (emitTracker.TryEmitAppId(appId)) {
+        if (baseAppDk && !baseAppDk->hexKey.empty()) {
+            std::format_to(std::back_inserter(luaText), "addappid({}, 1, \"{}\")\n", appId, baseAppDk->hexKey);
+        } else {
+            std::format_to(std::back_inserter(luaText), "addappid({})\n", appId);
+        }
     }
 
-    if (baseToken != 0) {
+    if (baseToken != 0 && emitTracker.TryEmitToken(appId)) {
         std::format_to(std::back_inserter(luaText), "addtoken({}, \"{}\")\n", appId, baseToken);
     }
 
     for (const auto& dk : depotKeys) {
-        if (dk.depotId != appId && (dk.dlcId == 0 || !ownedDlcIdSet.contains(dk.dlcId))) {
-            if (!dk.hexKey.empty()) {
+        const bool isDlcDepot = ownedDlcIdSet.contains(dk.depotId) ||
+                                (dk.dlcId != 0 && ownedDlcIdSet.contains(dk.dlcId));
+        if (dk.depotId != appId && !isDlcDepot) {
+            if (!dk.hexKey.empty() && emitTracker.TryEmitAppId(dk.depotId)) {
                 std::format_to(std::back_inserter(luaText), "addappid({}, 1, \"{}\")\n", dk.depotId, dk.hexKey);
             }
         }
@@ -187,7 +216,9 @@ bool WriteOutputs(uint32_t appId,
     }
     if (!hasBaseManifests) {
         for (const auto& dk : depotKeys) {
-            if (dk.depotId != appId && (dk.dlcId == 0 || !ownedDlcIdSet.contains(dk.dlcId))) {
+            const bool isDlcDepot = ownedDlcIdSet.contains(dk.depotId) ||
+                                    (dk.dlcId != 0 && ownedDlcIdSet.contains(dk.dlcId));
+            if (dk.depotId != appId && !isDlcDepot) {
                 if (IsValidManifestId(dk.manifestId)) {
                     hasBaseManifests = true;
                     break;
@@ -198,7 +229,7 @@ bool WriteOutputs(uint32_t appId,
 
     if (hasBaseManifests) {
         std::format_to(std::back_inserter(luaText), "\n{}\n", TR(MsgKey::LuaBaseManifests));
-        if (baseAppDk && IsValidManifestId(baseAppDk->manifestId)) {
+        if (baseAppDk && IsValidManifestId(baseAppDk->manifestId) && emitTracker.TryEmitManifest(appId)) {
             if (hasManifestOnDisk(appId, baseAppDk->manifestId)) {
                 std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", appId, baseAppDk->manifestId);
             } else {
@@ -206,8 +237,10 @@ bool WriteOutputs(uint32_t appId,
             }
         }
         for (const auto& dk : depotKeys) {
-            if (dk.depotId != appId && (dk.dlcId == 0 || !ownedDlcIdSet.contains(dk.dlcId))) {
-                if (IsValidManifestId(dk.manifestId)) {
+            const bool isDlcDepot = ownedDlcIdSet.contains(dk.depotId) ||
+                                    (dk.dlcId != 0 && ownedDlcIdSet.contains(dk.dlcId));
+            if (dk.depotId != appId && !isDlcDepot) {
+                if (IsValidManifestId(dk.manifestId) && emitTracker.TryEmitManifest(dk.depotId)) {
                     if (hasManifestOnDisk(dk.depotId, dk.manifestId)) {
                         std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", dk.depotId, dk.manifestId);
                     } else {
@@ -281,29 +314,43 @@ bool WriteOutputs(uint32_t appId,
                 isDepotIncomplete = false; // Pure logical DLC: zero physical files on CDN, always active
             }
 
+            // 纵深防御：对于既无物理实体又无公开名称的孤立空项直接跳过
+            if (!hasPhysicalDepot && dlc.name.empty()) {
+                LOG_DEBUG("OutputWriter", MsgKey::LogOutDroppedOrphanGhostDlc, dlc.dlcId);
+                continue;
+            }
+
             const std::string_view prefix = isDepotIncomplete ? "-- " : "";
             const std::string reasonSuffix = isDepotIncomplete ? (" -- " + std::string(TR(MsgKey::LuaDlcDepotMissing))) : "";
 
-            if (data.dlcDk && !data.dlcDk->hexKey.empty()) {
-                std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\")", prefix, dlc.dlcId, data.dlcDk->hexKey);
-            } else {
-                std::format_to(std::back_inserter(luaText), "{}addappid({}, 1)", prefix, dlc.dlcId);
-            }
+            if (emitTracker.TryEmitAppId(dlc.dlcId)) {
+                if (data.dlcDk && !data.dlcDk->hexKey.empty()) {
+                    std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\")", prefix, dlc.dlcId, data.dlcDk->hexKey);
+                } else {
+                    std::format_to(std::back_inserter(luaText), "{}addappid({}, 1)", prefix, dlc.dlcId);
+                }
 
-            if (!dlc.name.empty()) {
-                luaText += " -- " + SanitizeComment(dlc.name);
+                if (!dlc.name.empty()) {
+                    luaText += " -- " + SanitizeComment(dlc.name);
+                }
+                luaText += reasonSuffix + "\n";
+            } else {
+                LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedAppId, dlc.dlcId);
             }
-            luaText += reasonSuffix + "\n";
 
             auto dlcTokIt = appTokens.find(dlc.dlcId);
-            if (dlcTokIt != appTokens.end() && dlcTokIt->second != 0) {
+            if (dlcTokIt != appTokens.end() && dlcTokIt->second != 0 && emitTracker.TryEmitToken(dlc.dlcId)) {
                 std::format_to(std::back_inserter(luaText), "{}addtoken({}, \"{}\")\n", prefix, dlc.dlcId, dlcTokIt->second);
             }
 
             // Any subdepots of this DLC with keys
             for (const auto* subDk : data.subDepots) {
                 if (!subDk->hexKey.empty()) {
-                    std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\"){}\n", prefix, subDk->depotId, subDk->hexKey, reasonSuffix);
+                    if (emitTracker.TryEmitAppId(subDk->depotId)) {
+                        std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\"){}\n", prefix, subDk->depotId, subDk->hexKey, reasonSuffix);
+                    } else {
+                        LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedAppId, subDk->depotId);
+                    }
                 }
             }
         }
@@ -317,26 +364,34 @@ bool WriteOutputs(uint32_t appId,
 
                 // DLC itself manifest
                 if (data.dlcDk && IsValidManifestId(data.dlcDk->manifestId)) {
-                    const bool onDisk = hasManifestOnDisk(data.dlcDk->depotId, data.dlcDk->manifestId);
-                    if (onDisk) {
-                        std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")", data.dlcDk->depotId, data.dlcDk->manifestId);
+                    if (emitTracker.TryEmitManifest(data.dlcDk->depotId)) {
+                        const bool onDisk = hasManifestOnDisk(data.dlcDk->depotId, data.dlcDk->manifestId);
+                        if (onDisk) {
+                            std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")", data.dlcDk->depotId, data.dlcDk->manifestId);
+                        } else {
+                            std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}", data.dlcDk->depotId, data.dlcDk->manifestId, TR(MsgKey::LuaManifestMissing));
+                        }
+                        if (!dlc.name.empty()) {
+                            luaText += " -- " + SanitizeComment(dlc.name);
+                        }
+                        luaText += "\n";
                     } else {
-                        std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}", data.dlcDk->depotId, data.dlcDk->manifestId, TR(MsgKey::LuaManifestMissing));
+                        LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedManifest, data.dlcDk->depotId);
                     }
-                    if (!dlc.name.empty()) {
-                        luaText += " -- " + SanitizeComment(dlc.name);
-                    }
-                    luaText += "\n";
                 }
 
                 // Any subdepots of this DLC with manifests
                 for (const auto* subDk : data.subDepots) {
                     if (IsValidManifestId(subDk->manifestId)) {
-                        const bool onDisk = hasManifestOnDisk(subDk->depotId, subDk->manifestId);
-                        if (onDisk) {
-                            std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", subDk->depotId, subDk->manifestId);
+                        if (emitTracker.TryEmitManifest(subDk->depotId)) {
+                            const bool onDisk = hasManifestOnDisk(subDk->depotId, subDk->manifestId);
+                            if (onDisk) {
+                                std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", subDk->depotId, subDk->manifestId);
+                            } else {
+                                std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}\n", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaManifestMissing));
+                            }
                         } else {
-                            std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}\n", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaManifestMissing));
+                            LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedManifest, subDk->depotId);
                         }
                     }
                 }

@@ -268,7 +268,8 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(CliHelpNavTitle, "Interactive Shortcuts:", "交互快捷键:", "Atajos Interactivos:") \
     M(CliHelpNavL1, "  Level 1 (Main Menu):   [Digits] AppID   [Enter] Extract   [E] Force   [O] Online   [ESC] Clear   [Q] Exit", "  一级 (主界面):         [数字] 输入 AppID  [Enter] 提取凭据  [E] 强提加密  [O] 在线模式  [ESC] 清空  [Q] 退出", "  Nivel 1 (Principal):   [Dígitos] AppID    [Enter] Extraer   [E] Forzar    [O] En Línea  [ESC] Borrar  [Q] Salir") \
     M(CliHelpNavL2, "  Level 2 (Accounts):    [↑/↓] Select    [Enter] Login/Go   [R] Remark  [D] Delete   [-] Wipe      [ESC/Q] Back", "  二级 (账号管理):       [↑/↓] 选择账号     [Enter] 登录/进入 [R] 修改备注  [D] 删除账号  [-] 清空全部 [ESC/Q] 返回", "  Nivel 2 (Cuentas):     [↑/↓] Seleccionar  [Enter] Iniciar   [R] Nota      [D] Eliminar  [-] Borrar    [ESC/Q] Volver") \
-    M(CliHelpNavL3, "  Level 3 (Game Library):[↑/↓] Select    [←/→] Page         [Enter] Extract          [A] Batch     [L] CSV       [ESC/Q] Back", "  三级 (在线游戏库):     [↑/↓] 选择游戏     [←/→] 翻页浏览    [Enter] 提取凭据         [A] 批量全提  [L] 导出CSV   [ESC/Q] 返回", "  Nivel 3 (Biblioteca):  [↑/↓] Seleccionar  [←/→] Páginas     [Enter] Extraer          [A] Todo      [L] CSV       [ESC/Q] Volver")
+    M(CliHelpNavL3, "  Level 3 (Game Library):[↑/↓] Select    [←/→] Page         [Enter] Extract          [A] Batch     [L] CSV       [ESC/Q] Back", "  三级 (在线游戏库):     [↑/↓] 选择游戏     [←/→] 翻页浏览    [Enter] 提取凭据         [A] 批量全提  [L] 导出CSV   [ESC/Q] 返回", "  Nivel 3 (Biblioteca):  [↑/↓] Seleccionar  [←/→] Páginas     [Enter] Extraer          [A] Todo      [L] CSV       [ESC/Q] Volver") \
+    M(CliExtractPurgedGhostDlcs, "  -> Filtered {} unreleased/deprecated ghost DLC(s) with no depots or public metadata", "  -> 已过滤 {} 个无 Depot 且无公开元数据的未发售/弃用幽灵 DLC", "  -> Se filtraron {} DLC(s) obsoletos/no publicados sin depots ni metadatos públicos")
 
 #if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
 #define OST_I18N_LOG_MESSAGES(M) \
@@ -470,7 +471,11 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(LogWsConnected, "Successfully established secure WebSocket connection: {} (elapsed: {}ms)", "已成功建立安全 WebSocket 连接: {} (耗时: {}ms)", "Conexión WebSocket segura establecida con éxito: {} (tiempo: {}ms)") \
     M(LogWsSendFailed, "WinHttpWebSocketSend failed (error={})", "WinHttpWebSocketSend 失败 (error={})", "WinHttpWebSocketSend falló (error={})") \
     M(LogWsRecvError, "WinHttpWebSocketReceive error (error={})", "WinHttpWebSocketReceive 错误 (error={})", "Error en WinHttpWebSocketReceive (error={})") \
-    M(LogWsPeerClosed, "Received WebSocket close frame from peer", "收到对端 WebSocket 关闭帧", "Se recibió trama de cierre WebSocket del par")
+    M(LogWsPeerClosed, "Received WebSocket close frame from peer", "收到对端 WebSocket 关闭帧", "Se recibió trama de cierre WebSocket del par") \
+    M(LogCmFullPurgedGhostDlc, "Purged orphaned ghost DLC AppID {} (zero physical depots and zero public name metadata)", "已净化剔除孤立幽灵 DLC AppID {} (零物理 Depot 且零公开名称元数据)", "Se purgó el DLC fantasma huérfano AppID {} (cero depots físicos y cero metadatos de nombre)") \
+    M(LogOutDeduplicatedAppId, "Topological deduplication: Skipped duplicate unlock directive for AppID/Depot {}", "拓扑防重门禁: 已跳过针对 AppID/Depot {} 的重复解锁指令", "Deduplicación topológica: Se omitió directiva de desbloqueo duplicada para AppID/Depot {}") \
+    M(LogOutDeduplicatedManifest, "Topological deduplication: Skipped duplicate manifest directive for Depot {}", "拓扑防重门禁: 已跳过针对 Depot {} 的重复清单配置", "Deduplicación topológica: Se omitió directiva de manifiesto duplicada para Depot {}") \
+    M(LogOutDroppedOrphanGhostDlc, "Defense-in-depth: Dropped orphaned ghost DLC AppID {} from emit pipeline", "纵深防御门禁: 已从发射管线丢弃孤立幽灵 DLC AppID {}", "Defensa en profundidad: Se descartó el DLC fantasma huérfano AppID {} de la tubería de emisión")
 #else
 #define OST_I18N_LOG_MESSAGES(M)
 #endif

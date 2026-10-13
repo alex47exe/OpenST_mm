@@ -417,6 +417,20 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
         }
     }
 
+    // 本地模式对称提纯：剔除既无物理清单/密钥又无有效名称的幽灵 DLC
+    std::erase_if(dlcMap, [&](const auto& item) {
+        const auto& [id, d] = item;
+        const bool hasPhysicalDepot = (knownDepotManifests.contains(id) && !knownDepotManifests[id].empty()) ||
+                                      allDepotKeys.contains(id);
+        if (!hasPhysicalDepot && d.name.empty()) {
+            knownDlcIds.erase(id);
+            knownDepotManifests.erase(id);
+            depotToDlc.erase(id);
+            return true;
+        }
+        return false;
+    });
+
     outDlcs.clear();
     outDlcs.reserve(dlcMap.size());
     for (const auto& [id, info] : dlcMap) {
