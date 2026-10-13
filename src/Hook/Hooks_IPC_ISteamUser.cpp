@@ -322,9 +322,12 @@ namespace {
         GetEncryptedAppTicketResp resp{pWrite};
         if (!resp.ok()) return;
 
-        if (!resp.set_pTicket(ticket)) return;
+        if (!resp.set_pTicket(ticket)) {
+            LOG_IPC_WARN("GetEncryptedAppTicket: AppId={} failed to write ticket payload (ticket_bytes={})",
+                         appId, ticket.size());
+            return;
+        }
         resp.set_returnValue(true);
-        resp.set_pcbTicket(ticketSize);
 
         // Arms the activation delivery pulse (2500ms) upon successful ticket delivery:
         if (!PipeManager::IsToolPipe(pipe, appId)) {

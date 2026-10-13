@@ -725,11 +725,12 @@ private:
                 "}\n\n"
                 "[[nodiscard]] inline bool CopyBytes(std::span<uint8> bytes, size_t offset, size_t capacity,\n"
                 "                                    std::span<const uint8> value) noexcept {\n"
+                "    if (offset > bytes.size() || capacity > bytes.size() - offset) return false;\n"
+                "    if (value.size() > capacity) return false;\n"
                 "    auto dst = Slice(bytes, offset, capacity);\n"
                 "    if (dst.size() != capacity) return false;\n"
-                "    const size_t count = (std::min)(dst.size(), value.size());\n"
-                "    if (count) std::memcpy(dst.data(), value.data(), count);\n"
-                "    if (count < dst.size()) std::memset(dst.data() + count, 0, dst.size() - count);\n"
+                "    if (!value.empty()) std::memcpy(dst.data(), value.data(), value.size());\n"
+                "    if (value.size() < dst.size()) std::memset(dst.data() + value.size(), 0, dst.size() - value.size());\n"
                 "    return true;\n"
                 "}\n\n"
                 "template <class T>\n"
@@ -1008,10 +1009,21 @@ private:
                 out_ << "    [[nodiscard]] std::span<uint8> " << field.name << "() noexcept { return detail::Slice(body(), "
                      << offset << ", " << length << "); }\n"
                      << "    [[nodiscard]] std::span<const uint8> " << field.name
-                     << "() const noexcept { return detail::Slice(body(), " << offset << ", " << length << "); }\n"
-                     << "    [[nodiscard]] bool set_" << field.name
-                     << "(std::span<const uint8> value) noexcept { return detail::CopyBytes(body(), "
-                     << offset << ", " << length << ", value); }\n";
+                     << "() const noexcept { return detail::Slice(body(), " << offset << ", " << length << "); }\n";
+                if (const Field* lenField = findField(sideFields, field.lenRef)) {
+                    const std::string& lenType = lenField->type;
+                    out_ << "    [[nodiscard]] bool set_" << field.name << "(std::span<const uint8> value) noexcept {\n"
+                         << "        if (value.size() > static_cast<size_t>((std::numeric_limits<" << lenType << ">::max)())) return false;\n"
+                         << "        const size_t offset = " << offset << ";\n"
+                         << "        if (offset > body().size() || value.size() > body().size() - offset) return false;\n"
+                         << "        set_" << field.lenRef << "(static_cast<" << lenType << ">(value.size()));\n"
+                         << "        return detail::CopyBytes(body(), offset, value.size(), value);\n"
+                         << "    }\n";
+                } else {
+                    out_ << "    [[nodiscard]] bool set_" << field.name
+                         << "(std::span<const uint8> value) noexcept { return detail::CopyBytes(body(), "
+                         << offset << ", " << length << ", value); }\n";
+                }
             } else {
                 out_ << "    [[nodiscard]] " << field.type << " " << field.name
                      << "() const noexcept { return detail::Read<" << field.type << ">(body(), " << offset << "); }\n"
@@ -1062,9 +1074,14 @@ private:
         return result;
     }
 
+    static const Field* findField(const std::vector<Field>& fields, std::string_view name) {
+        auto it = std::find_if(fields.begin(), fields.end(),
+                               [name](const Field& field) { return field.name == name; });
+        return it != fields.end() ? &(*it) : nullptr;
+    }
+
     static bool containsField(const std::vector<Field>& fields, std::string_view name) {
-        return std::any_of(fields.begin(), fields.end(),
-                           [name](const Field& field) { return field.name == name; });
+        return findField(fields, name) != nullptr;
     }
 
     static bool containsName(const std::vector<std::string>& names, std::string_view name) {
