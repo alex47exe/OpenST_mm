@@ -49,6 +49,63 @@ struct ScopedHandle {
     [[nodiscard]] bool IsValid() const noexcept { return handle != INVALID_HANDLE_VALUE && handle != nullptr; }
 };
 
+// RAII wrapper for Windows Job Object with KILL_ON_JOB_CLOSE
+struct ScopedJobObject {
+    HANDLE handle{nullptr};
+
+    ScopedJobObject() noexcept {
+        handle = CreateJobObjectW(nullptr, nullptr);
+        if (handle) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(handle, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        }
+    }
+
+    ~ScopedJobObject() noexcept {
+        if (handle) {
+            CloseHandle(handle);
+            handle = nullptr;
+        }
+    }
+
+    ScopedJobObject(const ScopedJobObject&) = delete;
+    ScopedJobObject& operator=(const ScopedJobObject&) = delete;
+
+    ScopedJobObject(ScopedJobObject&& other) noexcept : handle(other.handle) {
+        other.handle = nullptr;
+    }
+
+    ScopedJobObject& operator=(ScopedJobObject&& other) noexcept {
+        if (this != &other) {
+            if (handle) {
+                CloseHandle(handle);
+            }
+            handle = other.handle;
+            other.handle = nullptr;
+        }
+        return *this;
+    }
+
+    bool Assign(HANDLE hProcess) noexcept {
+        if (!handle || !hProcess || hProcess == INVALID_HANDLE_VALUE) return false;
+        return AssignProcessToJobObject(handle, hProcess) != FALSE;
+    }
+
+    [[nodiscard]] bool IsValid() const noexcept { return handle != nullptr; }
+    [[nodiscard]] HANDLE Get() const noexcept { return handle; }
+};
+
+// RAII guard for spoofed Steam environment variables
+struct ScopedSteamEnvGuard {
+    ~ScopedSteamEnvGuard() noexcept {
+        SetEnvironmentVariableA("SteamAppId", nullptr);
+        SetEnvironmentVariableA("SteamGameId", nullptr);
+        SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
+        SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
+    }
+};
+
 // RAII wrapper for MapViewOfFile memory pointer
 struct ScopedFileMappingView {
     const void* address{nullptr};

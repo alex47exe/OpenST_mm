@@ -93,6 +93,21 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(ExtractSuccessDetail, "Files saved in ./{}/ directory", "文件已保存至 ./{}/ 目录中", "Archivos guardados en el directorio ./{}/") \
     M(ExtractWarnTitle, "Extraction Warning", "提取警告", "Aviso de Extracción") \
     M(ExtractWarnMsg, "AppID {} extracted, but some outputs may be limited", "AppID {} 提取完成，部分输出可能受限", "AppID {} extraído, pero algunas salidas pueden estar limitadas") \
+    M(ExtractErrNoSteamTitle, "Steam Client Not Found", "无法连接 Steam 客户端", "Cliente Steam No Encontrado") \
+    M(ExtractErrNoSteamMsg, "Could not establish IPC session with local Steam for AppID {}.", "未能与本地 Steam 客户端建立 IPC 会话 (AppID {})。", "No se pudo establecer sesión IPC con Steam para AppID {}.") \
+    M(ExtractErrNoSteamDetail, "Please ensure Steam is running and logged in, or press [O] for Online Mode.", "请确保 Steam 客户端已启动且已登录，或按 [O] 使用在线模式提取。", "Asegúrese de que Steam esté iniciado o presione [O] para Modo En Línea.") \
+    M(ExtractErrNoLicenseTitle, "No License or Payload Found", "未发现有效授权或许可资产", "Sin Licencia ni Activos Válidos") \
+    M(ExtractErrNoLicenseMsg, "No ownership tickets, depot keys, manifests, or tokens found for AppID {}.", "未检测到 AppID {} 的任何有效所有权票据、Depot 密钥、清单或访问令牌。", "No se encontraron tickets, claves de depot, manifiestos ni tokens para AppID {}.") \
+    M(ExtractErrNoLicenseDetail, "The current account does not own this app and no cache was found on disk.", "当前登录账号未拥有该游戏，且本地硬盘中亦无对应资产缓存。", "La cuenta actual no posee este juego y no se encontró caché en el disco.") \
+    M(ExtractErrDiskIoTitle, "Disk Write Error", "磁盘写入受阻", "Error de Escritura en Disco") \
+    M(ExtractErrDiskIoMsg, "Failed to create output directory or write asset files for AppID {}.", "为 AppID {} 创建输出目录或写入凭据文件失败。", "Fallo al crear el directorio de salida o escribir archivos para AppID {}.") \
+    M(ExtractErrDiskIoDetail, "Please check disk space, folder permissions, or antivirus settings.", "请检查磁盘剩余空间、文件夹写入权限或安全软件拦截记录。", "Compruebe el espacio en disco, permisos de carpeta o antivirus.") \
+    M(ExtractErrTimeoutTitle, "Extraction Timed Out", "凭据提取超时", "Tiempo de Espera Agotado") \
+    M(ExtractErrTimeoutMsg, "Timed out waiting for AppID {} credentials from Steam (exceeded 15s limit).", "等待获取 AppID {} 的 Steam 凭据响应超时 (超过 15 秒上限)。", "Tiempo de espera agotado solicitando credenciales para AppID {} (límite 15s).") \
+    M(ExtractErrTimeoutDetail, "Steam IPC may be frozen. The background worker was terminated safely.", "Steam 本地服务可能处于假死状态，已安全销毁后台子进程。", "El IPC de Steam podría estar congelado. Proceso secundario cancelado con éxito.") \
+    M(ExtractErrCrashTitle, "Worker Subprocess Crashed", "子进程执行异常", "El Proceso Secundario Falló") \
+    M(ExtractErrCrashMsg, "The extraction worker encountered an unexpected system error for AppID {}.", "提取子进程在处理 AppID {} 时遭遇未预期的系统级异常。", "El proceso de extracción encontró un error inesperado para AppID {}.") \
+    M(ExtractErrCrashDetail, "Please check extract_tickets_debug.log for diagnostic details.", "详情请查阅 extract_tickets_debug.log 诊断日志。", "Consulte extract_tickets_debug.log para detalles de diagnóstico.") \
     M(BatchExtractTitle, "Batch Extracting Credentials", "正在批量提取凭据", "Extracción de Credenciales por Lotes") \
     M(BatchAbortedTitle, "Batch Extraction Cancelled", "批量提取已中止", "Extracción por Lotes Cancelada") \
     M(BatchAbortedMsg, "Operation cancelled. Successfully processed {} / {} games.", "操作已中止，已成功处理 {} / {} 款游戏凭据。", "Operación cancelada. Se procesaron con éxito {} / {} juegos.") \

@@ -38,5 +38,22 @@ struct DlcInfo {
     HSteamUser user,
     std::vector<DlcInfo>& outDlcs);
 
+enum class WorkerExitCode : uint32_t {
+    Success = 0,
+    ErrGeneral = 1,
+    ErrNoSteamOrSession = 2,
+    ErrNoLicenseOrPayload = 3,
+    ErrDiskIO = 4,
+    ErrTimeout = 5,
+    ErrCrash = 6
+};
+
+[[nodiscard]] bool HasSubstantivePayload(
+    const std::optional<std::vector<uint8_t>>& ownership,
+    const std::optional<std::vector<uint8_t>>& encrypted,
+    const std::vector<DepotKeyInfo>& depotKeys,
+    const std::vector<DlcInfo>& dlcs,
+    const std::unordered_map<uint32_t, uint64_t>& appTokens) noexcept;
+
 } // namespace OST::ExtractTickets
 

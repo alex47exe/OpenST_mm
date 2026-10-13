@@ -51,6 +51,7 @@ namespace OST::ExtractTickets {
 [[nodiscard]] std::optional<uint32_t> ParseAppId(std::string_view value) noexcept;
 [[nodiscard]] std::string SanitizeComment(std::string_view text);
 [[nodiscard]] std::vector<std::string> TokenizeQuoted(std::string_view line);
+[[nodiscard]] std::wstring QuoteCmdArg(std::wstring_view arg);
 
 // Hex formatting
 [[nodiscard]] std::string ToHexString(std::span<const uint8_t> data);
