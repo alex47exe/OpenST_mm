@@ -490,8 +490,7 @@ int Run(int argc, char** argv) {
 
         // Single-key 'o' or 'O' directly jumps to Online Mode (no Enter required!)
         if (ev.code == KeyCode::Char && (ev.ch == 'o' || ev.ch == 'O')) {
-            if (inputAppId.empty() && !TuiEngine::HasInputPending()) {
-                TuiEngine::ClearScreen();
+            if (inputAppId.empty()) {
                 OnlineSession::RunInteractive();
                 inputAppId.clear();
                 layout = DrawLevel1Frame();
