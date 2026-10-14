@@ -274,4 +274,31 @@ std::optional<std::string> FindSteamInstallPath() {
     return s_cachedPath;
 }
 
+std::wstring QuoteCmdArg(std::wstring_view arg) {
+    if (arg.empty()) return L"\"\"";
+    if (arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(arg);
+    }
+    std::wstring out;
+    out.reserve(arg.size() + 8);
+    out.push_back(L'"');
+    size_t backslashes = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            ++backslashes;
+        } else if (c == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+        } else {
+            out.append(backslashes, L'\\');
+            backslashes = 0;
+            out.push_back(c);
+        }
+    }
+    out.append(backslashes * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
 } // namespace OST::ExtractTickets

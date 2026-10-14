@@ -932,11 +932,13 @@ std::optional<ParsedAppInfoData> SteamCmClient::RequestPicsProductInfo(uint32_t 
 }
 
 std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
-    const std::vector<uint32_t>& appIds) {
+    const std::vector<uint32_t>& appIds, bool* outSuccess) {
 
+    if (outSuccess) *outSuccess = false;
     std::unordered_map<uint32_t, std::string> outNames;
     if (appIds.empty() || !EnsureConnected()) return outNames;
 
+    bool anyBatchSucceeded = false;
     constexpr size_t kBatchSize = 50;
     for (size_t i = 0; i < appIds.size(); i += kBatchSize) {
         const size_t chunkEnd = std::min(i + kBatchSize, appIds.size());
@@ -964,6 +966,7 @@ std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
                 &jobId)) {
             continue;
         }
+        anyBatchSucceeded = true;
 
         for (int chunkIdx = 0; chunkIdx < 16; ++chunkIdx) {
             if (chunkIdx > 0) {
@@ -1005,6 +1008,7 @@ std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
             }
         }
     }
+    if (outSuccess) *outSuccess = anyBatchSucceeded;
 
     return outNames;
 }
@@ -1595,12 +1599,39 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         }
         if (!missingDlcNames.empty()) {
             LOG_DEBUG("SteamCM", MsgKey::LogCmFullBatchQueryDlcNames, missingDlcNames.size());
-            auto resolved = RequestPicsAppNames(missingDlcNames);
+            bool picsBatchOk = false;
+            auto resolved = RequestPicsAppNames(missingDlcNames, &picsBatchOk);
             for (auto& d : creds.dlcs) {
                 if (d.name.empty()) {
                     auto it = resolved.find(d.dlcId);
                     if (it != resolved.end() && !it->second.empty()) {
                         d.name = it->second;
+                    }
+                }
+            }
+
+            // 4.6 DLC 纯逻辑合法性认证与幽灵包切除门禁 (防误杀熔断 + 严格物理/元数据双空判定)
+            if (picsBatchOk) {
+                std::vector<uint32_t> purgedGhostIds;
+                std::erase_if(creds.dlcs, [&](const DlcInfo& dlc) {
+                    const bool hasPhysicalDepot = std::ranges::any_of(depotKeys, [&](const DepotKeyInfo& dk) noexcept {
+                        return dk.depotId == dlc.dlcId || dk.dlcId == dlc.dlcId;
+                    });
+                    if (!hasPhysicalDepot && dlc.name.empty()) {
+                        purgedGhostIds.push_back(dlc.dlcId);
+                        LOG_DEBUG("SteamCM", MsgKey::LogCmFullPurgedGhostDlc, dlc.dlcId);
+                        return true;
+                    }
+                    return false;
+                });
+
+                if (!purgedGhostIds.empty()) {
+                    LOG_INFO("SteamCM", MsgKey::CliExtractPurgedGhostDlcs, purgedGhostIds.size());
+                    if (!TuiEngine::IsActive()) {
+                        std::cout << TR_FMT(MsgKey::CliExtractPurgedGhostDlcs, purgedGhostIds.size()) << "\n";
+                    }
+                    for (uint32_t gid : purgedGhostIds) {
+                        knownDlcSet.erase(gid);
                     }
                 }
             }

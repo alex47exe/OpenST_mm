@@ -417,6 +417,20 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
         }
     }
 
+    // 本地模式对称提纯：剔除既无物理清单/密钥又无有效名称的幽灵 DLC
+    std::erase_if(dlcMap, [&](const auto& item) {
+        const auto& [id, d] = item;
+        const bool hasPhysicalDepot = (knownDepotManifests.contains(id) && !knownDepotManifests[id].empty()) ||
+                                      allDepotKeys.contains(id);
+        if (!hasPhysicalDepot && d.name.empty()) {
+            knownDlcIds.erase(id);
+            knownDepotManifests.erase(id);
+            depotToDlc.erase(id);
+            return true;
+        }
+        return false;
+    });
+
     outDlcs.clear();
     outDlcs.reserve(dlcMap.size());
     for (const auto& [id, info] : dlcMap) {
@@ -516,6 +530,31 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
     });
 
     return result;
+}
+
+bool HasSubstantivePayload(
+    const std::optional<std::vector<uint8_t>>& ownership,
+    const std::optional<std::vector<uint8_t>>& encrypted,
+    const std::vector<DepotKeyInfo>& depotKeys,
+    const std::vector<DlcInfo>& dlcs,
+    const std::unordered_map<uint32_t, uint64_t>& appTokens) noexcept {
+
+    if (ownership && !ownership->empty()) return true;
+    if (encrypted && !encrypted->empty()) return true;
+
+    for (const auto& [id, token] : appTokens) {
+        if (token != 0) return true;
+    }
+
+    for (const auto& dk : depotKeys) {
+        if (!dk.hexKey.empty() || IsValidManifestId(dk.manifestId) || !dk.manifestFilePath.empty()) {
+            return true;
+        }
+    }
+
+    if (!dlcs.empty()) return true;
+
+    return false;
 }
 
 } // namespace OST::ExtractTickets

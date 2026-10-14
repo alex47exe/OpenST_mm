@@ -24,15 +24,8 @@
 namespace OST::ExtractTickets {
 
 #if defined(_WIN64)
-bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
-    struct EnvVarScopeGuard {
-        ~EnvVarScopeGuard() noexcept {
-            SetEnvironmentVariableA("SteamAppId", nullptr);
-            SetEnvironmentVariableA("SteamGameId", nullptr);
-            SetEnvironmentVariableA("SteamOverlayGameId", nullptr);
-            SetEnvironmentVariableA("OST_TOOL_EXTRACTION", nullptr);
-        }
-    } envGuard;
+WorkerExitCode ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
+    ScopedSteamEnvGuard envGuard;
 
     if (inTui) {
         int w = 80, h = 25;
@@ -119,18 +112,33 @@ bool ExtractLocalApp(uint32_t appId, bool forceEticket, bool inTui = false) {
         }
     }
 
+    // Substantive Payload Guard: reject empty shells before touching disk I/O
+    const bool hasPayload = HasSubstantivePayload(ownership, encrypted, depotKeys, dlcs, appTokens);
+    if (!hasPayload) {
+        LOG_WARN("LocalExtract", "No substantive payload or license found for AppID {}", appId);
+        if (!sessionOpened) {
+            return WorkerExitCode::ErrNoSteamOrSession;
+        }
+        return WorkerExitCode::ErrNoLicenseOrPayload;
+    }
+
     const bool ok = WriteOutputs(appId, ownership, encrypted, depotKeys, dlcs, appTokens);
-    return ok;
+    if (!ok) {
+        return WorkerExitCode::ErrDiskIO;
+    }
+
+    return WorkerExitCode::Success;
 }
 
-bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
+WorkerExitCode RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
     wchar_t exePath[32768]{};
     DWORD len = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
     if (len == 0 || len >= std::size(exePath)) {
-        return ExtractLocalApp(appId, forceEticket, true);
+        LOG_ERROR("Main", "GetModuleFileNameW failed, cannot launch worker subprocess");
+        return WorkerExitCode::ErrGeneral;
     }
 
-    std::wstring cmd = std::format(L"\"{}\" --worker {}", exePath, appId);
+    std::wstring cmd = std::format(L"{} --worker --appid={}", QuoteCmdArg(exePath), appId);
     if (forceEticket) {
         cmd += L" --force-eticket";
     }
@@ -139,9 +147,7 @@ bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
 
-    // Launch worker child process completely hidden (CREATE_NO_WINDOW)
-    // Steam will bind its AppManager to this short-lived worker PID.
-    // Upon worker exit (~200ms), Steam immediately releases the "Running" state!
+    // Launch worker child process completely hidden (CREATE_NO_WINDOW) without handle inheritance
     BOOL success = CreateProcessW(
         nullptr,
         cmd.data(),
@@ -157,23 +163,77 @@ bool RunLocalExtractionWorker(uint32_t appId, bool forceEticket) {
 
     if (!success) {
         LOG_ERROR("Main", MsgKey::LogMainCreateWorkerFailed, GetLastError());
-        return ExtractLocalApp(appId, forceEticket, true);
+        return WorkerExitCode::ErrGeneral;
     }
 
+    // Close thread handle immediately as it's unneeded
+    CloseHandle(pi.hThread);
     ScopedHandle hProcess{pi.hProcess};
-    ScopedHandle hThread{pi.hThread};
 
-    DWORD waitRes = WaitForSingleObject(hProcess, 15000);
-    DWORD exitCode = 1;
-    if (waitRes == WAIT_OBJECT_0) {
-        GetExitCodeProcess(hProcess, &exitCode);
-    } else {
-        LOG_WARN("Main", MsgKey::LogMainWorkerTimeout);
-        TerminateProcess(hProcess, 1);
-        WaitForSingleObject(hProcess, 1000);
+    // Attach worker to Kernel Job Object with KILL_ON_JOB_CLOSE to guarantee no zombie process
+    ScopedJobObject job;
+    job.Assign(hProcess);
+
+    // Non-blocking slice pumping loop (80ms slice) with spinner animation and resize adaptation
+    constexpr auto kTimeout = std::chrono::milliseconds(15000);
+    constexpr auto kSlice = std::chrono::milliseconds(80);
+    const auto startTime = std::chrono::steady_clock::now();
+    const auto deadline = startTime + kTimeout;
+
+    static const char spinnerChars[] = "|/-\\";
+    size_t spinnerFrame = 0;
+
+    int lastW = 0, lastH = 0;
+    DWORD exitCode = static_cast<DWORD>(WorkerExitCode::ErrGeneral);
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        DWORD waitRes = WaitForSingleObject(hProcess, static_cast<DWORD>(kSlice.count()));
+        if (waitRes == WAIT_OBJECT_0) {
+            GetExitCodeProcess(hProcess, &exitCode);
+            break;
+        }
+
+        // Check if terminal resized and re-center modal box
+        int w = 80, h = 25;
+        TuiEngine::GetScreenSize(w, h);
+        const int modalW = std::clamp(w - 12, 60, 80);
+        const int modalH = 6;
+        const int top = (h - modalH) / 2, left = (w - modalW) / 2;
+
+        if (w != lastW || h != lastH) {
+            lastW = w;
+            lastH = h;
+            TuiEngine::DrawBox(top, left, modalW, modalH, TR(MsgKey::ExtractingTitle).data());
+            std::string msg = TR_FMT(MsgKey::ExtractingLocalMsg, appId);
+            TuiEngine::PrintBounded(top + 2, left + 4, msg, static_cast<size_t>(modalW - 8), "\x1b[1;33m");
+        }
+
+        // Render spinner
+        std::string sp = std::format("[ {} ]", spinnerChars[spinnerFrame % 4]);
+        TuiEngine::PrintBounded(top + 3, left + (modalW - 5) / 2, sp, 5, "\x1b[1;36m");
+        std::cout.flush();
+        ++spinnerFrame;
     }
 
-    return exitCode == 0;
+    if (std::chrono::steady_clock::now() >= deadline) {
+        LOG_WARN("Main", MsgKey::LogMainWorkerTimeout);
+        TerminateProcess(hProcess, static_cast<UINT>(WorkerExitCode::ErrTimeout));
+        WaitForSingleObject(hProcess, 1000);
+        exitCode = static_cast<DWORD>(WorkerExitCode::ErrTimeout);
+    }
+
+    // Flush any accidental keypresses that occurred while waiting
+    HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdIn != INVALID_HANDLE_VALUE) {
+        FlushConsoleInputBuffer(hStdIn);
+    }
+
+    if (exitCode >= 0xC0000000) {
+        LOG_ERROR("Main", "Worker subprocess terminated with NTSTATUS crash code: 0x{:08X}", exitCode);
+        return WorkerExitCode::ErrCrash;
+    }
+
+    return static_cast<WorkerExitCode>(exitCode);
 }
 
 namespace {
@@ -352,9 +412,28 @@ int Run(int argc, char** argv) {
     }
 
     if (workerMode && cliAppId) {
-        // Child worker process: runs silent extraction and terminates cleanly so Steam releases "Running" state
-        const bool ok = ExtractLocalApp(*cliAppId, forceEticket, false);
-        return ok ? 0 : 1;
+        // Child worker process: silence WER popups and isolate OS/CRT I/O to NUL device
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+
+        HANDLE hNul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hNul != INVALID_HANDLE_VALUE) {
+            SetStdHandle(STD_INPUT_HANDLE, hNul);
+            SetStdHandle(STD_OUTPUT_HANDLE, hNul);
+            SetStdHandle(STD_ERROR_HANDLE, hNul);
+        }
+        FILE* dummy = nullptr;
+        freopen_s(&dummy, "NUL", "r", stdin);
+        freopen_s(&dummy, "NUL", "w", stdout);
+        freopen_s(&dummy, "NUL", "w", stderr);
+        std::cin.clear();
+        std::cout.clear();
+        std::cerr.clear();
+
+        const WorkerExitCode code = ExtractLocalApp(*cliAppId, forceEticket, false);
+        return static_cast<int>(code);
     }
 
     if (onlineMode) {
@@ -369,8 +448,8 @@ int Run(int argc, char** argv) {
 
     if (!isInteractive) {
         if (cliAppId) {
-            const bool ok = ExtractLocalApp(*cliAppId, forceEticket, false);
-            return ok ? 0 : 1;
+            const WorkerExitCode code = ExtractLocalApp(*cliAppId, forceEticket, false);
+            return (code == WorkerExitCode::Success) ? 0 : static_cast<int>(code);
         }
 
         // Piped/redirected non-interactive stdin
@@ -387,8 +466,8 @@ int Run(int argc, char** argv) {
         }
         auto parsed = ParseAppId(line);
         if (parsed) {
-            const bool ok = ExtractLocalApp(*parsed, forceEticket, false);
-            return ok ? 0 : 1;
+            const WorkerExitCode code = ExtractLocalApp(*parsed, forceEticket, false);
+            return (code == WorkerExitCode::Success) ? 0 : static_cast<int>(code);
         }
         return 0;
     }
@@ -411,8 +490,7 @@ int Run(int argc, char** argv) {
 
         // Single-key 'o' or 'O' directly jumps to Online Mode (no Enter required!)
         if (ev.code == KeyCode::Char && (ev.ch == 'o' || ev.ch == 'O')) {
-            if (inputAppId.empty() && !TuiEngine::HasInputPending()) {
-                TuiEngine::ClearScreen();
+            if (inputAppId.empty()) {
                 OnlineSession::RunInteractive();
                 inputAppId.clear();
                 layout = DrawLevel1Frame();
@@ -506,19 +584,47 @@ int Run(int argc, char** argv) {
                 TuiEngine::PrintBounded(top + 2, left + 4, msg, static_cast<size_t>(modalW - 8), "\x1b[1;33m");
                 std::cout.flush();
 
-                bool ok = RunLocalExtractionWorker(*appId, runForceEticket);
+                WorkerExitCode code = RunLocalExtractionWorker(*appId, runForceEticket);
 
                 TuiEngine::ClearScreen();
-                if (ok) {
-                    TuiEngine::ShowMessageModal(
-                        TR(MsgKey::ExtractSuccessTitle).data(),
-                        TR_FMT(MsgKey::ExtractSuccessMsg, *appId),
-                        TR_FMT(MsgKey::ExtractSuccessDetail, *appId));
-                } else {
-                    TuiEngine::ShowMessageModal(
-                        TR(MsgKey::ExtractWarnTitle).data(),
-                        TR_FMT(MsgKey::ExtractWarnMsg, *appId),
-                        "");
+                switch (code) {
+                    case WorkerExitCode::Success:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractSuccessTitle).data(),
+                            TR_FMT(MsgKey::ExtractSuccessMsg, *appId),
+                            TR_FMT(MsgKey::ExtractSuccessDetail, *appId));
+                        break;
+                    case WorkerExitCode::ErrNoSteamOrSession:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractErrNoSteamTitle).data(),
+                            TR_FMT(MsgKey::ExtractErrNoSteamMsg, *appId),
+                            TR(MsgKey::ExtractErrNoSteamDetail).data());
+                        break;
+                    case WorkerExitCode::ErrNoLicenseOrPayload:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractErrNoLicenseTitle).data(),
+                            TR_FMT(MsgKey::ExtractErrNoLicenseMsg, *appId),
+                            TR(MsgKey::ExtractErrNoLicenseDetail).data());
+                        break;
+                    case WorkerExitCode::ErrDiskIO:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractErrDiskIoTitle).data(),
+                            TR_FMT(MsgKey::ExtractErrDiskIoMsg, *appId),
+                            TR(MsgKey::ExtractErrDiskIoDetail).data());
+                        break;
+                    case WorkerExitCode::ErrTimeout:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractErrTimeoutTitle).data(),
+                            TR_FMT(MsgKey::ExtractErrTimeoutMsg, *appId),
+                            TR(MsgKey::ExtractErrTimeoutDetail).data());
+                        break;
+                    case WorkerExitCode::ErrCrash:
+                    default:
+                        TuiEngine::ShowMessageModal(
+                            TR(MsgKey::ExtractErrCrashTitle).data(),
+                            TR_FMT(MsgKey::ExtractErrCrashMsg, *appId),
+                            TR(MsgKey::ExtractErrCrashDetail).data());
+                        break;
                 }
                 // Reset input to return to fresh startup state
                 inputAppId.clear();

@@ -364,7 +364,6 @@ int OnlineSession::RunInteractive() {
 }
 
 void OnlineSession::RunAccountSelectionMenu() {
-    SteamAuthService authService;
     size_t selected = 0; // Default to new account, preserved across redraws
 
     while (true) {
@@ -498,6 +497,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                     SecureWipeString(*pwdStr);
 
                     TuiEngine::ClearScreen();
+                    SteamAuthService authService;
                     auto loginRes = authService.LoginWithCredentials(*accName, secPwd);
                     secPwd.Clear();
 
@@ -540,6 +540,7 @@ void OnlineSession::RunAccountSelectionMenu() {
                                 SecureString secPwd(*pwdStr);
                                 SecureWipeString(*pwdStr);
                                 TuiEngine::ClearScreen();
+                                SteamAuthService authService;
                                 auto loginRes = authService.LoginWithCredentials(acc.accountName, secPwd);
                                 secPwd.Clear();
                                 if (loginRes.success) {
@@ -1061,15 +1062,15 @@ void OnlineSession::RunInSessionExtraction(
                 UpdateLevel3Input(inputAppId);
                 continue;
             }
-            cmClient.Disconnect();
             TuiEngine::ClearScreen();
+            cmClient.Disconnect();
             return;
         }
 
         // 'q' / 'Q' -> Return to Level 2
         if (ev.code == KeyCode::Char && (ev.ch == 'q' || ev.ch == 'Q')) {
-            cmClient.Disconnect();
             TuiEngine::ClearScreen();
+            cmClient.Disconnect();
             return;
         }
     }

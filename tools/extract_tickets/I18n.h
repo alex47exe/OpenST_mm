@@ -93,6 +93,21 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(ExtractSuccessDetail, "Files saved in ./{}/ directory", "文件已保存至 ./{}/ 目录中", "Archivos guardados en el directorio ./{}/") \
     M(ExtractWarnTitle, "Extraction Warning", "提取警告", "Aviso de Extracción") \
     M(ExtractWarnMsg, "AppID {} extracted, but some outputs may be limited", "AppID {} 提取完成，部分输出可能受限", "AppID {} extraído, pero algunas salidas pueden estar limitadas") \
+    M(ExtractErrNoSteamTitle, "Steam Client Not Found", "无法连接 Steam 客户端", "Cliente Steam No Encontrado") \
+    M(ExtractErrNoSteamMsg, "Could not establish IPC session with local Steam for AppID {}.", "未能与本地 Steam 客户端建立 IPC 会话 (AppID {})。", "No se pudo establecer sesión IPC con Steam para AppID {}.") \
+    M(ExtractErrNoSteamDetail, "Please ensure Steam is running and logged in, or press [O] for Online Mode.", "请确保 Steam 客户端已启动且已登录，或按 [O] 使用在线模式提取。", "Asegúrese de que Steam esté iniciado o presione [O] para Modo En Línea.") \
+    M(ExtractErrNoLicenseTitle, "No License or Payload Found", "未发现有效授权或许可资产", "Sin Licencia ni Activos Válidos") \
+    M(ExtractErrNoLicenseMsg, "No ownership tickets, depot keys, manifests, or tokens found for AppID {}.", "未检测到 AppID {} 的任何有效所有权票据、Depot 密钥、清单或访问令牌。", "No se encontraron tickets, claves de depot, manifiestos ni tokens para AppID {}.") \
+    M(ExtractErrNoLicenseDetail, "The current account does not own this app and no cache was found on disk.", "当前登录账号未拥有该游戏，且本地硬盘中亦无对应资产缓存。", "La cuenta actual no posee este juego y no se encontró caché en el disco.") \
+    M(ExtractErrDiskIoTitle, "Disk Write Error", "磁盘写入受阻", "Error de Escritura en Disco") \
+    M(ExtractErrDiskIoMsg, "Failed to create output directory or write asset files for AppID {}.", "为 AppID {} 创建输出目录或写入凭据文件失败。", "Fallo al crear el directorio de salida o escribir archivos para AppID {}.") \
+    M(ExtractErrDiskIoDetail, "Please check disk space, folder permissions, or antivirus settings.", "请检查磁盘剩余空间、文件夹写入权限或安全软件拦截记录。", "Compruebe el espacio en disco, permisos de carpeta o antivirus.") \
+    M(ExtractErrTimeoutTitle, "Extraction Timed Out", "凭据提取超时", "Tiempo de Espera Agotado") \
+    M(ExtractErrTimeoutMsg, "Timed out waiting for AppID {} credentials from Steam (exceeded 15s limit).", "等待获取 AppID {} 的 Steam 凭据响应超时 (超过 15 秒上限)。", "Tiempo de espera agotado solicitando credenciales para AppID {} (límite 15s).") \
+    M(ExtractErrTimeoutDetail, "Steam IPC may be frozen. The background worker was terminated safely.", "Steam 本地服务可能处于假死状态，已安全销毁后台子进程。", "El IPC de Steam podría estar congelado. Proceso secundario cancelado con éxito.") \
+    M(ExtractErrCrashTitle, "Worker Subprocess Crashed", "子进程执行异常", "El Proceso Secundario Falló") \
+    M(ExtractErrCrashMsg, "The extraction worker encountered an unexpected system error for AppID {}.", "提取子进程在处理 AppID {} 时遭遇未预期的系统级异常。", "El proceso de extracción encontró un error inesperado para AppID {}.") \
+    M(ExtractErrCrashDetail, "Please check extract_tickets_debug.log for diagnostic details.", "详情请查阅 extract_tickets_debug.log 诊断日志。", "Consulte extract_tickets_debug.log para detalles de diagnóstico.") \
     M(BatchExtractTitle, "Batch Extracting Credentials", "正在批量提取凭据", "Extracción de Credenciales por Lotes") \
     M(BatchAbortedTitle, "Batch Extraction Cancelled", "批量提取已中止", "Extracción por Lotes Cancelada") \
     M(BatchAbortedMsg, "Operation cancelled. Successfully processed {} / {} games.", "操作已中止，已成功处理 {} / {} 款游戏凭据。", "Operación cancelada. Se procesaron con éxito {} / {} juegos.") \
@@ -268,7 +283,8 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(CliHelpNavTitle, "Interactive Shortcuts:", "交互快捷键:", "Atajos Interactivos:") \
     M(CliHelpNavL1, "  Level 1 (Main Menu):   [Digits] AppID   [Enter] Extract   [E] Force   [O] Online   [ESC] Clear   [Q] Exit", "  一级 (主界面):         [数字] 输入 AppID  [Enter] 提取凭据  [E] 强提加密  [O] 在线模式  [ESC] 清空  [Q] 退出", "  Nivel 1 (Principal):   [Dígitos] AppID    [Enter] Extraer   [E] Forzar    [O] En Línea  [ESC] Borrar  [Q] Salir") \
     M(CliHelpNavL2, "  Level 2 (Accounts):    [↑/↓] Select    [Enter] Login/Go   [R] Remark  [D] Delete   [-] Wipe      [ESC/Q] Back", "  二级 (账号管理):       [↑/↓] 选择账号     [Enter] 登录/进入 [R] 修改备注  [D] 删除账号  [-] 清空全部 [ESC/Q] 返回", "  Nivel 2 (Cuentas):     [↑/↓] Seleccionar  [Enter] Iniciar   [R] Nota      [D] Eliminar  [-] Borrar    [ESC/Q] Volver") \
-    M(CliHelpNavL3, "  Level 3 (Game Library):[↑/↓] Select    [←/→] Page         [Enter] Extract          [A] Batch     [L] CSV       [ESC/Q] Back", "  三级 (在线游戏库):     [↑/↓] 选择游戏     [←/→] 翻页浏览    [Enter] 提取凭据         [A] 批量全提  [L] 导出CSV   [ESC/Q] 返回", "  Nivel 3 (Biblioteca):  [↑/↓] Seleccionar  [←/→] Páginas     [Enter] Extraer          [A] Todo      [L] CSV       [ESC/Q] Volver")
+    M(CliHelpNavL3, "  Level 3 (Game Library):[↑/↓] Select    [←/→] Page         [Enter] Extract          [A] Batch     [L] CSV       [ESC/Q] Back", "  三级 (在线游戏库):     [↑/↓] 选择游戏     [←/→] 翻页浏览    [Enter] 提取凭据         [A] 批量全提  [L] 导出CSV   [ESC/Q] 返回", "  Nivel 3 (Biblioteca):  [↑/↓] Seleccionar  [←/→] Páginas     [Enter] Extraer          [A] Todo      [L] CSV       [ESC/Q] Volver") \
+    M(CliExtractPurgedGhostDlcs, "  -> Filtered {} unreleased/deprecated ghost DLC(s) with no depots or public metadata", "  -> 已过滤 {} 个无 Depot 且无公开元数据的未发售/弃用幽灵 DLC", "  -> Se filtraron {} DLC(s) obsoletos/no publicados sin depots ni metadatos públicos")
 
 #if defined(_DEBUG) || defined(EXTRACT_TICKETS_LOGGING_ENABLED)
 #define OST_I18N_LOG_MESSAGES(M) \
@@ -470,7 +486,11 @@ inline constexpr size_t kLanguageCount = static_cast<size_t>(Language::COUNT);
     M(LogWsConnected, "Successfully established secure WebSocket connection: {} (elapsed: {}ms)", "已成功建立安全 WebSocket 连接: {} (耗时: {}ms)", "Conexión WebSocket segura establecida con éxito: {} (tiempo: {}ms)") \
     M(LogWsSendFailed, "WinHttpWebSocketSend failed (error={})", "WinHttpWebSocketSend 失败 (error={})", "WinHttpWebSocketSend falló (error={})") \
     M(LogWsRecvError, "WinHttpWebSocketReceive error (error={})", "WinHttpWebSocketReceive 错误 (error={})", "Error en WinHttpWebSocketReceive (error={})") \
-    M(LogWsPeerClosed, "Received WebSocket close frame from peer", "收到对端 WebSocket 关闭帧", "Se recibió trama de cierre WebSocket del par")
+    M(LogWsPeerClosed, "Received WebSocket close frame from peer", "收到对端 WebSocket 关闭帧", "Se recibió trama de cierre WebSocket del par") \
+    M(LogCmFullPurgedGhostDlc, "Purged orphaned ghost DLC AppID {} (zero physical depots and zero public name metadata)", "已净化剔除孤立幽灵 DLC AppID {} (零物理 Depot 且零公开名称元数据)", "Se purgó el DLC fantasma huérfano AppID {} (cero depots físicos y cero metadatos de nombre)") \
+    M(LogOutDeduplicatedAppId, "Topological deduplication: Skipped duplicate unlock directive for AppID/Depot {}", "拓扑防重门禁: 已跳过针对 AppID/Depot {} 的重复解锁指令", "Deduplicación topológica: Se omitió directiva de desbloqueo duplicada para AppID/Depot {}") \
+    M(LogOutDeduplicatedManifest, "Topological deduplication: Skipped duplicate manifest directive for Depot {}", "拓扑防重门禁: 已跳过针对 Depot {} 的重复清单配置", "Deduplicación topológica: Se omitió directiva de manifiesto duplicada para Depot {}") \
+    M(LogOutDroppedOrphanGhostDlc, "Defense-in-depth: Dropped orphaned ghost DLC AppID {} from emit pipeline", "纵深防御门禁: 已从发射管线丢弃孤立幽灵 DLC AppID {}", "Defensa en profundidad: Se descartó el DLC fantasma huérfano AppID {} de la tubería de emisión")
 #else
 #define OST_I18N_LOG_MESSAGES(M)
 #endif

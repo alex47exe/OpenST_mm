@@ -445,7 +445,15 @@ WebSocketClient::~WebSocketClient() {
 
 void WebSocketClient::Close() {
     if (m_hWebSocket) {
-        // Directly close the handle to avoid synchronous close-handshake hangs on dead/half-open sockets
+        // Enforce a strict short-circuit timeout guard (400ms) on close handshake.
+        // In normal conditions Steam CM responds to the close frame within milliseconds (<10ms).
+        // If the socket is half-open or the connection is severed (dead socket), the guard breaks
+        // out within 400ms, preventing hangs while avoiding OS-level abortive timeout penalties.
+        DWORD closeTimeoutMs = 400;
+        WinHttpSetOption(m_hWebSocket, WINHTTP_OPTION_RECEIVE_TIMEOUT, &closeTimeoutMs, sizeof(closeTimeoutMs));
+        WinHttpSetOption(m_hWebSocket, WINHTTP_OPTION_SEND_TIMEOUT, &closeTimeoutMs, sizeof(closeTimeoutMs));
+
+        WinHttpWebSocketClose(m_hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
         WinHttpCloseHandle(m_hWebSocket);
         m_hWebSocket = nullptr;
     }
