@@ -84,18 +84,18 @@ jobs:
             1. Extract the release package to any standalone folder outside the Steam directory.
             2. Place your Lua unlock scripts in `config/lua/` inside that folder.
             3. Run `ost-manager.exe`:
-               - **One-shot Launch / Inject**: Click "One-shot Inject" in the GUI or execute `ost-manager.exe /launch` via CLI.
+               - **One-shot Launch / Inject**: Click "Launch & Inject Steam" in the GUI or execute `ost-manager.exe /inject` via CLI.
                - **Portable IFEO Interception**: Click "Install IFEO (Portable Mode)"; launching Steam normally will automatically trigger zero-window injection.
-               - **Auto-Start Watcher**: Click "Start Watcher Daemon" to start background monitoring on login (no administrator privileges needed, registry key `ost_watcher`).
+               - **Auto-Start Watcher**: Click "Start Background Watcher" to start background monitoring on login (no administrator privileges needed, registry key `ost_watcher`), or run `ost-manager.exe /watch` via CLI.
 
             ### Method 2: Steam Root Dedicated Mode
-            In `ost-manager.exe`, click "Install IFEO (Steam Root Mode)":
+            In `ost-manager.exe`, click "Install IFEO (Steam Root)":
             - Automatically deploys `OpenSteamTool.dll` and dedicated loader `ost-loader.exe` to Steam root.
             - Binds IFEO so double-clicking official Steam directly triggers instant injection via the lightweight loader.
-            - Allows one-click clean uninstallation at any time.
+            - Allows one-click clean uninstallation at any time via "Uninstall IFEO".
 
-            ### Method 3: Standard DLL Proxy Mode (Root Drop-in)
-            In `ost-manager.exe`, click "Deploy Standard DLL" to install `dwmapi.dll` or `version.dll` and `OpenSteamTool.dll` directly into the Steam root directory.
+            ### Method 3: Standard DLL Proxy Mode (Traditional Hijacking)
+            In `ost-manager.exe`, click "Deploy Standard DLL" to install `OpenSteamTool.dll` and `version.dll` to Steam root, and `dwmapi.dll` to `Steam\bin\`.
           files: |
             OpenSteamTool-${{ github.event.inputs.version }}-Release.zip
             OpenSteamTool-${{ github.event.inputs.version }}-Debug.zip
