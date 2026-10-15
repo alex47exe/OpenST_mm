@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -34,184 +35,7 @@
 
 namespace
 {
-    using namespace std::chrono_literals;
-    constexpr int  kMaxRetry      = 500;
-    constexpr auto kRetryInterval = 10ms;
 
-    static std::string_view ExtractFileName(std::string_view path) {
-        const size_t pos = path.find_last_of("\\/");
-        return (pos == std::string_view::npos) ? path : path.substr(pos + 1);
-    }
-
-    static std::wstring_view ExtractFileNameW(std::wstring_view path) {
-        const size_t pos = path.find_last_of(L"\\/");
-        return (pos == std::wstring_view::npos) ? path : path.substr(pos + 1);
-    }
-
-    static bool EqualsIgnoreCase(std::string_view a, std::string_view b) noexcept {
-        return (a.size() == b.size()) && (_strnicmp(a.data(), b.data(), a.size()) == 0);
-    }
-
-    static bool EqualsIgnoreCaseW(std::wstring_view a, std::wstring_view b) noexcept {
-        return (a.size() == b.size()) && (_wcsnicmp(a.data(), b.data(), a.size()) == 0);
-    }
-
-    static bool IsSteamClientPath(const char* path) {
-        if (!path) return false;
-        const std::string_view fn = ExtractFileName(path);
-        return EqualsIgnoreCase(fn, "steamclient64.dll") ||
-               EqualsIgnoreCase(fn, "steamclient.dll")   ||
-               EqualsIgnoreCase(fn, "steamclient64")     ||
-               EqualsIgnoreCase(fn, "steamclient");
-    }
-
-    static bool IsSteamClientPathW(const wchar_t* path) {
-        if (!path) return false;
-        const std::wstring_view fn = ExtractFileNameW(path);
-        return EqualsIgnoreCaseW(fn, L"steamclient64.dll") ||
-               EqualsIgnoreCaseW(fn, L"steamclient.dll")   ||
-               EqualsIgnoreCaseW(fn, L"steamclient64")     ||
-               EqualsIgnoreCaseW(fn, L"steamclient");
-    }
-
-    // Original pointers for system module lookup APIs
-    static decltype(&GetModuleHandleA)   oGetModuleHandleA   = &GetModuleHandleA;
-    static decltype(&GetModuleHandleW)   oGetModuleHandleW   = &GetModuleHandleW;
-    static decltype(&GetModuleHandleExA) oGetModuleHandleExA = &GetModuleHandleExA;
-    static decltype(&GetModuleHandleExW) oGetModuleHandleExW = &GetModuleHandleExW;
-
-    HMODULE WINAPI hkGetModuleHandleA(LPCSTR lpModuleName)
-    {
-        if (client_hModule && IsSteamClientPath(lpModuleName)) {
-            return reinterpret_cast<HMODULE>(client_hModule);
-        }
-        return oGetModuleHandleA(lpModuleName);
-    }
-
-    HMODULE WINAPI hkGetModuleHandleW(LPCWSTR lpModuleName)
-    {
-        if (client_hModule && IsSteamClientPathW(lpModuleName)) {
-            return reinterpret_cast<HMODULE>(client_hModule);
-        }
-        return oGetModuleHandleW(lpModuleName);
-    }
-
-    BOOL WINAPI hkGetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE* phModule)
-    {
-        if (client_hModule && !(dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) &&
-            IsSteamClientPath(lpModuleName))
-        {
-            if (!phModule) {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            constexpr DWORD kKnownFlags = GET_MODULE_HANDLE_EX_FLAG_PIN |
-                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
-                                          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
-            if ((dwFlags & ~kKnownFlags) != 0) {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            if ((dwFlags & GET_MODULE_HANDLE_EX_FLAG_PIN) &&
-                (dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))
-            {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            if (!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {
-                if (!oGetModuleHandleExA((dwFlags & GET_MODULE_HANDLE_EX_FLAG_PIN) | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                         reinterpret_cast<LPCSTR>(client_hModule), phModule))
-                {
-                    *phModule = nullptr;
-                    return FALSE;
-                }
-                return TRUE;
-            }
-            *phModule = reinterpret_cast<HMODULE>(client_hModule);
-            return TRUE;
-        }
-        return oGetModuleHandleExA(dwFlags, lpModuleName, phModule);
-    }
-
-    BOOL WINAPI hkGetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE* phModule)
-    {
-        if (client_hModule && !(dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) &&
-            IsSteamClientPathW(lpModuleName))
-        {
-            if (!phModule) {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            constexpr DWORD kKnownFlags = GET_MODULE_HANDLE_EX_FLAG_PIN |
-                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
-                                          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
-            if ((dwFlags & ~kKnownFlags) != 0) {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            if ((dwFlags & GET_MODULE_HANDLE_EX_FLAG_PIN) &&
-                (dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT))
-            {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
-            if (!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) {
-                if (!oGetModuleHandleExW((dwFlags & GET_MODULE_HANDLE_EX_FLAG_PIN) | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                         reinterpret_cast<LPCWSTR>(client_hModule), phModule))
-                {
-                    *phModule = nullptr;
-                    return FALSE;
-                }
-                return TRUE;
-            }
-            *phModule = reinterpret_cast<HMODULE>(client_hModule);
-            return TRUE;
-        }
-        return oGetModuleHandleExW(dwFlags, lpModuleName, phModule);
-    }
-
-
-    HOOK_FUNC(LoadModuleWithPath, void*, const char* path, bool flags)
-    {
-        LOG_STEAMUI_INFO("LoadModuleWithPath called with path: {}, flags: {}",
-                         path ? path : "(null)", flags);
-
-        const bool isSteamClient = IsSteamClientPath(path);
-
-        if (isSteamClient) {
-            bool logged = false;
-            for (int i = 0; i < kMaxRetry && !g_HooksInstalled.load(); ++i) {
-                if (!logged) {
-                    LOG_STEAMUI_DEBUG("LoadModuleWithPath: waiting for hooks to be installed...");
-                    logged = true;
-                }
-                std::this_thread::sleep_for(kRetryInterval);
-            }
-        }
-
-        void* h = oLoadModuleWithPath(path, flags);
-
-        if (isSteamClient) {
-            if (!g_HooksInstalled.load()) {
-                LOG_STEAMUI_WARN("LoadModuleWithPath: hooks initialization timed out after {} ms, aborting diversion",
-                                 kMaxRetry * static_cast<int>(kRetryInterval.count()));
-                return h;
-            }
-
-            if (client_hModule) {
-                if (g_IsDiversionActive.load()) {
-                    LOG_STEAMUI_INFO("LoadModuleWithPath: diverted {} (original {}) -> diversion {}",
-                                     path ? path : "steamclient64.dll", h, static_cast<void*>(client_hModule));
-                } else {
-                    LOG_STEAMUI_INFO("LoadModuleWithPath: returned fallback steamclient64.dll ({})",
-                                     static_cast<void*>(client_hModule));
-                }
-                return client_hModule;
-            }
-        }
-
-        return h;
-    }
 
     RESOLVE_FUNC(RepeatedFieldUint32_Add, void, void* field, const uint32* value);
 
@@ -969,23 +793,6 @@ namespace
 
 namespace Hooks_SteamUI
 {
-    void InstallDiversionHooks()
-    {
-        if (oGetModuleHandleA != &GetModuleHandleA) return;
-
-        // These hooks are the only SteamUI hooks that must exist before Lua is
-        // parsed. They redirect steamclient module lookups to the Diversion
-        // shadow module and gate LoadModuleWithPath until client hooks finish.
-        HOOK_BEGIN();
-        INSTALL_HOOK_U(LoadModuleWithPath);
-
-        if (!OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
-        if (!OSTPlatform::Detour::Attach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
-        HOOK_END();
-    }
-
     void Install()
     {
         ARM_CAPTURE_U(GetAppByID);
@@ -1014,20 +821,6 @@ namespace Hooks_SteamUI
         s_timeSliceCursor = 0;
 
         UNHOOK_BEGIN();
-        if (oGetModuleHandleA != &GetModuleHandleA) {
-            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleA), reinterpret_cast<void*>(hkGetModuleHandleA))) _ost_detour_transaction_ok_ = false;
-        }
-        if (oGetModuleHandleW != &GetModuleHandleW) {
-            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleW), reinterpret_cast<void*>(hkGetModuleHandleW))) _ost_detour_transaction_ok_ = false;
-        }
-        if (oGetModuleHandleExA != &GetModuleHandleExA) {
-            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExA), reinterpret_cast<void*>(hkGetModuleHandleExA))) _ost_detour_transaction_ok_ = false;
-        }
-        if (oGetModuleHandleExW != &GetModuleHandleExW) {
-            if (!OSTPlatform::Detour::Detach(reinterpret_cast<void**>(&oGetModuleHandleExW), reinterpret_cast<void*>(hkGetModuleHandleExW))) _ost_detour_transaction_ok_ = false;
-        }
-
-        UNINSTALL_HOOK(LoadModuleWithPath);
         UNINSTALL_HOOK(FillInAppOverview);
         UNINSTALL_HOOK(BuildCompleteAppOverviewChange);
         UNINSTALL_HOOK(CSteamUIAppControllerRunFrame);

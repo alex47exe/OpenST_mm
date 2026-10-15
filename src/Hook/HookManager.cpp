@@ -17,19 +17,8 @@ namespace HookManager {
 
 namespace {
     std::mutex s_lifecycleMutex;
-    std::atomic<bool> s_earlyUiHooksInstalled{false};
     std::atomic<bool> s_uiHooksInstalled{false};
     std::atomic<bool> s_clientHooksInstalled{false};
-}
-
-void InstallEarlyUIHooks() noexcept {
-    std::scoped_lock lock(s_lifecycleMutex);
-    if (s_earlyUiHooksInstalled.load(std::memory_order_relaxed)) {
-        return;
-    }
-    LOG_INFO("HookManager: Installing early UI diversion hooks...");
-    Hooks_SteamUI::InstallDiversionHooks();
-    s_earlyUiHooksInstalled.store(true, std::memory_order_release);
 }
 
 void InstallUIHooks() noexcept {
@@ -44,13 +33,11 @@ void InstallUIHooks() noexcept {
 
 void UninstallUIHooks() noexcept {
     std::scoped_lock lock(s_lifecycleMutex);
-    if (!s_uiHooksInstalled.load(std::memory_order_relaxed) &&
-        !s_earlyUiHooksInstalled.load(std::memory_order_relaxed)) {
+    if (!s_uiHooksInstalled.load(std::memory_order_relaxed)) {
         return;
     }
     LOG_INFO("HookManager: Uninstalling UI hooks...");
     Hooks_SteamUI::Uninstall();
-    s_earlyUiHooksInstalled.store(false, std::memory_order_release);
     s_uiHooksInstalled.store(false, std::memory_order_release);
     LOG_INFO("HookManager: UI hooks uninstalled cleanly");
 }
@@ -100,10 +87,6 @@ void DetachWorkerThreads() noexcept {
     // Never acquire mutexes held by dead threads.
     LOG_INFO("HookManager: Detaching worker threads for process termination...");
     Hooks_SteamUI::DetachWorkerThreads();
-}
-
-bool AreEarlyUIHooksInstalled() noexcept {
-    return s_earlyUiHooksInstalled.load(std::memory_order_acquire);
 }
 
 bool AreUIHooksInstalled() noexcept {

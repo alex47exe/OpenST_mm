@@ -37,7 +37,7 @@ namespace {
         auto logger = spdlog::basic_logger_mt(name, filename, /*truncate=*/true);
 #endif
         logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [tid=%t] [%s:%# %!()] %v");
-        logger->flush_on(spdlog::level::warn);
+        logger->flush_on(spdlog::level::trace);
         return logger;
     }
 

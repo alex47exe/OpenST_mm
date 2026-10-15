@@ -26,10 +26,12 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        run: cmake -S src -B build -G "Ninja Multi-Config"
+        run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_VERSION="pr${{ github.event.pull_request.number || github.run_number }}"
 
       - name: Build ${{ matrix.config }}
-        run: cmake --build build --config ${{ matrix.config }}
+        run: |
+          cmake --build build --config ${{ matrix.config }}
+          cmake --build build --config ${{ matrix.config }} --target ost-manager
 
       - name: Upload artifacts
         if: success()

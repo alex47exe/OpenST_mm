@@ -35,6 +35,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <excpt.h>
+#endif
+
 #include "steam_messages.pb.h"
 
 // ════════════════════════════════════════════════════════════════
@@ -106,25 +110,29 @@ namespace {
     // ── RAII Carrier Scope Guard (Guarantees no-fail restoration) ───
     class [[nodiscard]] CarrierScopeGuard final {
         CNetPacket* const m_carrier;
+        const uint32      m_dataOff;
+        const uint32      m_sizeOff;
         uint8* const      m_origPubData;
         const uint32      m_origCubData;
 
     public:
         CarrierScopeGuard(CNetPacket* carrier, uint8* borrowedData, uint32 borrowedSize) noexcept
             : m_carrier(carrier),
-              m_origPubData(carrier ? carrier->m_pubData : nullptr),
-              m_origCubData(carrier ? carrier->m_cubData : 0)
+              m_dataOff(NetPacketLayout::s_dataOffset.load(std::memory_order_relaxed)),
+              m_sizeOff(NetPacketLayout::s_sizeOffset.load(std::memory_order_relaxed)),
+              m_origPubData(carrier ? carrier->PubData(m_dataOff) : nullptr),
+              m_origCubData(carrier ? carrier->CubData(m_sizeOff) : 0)
         {
             if (carrier) {
-                carrier->m_pubData = borrowedData;
-                carrier->m_cubData = borrowedSize;
+                carrier->SetPubData(borrowedData, m_dataOff);
+                carrier->SetCubData(borrowedSize, m_sizeOff);
             }
         }
 
         ~CarrierScopeGuard() noexcept {
             if (m_carrier) {
-                m_carrier->m_pubData = m_origPubData;
-                m_carrier->m_cubData = m_origCubData;
+                m_carrier->SetPubData(m_origPubData, m_dataOff);
+                m_carrier->SetCubData(m_origCubData, m_sizeOff);
             }
         }
 
@@ -206,6 +214,102 @@ namespace {
             .hdr    = std::span<const uint8>(data + sizeof(MsgHdr), cbHdr),
             .body   = std::span<const uint8>(data + off, size - off)
         };
+    }
+
+#if defined(_MSC_VER)
+    __declspec(noinline) static bool SafeProbeMemory(const void* ptr, size_t size) noexcept {
+        if (!ptr || size == 0) return false;
+        __try {
+            volatile const char* p = reinterpret_cast<volatile const char*>(ptr);
+            [[maybe_unused]] volatile char v = p[0];
+            constexpr size_t kPageSize = 4096;
+            for (size_t offset = kPageSize; offset < size; offset += kPageSize) {
+                v = p[offset];
+            }
+            v = p[size - 1];
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+#else
+    static bool SafeProbeMemory(const void* ptr, size_t size) noexcept {
+        return ptr != nullptr && size > 0;
+    }
+#endif
+
+    void ProbeNetPacketLayout(CNetPacket* pPacket) noexcept {
+        if (!pPacket) return;
+
+        static std::mutex s_probeMutex;
+        std::unique_lock lock(s_probeMutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return;
+        }
+
+        if (NetPacketLayout::s_resolved.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        struct Candidate {
+            uint32 dataOff;
+            uint32 sizeOff;
+        };
+
+        constexpr Candidate kCandidates[] = {
+            { 16, 24 },
+            { 8,  16 },
+            { 24, 32 },
+            { 32, 40 },
+            { 40, 48 },
+        };
+
+        for (const auto& cand : kCandidates) {
+            if (!SafeProbeMemory(pPacket, cand.sizeOff + sizeof(uint32))) {
+                continue;
+            }
+
+            const uint8* pubData = *reinterpret_cast<uint8* const*>(
+                reinterpret_cast<const uint8*>(pPacket) + cand.dataOff);
+            const uint32 cubData = *reinterpret_cast<const uint32*>(
+                reinterpret_cast<const uint8*>(pPacket) + cand.sizeOff);
+
+            const auto addr = reinterpret_cast<uintptr_t>(pubData);
+            if (addr < 0x10000 || addr >= 0x7FFFFFFEFFFFULL) {
+                continue;
+            }
+
+            if (cubData < sizeof(MsgHdr) || cubData > kMaxPacketSize) {
+                continue;
+            }
+
+            if (!SafeProbeMemory(pubData, cubData)) {
+                continue;
+            }
+
+            const auto pkt = UnpackRaw(pubData, cubData);
+            if (!pkt) {
+                continue;
+            }
+
+            const uint32 cleanEMsg = static_cast<uint32>(pkt->eMsg);
+            if (cleanEMsg == 0 || cleanEMsg >= 20000) {
+                continue;
+            }
+
+            if (pkt->hdr.empty() || pkt->hdr.size() > kMaxHdrSize) {
+                continue;
+            }
+
+            // Confirmed candidate verified with valid proto packet
+            NetPacketLayout::s_dataOffset.store(cand.dataOff, std::memory_order_relaxed);
+            NetPacketLayout::s_sizeOffset.store(cand.sizeOff, std::memory_order_relaxed);
+            NetPacketLayout::s_resolved.store(true, std::memory_order_release);
+            LOG_NETPACKET_INFO("CNetPacket dynamic layout resolved: dataOff={}, sizeOff={}",
+                              cand.dataOff, cand.sizeOff);
+            break;
+        }
     }
 
     // ── Direct-to-slot transactional packet commit helpers ──────────
@@ -290,8 +394,8 @@ namespace {
         outMsgHdr->eMsg = pkt.rawHdr.eMsg;
         outMsgHdr->headerLength = finalCbHdr;
 
-        pPacket->m_pubData = slot.data();
-        pPacket->m_cubData = totalSize;
+        pPacket->SetPubData(slot.data());
+        pPacket->SetCubData(totalSize);
         return true;
     }
 
@@ -1773,6 +1877,7 @@ namespace Hooks_NetPacket_RichPresence {
                    bool (*invokeOriginal)(void*, CNetPacket*))
     {
         if (!g_InjectPending.load(std::memory_order_acquire)) return;
+        if (!NetPacketLayout::s_resolved.load(std::memory_order_acquire)) return;
 
         uint32 injectSize = 0;
         std::span<uint8> slot;
@@ -2027,6 +2132,7 @@ namespace Hooks_NetPacket_Cloud {
                bool (*invokeOriginal)(void*, CNetPacket*))
     {
         if (!g_hasPending.load(std::memory_order_acquire)) return;
+        if (!NetPacketLayout::s_resolved.load(std::memory_order_acquire)) return;
 
         constexpr size_t kMaxBurstDrain = 8;
         for (size_t i = 0; i < kMaxBurstDrain; ++i) {
@@ -2449,11 +2555,27 @@ namespace {
         if (!oRecvPkt) return nullptr;
 
         HookScopeGuard hookGuard;
-        if (!hookGuard.Entered() || !pPacket || !pPacket->m_pubData) {
+        if (!hookGuard.Entered() || !pPacket) {
             return oRecvPkt(pThis, pPacket);
         }
 
-        if (const auto pkt = UnpackRaw(pPacket->m_pubData, pPacket->m_cubData)) {
+        // 1. Resilient adaptive probing for CNetPacket dynamic layout offsets
+        if (!NetPacketLayout::s_resolved.load(std::memory_order_acquire)) {
+            ProbeNetPacketLayout(pPacket);
+            if (!NetPacketLayout::s_resolved.load(std::memory_order_acquire)) {
+                // Silent Fallback: pass through cleanly without any errors or popups
+                return oRecvPkt(pThis, pPacket);
+            }
+        }
+
+        // 2. Safe access via resolved dynamic offsets
+        const uint8* pubData = pPacket->PubData();
+        const uint32 cubData = pPacket->CubData();
+        if (!pubData || cubData < sizeof(MsgHdr)) {
+            return oRecvPkt(pThis, pPacket);
+        }
+
+        if (const auto pkt = UnpackRaw(pubData, cubData)) {
             RecvJob(pPacket, *pkt);
         }
 
@@ -2531,6 +2653,8 @@ namespace Hooks_NetPacket {
             Hooks_NetPacket_Cloud::g_pending->clear();
             Hooks_NetPacket_Cloud::g_hasPending.store(false, std::memory_order_release);
         }
+
+        NetPacketLayout::Reset();
 
         for (int i = 0; i < 50 && Hooks_NetPacket_Manifest::g_ActiveFetchThreads.load(std::memory_order_acquire) != 0; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

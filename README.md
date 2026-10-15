@@ -49,6 +49,7 @@
 ### Game Process Injection
 - Inject third-party DLLs into game processes via `[[inject]]` in `opensteamtool.toml`
 - Supports multiple DLL rules, command-line filtering, and AppID restrictions (see [Third-party DLL injection rules](#third-party-dll-injection))
+- Built-in global anti-cheat exclusion list (`[injects].exclude_appids`) protecting ~20 competitive titles (CS2, Dota 2, Apex, PUBG, etc.) from accidental injection
 
 ### Family Sharing Support
 - Automatically unlocks Family Sharing restrictions with zero configuration and no conflicts
@@ -61,24 +62,35 @@
 - **Explicit Tickets**: Memory-only management via `setAppTicket` / `setETicket` in Lua; no disk `.bin` files generated
 - **Account Switching Offline Auth**: Auto-syncs credentials directly into `<AppId>.lua` (via `setAppTicket`) after running on a genuine account; switch to unowned accounts for offline play
 - **Manifest Locking & Updates**: Defaults to active `setManifestid` to lock versions for offline authorization. On authorized accounts, OST automatically permits official updates and syncs manifests (configurable via `[manifest] lock_owned_games` and `auto_sync_on_update`); pass `-nodenuvo` or set `nodenuvo(appid)` in Lua to bypass Denuvo handling entirely
+- **Multi-Stage Adaptive Leasing (Scheme 2)**: Pass `-dauth2` in launch options or declare `dauth2(appid)` in Lua to enable adaptive multi-stage ticket lease extensions for titles with strict timeout windows
 - **Helper Flags**:
-  - `-d+`: Steam launch option on genuine accounts to auto-generate `<AppId>.lua` and lock manifests
+  - `-d+` (alias `-lua`): Steam launch option on genuine accounts to auto-generate `<AppId>.lua` and lock manifests
+  - `-dauth2`: Enable Scheme 2 adaptive ticket lease extension
   - `-forcedenuvo`: Force treat game as Denuvo-protected (or `forcedenuvo(appid)`)
+  - `-nodenuvo`: Bypass Denuvo handling (or `nodenuvo(appid)`)
 
 ### Third-party product keys ("Updating product key")
 - For titles that carry a Steam-issued third-party retail key (Ubisoft Connect, Rockstar, etc.), OpenSteamTool answers the client's legacy key request locally, so the "Updating product key" step completes for added games instead of failing. Supply a real key with `setlegacycdkey(appid, "KEY")`; when none is configured a deterministic synthetic key is generated. A synthetic key satisfies Steam's local step only — titles that validate the key online still require a real one.
 
-### Extracting Tickets & Config with `extract_tickets`
+### Credentials & Config Extraction with `extract_tickets`
 Extracts AppTicket, ETicket, DLC lists, depot keys, manifests, and generates a ready-to-use `<appid>.lua` on accounts owning the game.
 
+* **Interactive Terminal UI (TUI)**: Run `extract_tickets.exe` directly without arguments to launch a terminal interface with account switching, game library search, and batch extraction.
+* **Clientless Online Mode (`--online` / `-o`)**: Directly connects to Valve Connection Manager (Steam CM) servers over TCP/TLS for headless ticket/key extraction with QR-code or saved token login—no local Steam client required!
 * **Download**: [GitHub Actions Tools Workflow](https://github.com/mmxlyo/OpenSteamTool/actions/workflows/tools.yml) or build locally via `build.bat` (`build/tools/<Config>/extract_tickets.exe`)
 * **Usage**:
   ```powershell
-  # Standard extraction (locally installed game)
+  # Interactive TUI mode (default when run without CLI arguments)
+  extract_tickets.exe
+
+  # Standard CLI extraction (locally installed game)
   extract_tickets.exe 1361510
 
-  # Force ETicket extraction for uninstalled game (restart Steam if button hangs)
+  # Force ETicket extraction for uninstalled game
   extract_tickets.exe 1361510 --force-eticket
+
+  # Headless online CM extraction without local Steam client
+  extract_tickets.exe --online --appid 1361510
   ```
 
 ### Stats and Achievements
@@ -94,17 +106,42 @@ Extracts AppTicket, ETicket, DLC lists, depot keys, manifests, and generates a r
 ## Usage
 
 ### Method 1: Portable Mode (Recommended)
-No DLLs in the Steam directory; runs completely independently:
-1. Extract the release package (with `ost-Injector.exe`, `OpenSteamTool.dll`, etc.) to any standalone folder (e.g. `D:\OpenSteamTool_Portable`)
+No files copied to the Steam directory; runs completely green and portable:
+1. Extract the release package to any standalone folder (e.g. `D:\OpenSteamTool_Portable`)
 2. Create `config/lua/` and add your `.lua` unlock scripts; `opensteamtool.toml` can be placed directly in this portable folder
-3. Launch options:
-   - **Manual**: Run `ost-Injector.exe` to detect or launch Steam and inject
-   - **Auto-start**: Run `CreateAutoInjectTask.bat` (no administrator privileges required; uninstall via `DeleteAutoInjectTask.bat`)
-   - **CLI**: Supports `-watch` / `--watch` / `-daemon` (background auto-injection watcher), `-silent` / `--silent` / `-s` (one-shot silent injection), and `-help` / `--help` / `-h` (command-line help)
+3. Launch and automation options with `ost-manager.exe`:
+   - **One-shot Launch / Inject**: Click "Launch & Inject Steam" in the GUI, or execute `ost-manager.exe /inject` via CLI
+   - **Portable IFEO Interception**: Click "Install IFEO (Portable Mode)"; launching Steam normally will automatically trigger zero-window injection
+   - **Auto-Start Watcher**: Click "Start Background Watcher" to start background monitoring on login (no administrator privileges needed, registry key `ost_watcher`), or run `ost-manager.exe /watch` via CLI
 
-### Method 2: Standard Mode (DLL Hijacking)
-1. Copy `dwmapi.dll`, `xinput1_4.dll`, and `OpenSteamTool.dll` to the Steam root directory
-2. Create `config/lua/` in the Steam root directory and place your Lua scripts there
+### Method 2: Steam Root Dedicated Mode
+In `ost-manager.exe`, click "Install IFEO (Steam Root)":
+- Automatically deploys `OpenSteamTool.dll` and the dedicated security loader `ost-loader.exe` to Steam root
+- Binds system IFEO interception so double-clicking official Steam directly triggers instant injection via the lightweight loader
+- Allows one-click clean uninstallation at any time via "Uninstall IFEO"
+
+### Method 3: Standard DLL Proxy Mode (Traditional Hijacking / Manual Placement)
+For environments where IFEO registry modification is restricted or not preferred:
+- **Using Manager**: In `ost-manager.exe`, click "Deploy Standard DLL" (or run `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`). Cleanly removable at any time via "Remove DLL" (or `ost-manager.exe /remove-dll <SteamDir>`).
+- **Manual Placement**:
+  - `OpenSteamTool.dll`: Copy directly to Steam root directory (e.g. `C:\Program Files (x86)\Steam\OpenSteamTool.dll`)
+  - `version.dll`: Copy directly to Steam root directory (e.g. `C:\Program Files (x86)\Steam\version.dll`)
+  - `dwmapi.dll`: Copy to Steam `bin` subfolder (e.g. `C:\Program Files (x86)\Steam\bin\dwmapi.dll`, **not** in root)
+  - Lua unlock scripts: Place in `<Steam>\config\lua\`
+- Launching official Steam normally will load OpenSteamTool automatically via standard Windows PE proxy forwarding.
+
+### Manager Command-Line Reference (`ost-manager.exe`)
+| Switch | Description | Privilege |
+| :--- | :--- | :--- |
+| `/inject`, `-i`, `/silent` | Headless one-shot launch & injection (launches Steam if not running, or hot-injects if running) | Standard User |
+| `/watch`, `-w`, `/daemon` | Headless background watcher daemon loop | Standard User |
+| `/enable-autostart` | Enable background watcher on user logon (`HKCU\...\Run\ost_watcher`) | Standard User |
+| `/disable-autostart` | Disable background watcher auto-start entry | Standard User |
+| `/install-portable <dll>` | Register IFEO interception in portable mode pointing to manager | Administrator |
+| `/install-root <dir> <dll>` | Deploy loader to Steam root and register IFEO root mode | Administrator |
+| `/uninstall` | Unregister IFEO and clean deployed root binaries | Administrator |
+| `/deploy-dll <dir> <dll>` | Deploy `version.dll` to Steam root and `dwmapi.dll` to `Steam\bin\` | Standard / Admin |
+| `/remove-dll <dir>` | Remove proxy DLLs (`version.dll`, `dwmapi.dll`) from Steam directories | Standard / Admin |
 
 ---
 
@@ -125,6 +162,7 @@ setStat(1361510, "76561197960287930")        -- achievement source SteamID
 addprocess(1361510, "CustomGame.exe")        -- map AppID for processes without SteamAppId env
 seteticketurl("https://example.com/eticket") -- online ETicket minting endpoint (optional)
 
+dauth2(1361510)      -- enable Scheme 2 adaptive ticket leasing for Denuvo
 nodenuvo(1361510)    -- bypass Denuvo handling (same as -nodenuvo, alias: disallowdenuvo)
 forcedenuvo(1361510) -- force treat as Denuvo (same as -forcedenuvo)
 
@@ -264,9 +302,11 @@ build.bat
 
 ### Output
 * **Core Components** (in `build/Release/` or `build/Debug/`):
-  - `OpenSteamTool.dll`, `dwmapi.dll`, `xinput1_4.dll`, `ost-Injector.exe`, and helper scripts
-* **Standalone Tool** (in `build/tools/Release/` or `build/tools/Debug/`):
-  - `extract_tickets.exe` (excluded from default release archive, explicitly built by `build.bat`)
+  - `ost-manager.exe`: All-in-One graphical manager and injector utility. Implements self-contained single-binary distribution by internally embedding `OpenSteamTool.dll`, `ost-loader.exe`, `version.dll`, and `dwmapi.dll`
+  - `OpenSteamTool.dll`: Core interception and unlocking payload DLL
+  - `version.dll` & `dwmapi.dll`: Proxy loaders compiled for Standard DLL Deployment mode (`version.dll` in Steam root, `dwmapi.dll` in `Steam\bin\`)
+* **Standalone Companion Tool** (in `build/tools/Release/` or `build/tools/Debug/`):
+  - `extract_tickets.exe`: Interactive TUI and clientless online Steam CM credentials extraction utility (excluded from default release archive, explicitly built by `build.bat`)
 
 ---
 

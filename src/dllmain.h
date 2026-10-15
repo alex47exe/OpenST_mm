@@ -14,8 +14,8 @@
 #include <atomic>
 #include <cstddef>
 
-inline OSTPlatform::DynamicLibrary::ModuleHandle client_hModule = nullptr;
-inline OSTPlatform::DynamicLibrary::ModuleHandle ui_hModule = nullptr;
+inline std::atomic<OSTPlatform::DynamicLibrary::ModuleHandle> client_hModule{nullptr};
+inline std::atomic<OSTPlatform::DynamicLibrary::ModuleHandle> ui_hModule{nullptr};
 
 inline std::atomic<bool> g_HooksInstalled{false};
 inline std::atomic<bool> g_IsDiversionActive{false};

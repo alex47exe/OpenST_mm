@@ -1,6 +1,4 @@
-#include <windows.h>
-
-1 ICON "app.ico"
+#include <winres.h>
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
@@ -20,11 +18,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "OpenSteamTool"
-            VALUE "FileDescription",  "OpenSteamTool Portable Helper and Auto Injector"
+            VALUE "FileDescription",  "OpenSteamTool Dedicated Steam Loader"
             VALUE "FileVersion",      "1.0.0.0"
-            VALUE "InternalName",     "ost-Injector.exe"
+            VALUE "InternalName",     "ost-loader.exe"
             VALUE "LegalCopyright",   "Copyright (C) 2024-2026 OpenSteamTool"
-            VALUE "OriginalFilename", "ost-Injector.exe"
+            VALUE "OriginalFilename", "ost-loader.exe"
             VALUE "ProductName",      "OpenSteamTool"
             VALUE "ProductVersion",   "1.0.0.0"
         END
