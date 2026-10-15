@@ -117,12 +117,15 @@
 - 自动绑定系统 IFEO 劫持，双击官方 Steam 即可由轻量级加载器实现毫秒级注入
 - 支持随时在管理器中点击「卸载并清理 IFEO」一键还原清理
 
-### 方式三：标准代理 DLL 模式（免注册表 DLL 劫持）
+### 方式三：标准代理 DLL 模式（免注册表 DLL 劫持 / 手动放置）
 适合受组策略或安全策略限制、不希望修改系统 IFEO 注册表的环境：
-- 在 `ost-manager.exe` 界面中点击「部署标准DLL」（或命令行执行 `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`）
-- 自动将 `OpenSteamTool.dll` 与 `version.dll` 部署至 Steam 根目录，将 `dwmapi.dll` 部署至 `Steam\bin\` 目录
-- 双击官方 Steam 即可通过标准 Windows PE 动态库转发链自动加载
-- 支持随时点击「移除DLL」（或执行 `ost-manager.exe /remove-dll <SteamDir>`）完全卸载清理
+- **管理器一键部署**：在 `ost-manager.exe` 界面中点击「部署标准DLL」（或命令行执行 `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`），支持随时点击「移除DLL」完全卸载清理
+- **手动放置位置**：
+  - `OpenSteamTool.dll`：复制到 Steam 根目录（如 `C:\Program Files (x86)\Steam\OpenSteamTool.dll`）
+  - `version.dll`：复制到 Steam 根目录（如 `C:\Program Files (x86)\Steam\version.dll`）
+  - `dwmapi.dll`：复制到 Steam 的 `bin` 子目录（如 `C:\Program Files (x86)\Steam\bin\dwmapi.dll`，**请勿**放置于根目录）
+  - Lua 解锁脚本放置于 `<Steam>\config\lua\` 目录下
+- 双击官方 Steam 快捷方式即可通过标准 Windows PE 动态库转发链自动加载
 
 ### 管理器命令行参考 (`ost-manager.exe`)
 | 参数 | 说明 | 所需权限 |

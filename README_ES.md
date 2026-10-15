@@ -117,12 +117,15 @@ En `ost-manager.exe`, haga clic en "Instalar IFEO (Modo Raíz Steam)":
 - Vincula la intercepción IFEO para que al iniciar el Steam oficial se inyecte al instante a través del cargador ligero
 - Permite la desinstalación limpia con un solo clic en cualquier momento mediante "Desinstalar IFEO"
 
-### Método 3: Modo estándar mediante DLL proxy (Secuestro tradicional de DLL)
+### Método 3: Modo estándar mediante DLL proxy (Secuestro tradicional / Colocación manual)
 Para entornos donde la modificación del registro IFEO esté restringida o no se desee:
-- En `ost-manager.exe`, haga clic en "Desplegar DLL estándar" (o ejecute `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`)
-- Despliega `OpenSteamTool.dll` y `version.dll` en la raíz de Steam, y `dwmapi.dll` en `Steam\bin\`
-- Al hacer doble clic en el Steam oficial, se cargará automáticamente mediante la cadena de reenvío PE estándar de Windows
-- Se puede desinstalar limpiamente en cualquier momento haciendo clic en "Eliminar DLL" (o ejecutando `ost-manager.exe /remove-dll <SteamDir>`)
+- **Mediante el administrador**: En `ost-manager.exe`, haga clic en "Desplegar DLL estándar" (o ejecute `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`). Se puede desinstalar limpiamente en cualquier momento con "Eliminar DLL" (o `ost-manager.exe /remove-dll <SteamDir>`).
+- **Colocación manual**:
+  - `OpenSteamTool.dll`: Copiar directamente al directorio raíz de Steam (p. ej. `C:\Program Files (x86)\Steam\OpenSteamTool.dll`)
+  - `version.dll`: Copiar directamente al directorio raíz de Steam (p. ej. `C:\Program Files (x86)\Steam\version.dll`)
+  - `dwmapi.dll`: Copiar a la subcarpeta `bin` de Steam (p. ej. `C:\Program Files (x86)\Steam\bin\dwmapi.dll`, **no** en la raíz)
+  - Scripts de desbloqueo Lua: Colocar en `<Steam>\config\lua\`
+- Al hacer doble clic en el Steam oficial, se cargará automáticamente mediante la cadena de reenvío PE estándar de Windows.
 
 ### Referencia de línea de comandos del administrador (`ost-manager.exe`)
 | Parámetro | Descripción | Permisos |

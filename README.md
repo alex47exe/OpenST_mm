@@ -117,12 +117,15 @@ In `ost-manager.exe`, click "Install IFEO (Steam Root)":
 - Binds system IFEO interception so double-clicking official Steam directly triggers instant injection via the lightweight loader
 - Allows one-click clean uninstallation at any time via "Uninstall IFEO"
 
-### Method 3: Standard DLL Proxy Mode (Traditional Hijacking)
+### Method 3: Standard DLL Proxy Mode (Traditional Hijacking / Manual Placement)
 For environments where IFEO registry modification is restricted or not preferred:
-- In `ost-manager.exe`, click "Deploy Standard DLL" (or run `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`)
-- Deploys `OpenSteamTool.dll` and `version.dll` to Steam root, and `dwmapi.dll` to `Steam\bin\`
-- Double-clicking official Steam will load OpenSteamTool automatically via standard Windows PE proxy forwarding
-- Cleanly removable at any time via "Remove DLL" (or `ost-manager.exe /remove-dll <SteamDir>`)
+- **Using Manager**: In `ost-manager.exe`, click "Deploy Standard DLL" (or run `ost-manager.exe /deploy-dll <SteamDir> <PayloadDll>`). Cleanly removable at any time via "Remove DLL" (or `ost-manager.exe /remove-dll <SteamDir>`).
+- **Manual Placement**:
+  - `OpenSteamTool.dll`: Copy directly to Steam root directory (e.g. `C:\Program Files (x86)\Steam\OpenSteamTool.dll`)
+  - `version.dll`: Copy directly to Steam root directory (e.g. `C:\Program Files (x86)\Steam\version.dll`)
+  - `dwmapi.dll`: Copy to Steam `bin` subfolder (e.g. `C:\Program Files (x86)\Steam\bin\dwmapi.dll`, **not** in root)
+  - Lua unlock scripts: Place in `<Steam>\config\lua\`
+- Launching official Steam normally will load OpenSteamTool automatically via standard Windows PE proxy forwarding.
 
 ### Manager Command-Line Reference (`ost-manager.exe`)
 | Switch | Description | Privilege |
