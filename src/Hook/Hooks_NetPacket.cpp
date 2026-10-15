@@ -2248,14 +2248,21 @@ namespace Hooks_NetPacket_LegacyKey {
                 g_pending.pop_front();
             }
 
-            uint8* origData = pCarrier->m_pubData;
-            uint32 origSize = pCarrier->m_cubData;
-            pCarrier->m_pubData = pkt.data();
-            pCarrier->m_cubData = static_cast<uint32>(pkt.size());
+            const uint8* origData = pCarrier->PubData();
+            const uint32 origSize = pCarrier->CubData();
+
+            // SetPubData expects a non-const pointer in this codebase — const_cast only if necessary.
+            // pkt is a std::vector<uint8>, so pkt.data() is uint8* already.
+            pCarrier->SetPubData(pkt.data());
+            pCarrier->SetCubData(static_cast<uint32>(pkt.size()));
+
             invokeOriginal(pThis, pCarrier);
-            pCarrier->m_pubData = origData;
-            pCarrier->m_cubData = origSize;
-            LOG_NETPACKET_DEBUG("LegacyKey: delivered {}-byte response", pkt.size());
+
+            // Restore original values using mutators
+            pCarrier->SetPubData(const_cast<uint8*>(origData));
+            pCarrier->SetCubData(origSize);
+
+LOG_NETPACKET_DEBUG("LegacyKey: delivered {}-byte response", pkt.size());
         }
     }
 
