@@ -91,17 +91,19 @@ Extrae AppTicket, ETicket, DLC, claves de depósitos, manifiestos y genera un `<
 ## Uso
 
 ### Método 1: Modo portátil (Recomendado)
-No requiere copiar DLL en la carpeta de Steam y funciona de manera totalmente independiente:
-1. Extrae el paquete (con `ost-Injector.exe`, `OpenSteamTool.dll`, etc.) en cualquier carpeta independiente (ej. `D:\OpenSteamTool_Portable`)
+No requiere copiar archivos en la carpeta de Steam y funciona de manera totalmente independiente y limpia:
+1. Extrae el paquete en cualquier carpeta independiente (ej. `D:\OpenSteamTool_Portable`)
 2. Crea `config/lua/` y coloca tus scripts de desbloqueo; `opensteamtool.toml` se puede ubicar directamente en este directorio portátil
-3. Métodos de inicio:
-   - **Manual**: Ejecuta `ost-Injector.exe` para detectar o abrir Steam e inyectar
-   - **Inicio automático**: Ejecuta `CreateAutoInjectTask.bat` (sin necesidad de administrador; desinstalar con `DeleteAutoInjectTask.bat`)
-   - **Línea de comandos**: Admite `-watch` / `--watch` / `-daemon` (servicio en segundo plano), `-silent` / `--silent` / `-s` (inyección única silenciosa) y `-help` / `--help` / `-h` (ayuda de línea de comandos)
+3. Ejecuta `ost-manager.exe`:
+   - **Lanzamiento / Inyección única**: Haz clic en "One-shot Inject" en la GUI o ejecuta `ost-manager.exe /launch` desde la línea de comandos
+   - **Intercepción IFEO portátil**: Haz clic en "Install IFEO (Portable Mode)"; al iniciar Steam normalmente se inyectará de forma invisible y automática
+   - **Monitor de inicio automático**: Haz clic en "Start Watcher Daemon" para iniciar la supervisión en segundo plano al iniciar sesión (sin privilegios de administrador, clave `ost_watcher`)
 
-### Método 2: Modo estándar (Secuestro de DLL)
-1. Copia `dwmapi.dll`, `xinput1_4.dll` y `OpenSteamTool.dll` al directorio raíz de Steam
-2. Crea la carpeta `config/lua/` en el directorio de Steam y coloca allí tus scripts de Lua
+### Método 2: Modo dedicado de la raíz de Steam
+En `ost-manager.exe`, haz clic en "Install IFEO (Steam Root Mode)":
+- Despliega automáticamente `OpenSteamTool.dll` y el cargador dedicado `ost-loader.exe` en la raíz de Steam
+- Vincula IFEO para que al hacer doble clic en el Steam oficial se inyecte al instante a través del cargador ligero
+- Permite la desinstalación limpia con un solo clic en cualquier momento
 
 ---
 
@@ -258,7 +260,9 @@ build.bat
 
 ### Salida
 * **Componentes principales** (en `build/Release/` o `build/Debug/`):
-  - `OpenSteamTool.dll`, `dwmapi.dll`, `xinput1_4.dll`, `ost-Injector.exe` y scripts auxiliares
+  - `OpenSteamTool.dll`: DLL de carga útil principal para interceptación y desbloqueo
+  - `ost-manager.exe`: Utilidad gráfica de administración e inyección (despliegue IFEO, demonio en segundo plano, inicio automático)
+  - `ost-loader.exe`: Cargador ligero de seguridad dedicado para la raíz de Steam
 * **Herramienta independiente** (en `build/tools/Release/` o `build/tools/Debug/`):
   - `extract_tickets.exe` (excluido del paquete general por defecto, compilado explícitamente por `build.bat`)
 

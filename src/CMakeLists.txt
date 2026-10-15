@@ -4,7 +4,44 @@ project(OpenSteamTool VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
-set(OPENSTEAMTOOL_VERSION "${PROJECT_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll")
+string(TIMESTAMP OST_BUILD_TIMESTAMP "%Y%m%d_%H%M")
+
+# Automatic version resolution (Release Tag -> CI PR -> Git short hash -> Build Timestamp)
+if(NOT DEFINED OPENSTEAMTOOL_VERSION OR OPENSTEAMTOOL_VERSION STREQUAL "" OR OPENSTEAMTOOL_VERSION STREQUAL "${PROJECT_VERSION}")
+    find_package(Git QUIET)
+    set(OST_RESOLVED_VERSION "")
+    if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.git")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE OST_GIT_TAG
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(OST_GIT_TAG)
+            set(OST_RESOLVED_VERSION "${OST_GIT_TAG}")
+        else()
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE OST_GIT_COMMIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(OST_GIT_COMMIT)
+                set(OST_RESOLVED_VERSION "${OST_GIT_COMMIT}")
+            endif()
+        endif()
+    endif()
+
+    if(NOT OST_RESOLVED_VERSION)
+        set(OST_RESOLVED_VERSION "${OST_BUILD_TIMESTAMP}")
+    endif()
+
+    set(OPENSTEAMTOOL_VERSION "${OST_RESOLVED_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll" FORCE)
+else()
+    set(OPENSTEAMTOOL_VERSION "${OPENSTEAMTOOL_VERSION}" CACHE STRING "Version string embedded into OpenSteamTool.dll" FORCE)
+endif()
 
 # Allow CMAKE_MSVC_RUNTIME_LIBRARY to control runtime selection for all targets,
 # including dependencies pulled in via FetchContent.
@@ -33,7 +70,24 @@ endif()
 
 add_compile_definitions(NOMINMAX)
 if(MSVC)
-    add_compile_options(/utf-8 /EHsc)
+    add_compile_options(
+        /utf-8
+        /EHsc
+        $<$<CONFIG:Release>:/O1>
+        $<$<CONFIG:Release>:/GL>
+        $<$<CONFIG:Release>:/Gy>
+        $<$<CONFIG:Release>:/Gw>
+        $<$<CONFIG:Release>:/GF>
+    )
+    add_link_options(
+        "/DYNAMICBASE"
+        "/NXCOMPAT"
+        "/HIGHENTROPYVA"
+        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+        $<$<CONFIG:Release>:/INCREMENTAL:NO>
+    )
 endif()
 
 
@@ -43,6 +97,22 @@ configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenSteamToolBuildInfo.h.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/OpenSteamToolBuildInfo.h"
     @ONLY
+)
+
+# ---------------------------------------------------------------------------
+# Proxy DLL targets — dwmapi.dll and version.dll
+# Defined early so tools (ost-manager) can embed their binaries.
+# ---------------------------------------------------------------------------
+add_library(dwmapi SHARED
+    dwmapi/dwmapi.cpp
+    dwmapi/dwmapi.def
+    dwmapi/dwmapi.rc
+)
+
+add_library(version SHARED
+    version/version.cpp
+    version/version.def
+    version/version.rc
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +185,7 @@ add_subdirectory(OSTPlatform)
 # OpenSteamTool — the hook DLL injected into Steam (always 64-bit).
 add_library(OpenSteamTool SHARED
     dllmain.cpp
+    OpenSteamTool.rc
 
     # Shared utilities
     Utils/Tickets/AppTicket.cpp
@@ -148,6 +219,7 @@ add_library(OpenSteamTool SHARED
     # Per-category hook modules
     Hook/HookManager.cpp
     Hook/Hooks_Decryption.cpp
+    Hook/Hooks_Diversion.cpp
     Hook/Hooks_IPC.cpp
     Hook/Hooks_IPC_ISteamUser.cpp
     Hook/Hooks_IPC_ISteamUtils.cpp
@@ -199,30 +271,18 @@ if(OST_ETICKET_URL)
         OST_ETICKET_URL="${OST_ETICKET_URL}")
 endif()
 
-# ---------------------------------------------------------------------------
-# dwmapi.dll hijack — small loader DLL placed alongside Steam.
-# ---------------------------------------------------------------------------
-add_library(dwmapi SHARED
-    dwmapi/dwmapi.cpp
-)
 
-# ---------------------------------------------------------------------------
-# xinput1_4.dll hijack — secondary loader DLL placed alongside Steam.
-# ---------------------------------------------------------------------------
-add_library(xinput1_4 SHARED
-    xinput1_4/xinput1_4.cpp
-    xinput1_4/xinput1_4.def
-)
-
-# ---------------------------------------------------------------------------
-# ost-Injector — portable injector executable (defined in tools/CMakeLists.txt).
-# Ensure ost-Injector is always built alongside OpenSteamTool.
-# ---------------------------------------------------------------------------
-if(TARGET ost-Injector)
-    add_dependencies(OpenSteamTool ost-Injector)
-endif()
 if(TARGET extract_tickets)
     add_dependencies(OpenSteamTool extract_tickets)
+endif()
+if(TARGET ost-manager)
+    add_dependencies(ost-manager OpenSteamTool)
+endif()
+if(TARGET version)
+    add_dependencies(OpenSteamTool version)
+endif()
+if(TARGET dwmapi)
+    add_dependencies(OpenSteamTool dwmapi)
 endif()
 
 

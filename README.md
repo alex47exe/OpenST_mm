@@ -91,17 +91,19 @@ Extracts AppTicket, ETicket, DLC lists, depot keys, manifests, and generates a r
 ## Usage
 
 ### Method 1: Portable Mode (Recommended)
-No DLLs in the Steam directory; runs completely independently:
-1. Extract the release package (with `ost-Injector.exe`, `OpenSteamTool.dll`, etc.) to any standalone folder (e.g. `D:\OpenSteamTool_Portable`)
+No files copied to the Steam directory; runs completely green and portable:
+1. Extract the release package to any standalone folder (e.g. `D:\OpenSteamTool_Portable`)
 2. Create `config/lua/` and add your `.lua` unlock scripts; `opensteamtool.toml` can be placed directly in this portable folder
-3. Launch options:
-   - **Manual**: Run `ost-Injector.exe` to detect or launch Steam and inject
-   - **Auto-start**: Run `CreateAutoInjectTask.bat` (no administrator privileges required; uninstall via `DeleteAutoInjectTask.bat`)
-   - **CLI**: Supports `-watch` / `--watch` / `-daemon` (background auto-injection watcher), `-silent` / `--silent` / `-s` (one-shot silent injection), and `-help` / `--help` / `-h` (command-line help)
+3. Run `ost-manager.exe`:
+   - **One-shot Launch / Inject**: Click "One-shot Inject" in the GUI or execute `ost-manager.exe /launch` via CLI
+   - **Portable IFEO Interception**: Click "Install IFEO (Portable Mode)"; launching Steam normally will automatically trigger zero-window injection
+   - **Auto-Start Watcher**: Click "Start Watcher Daemon" to start background monitoring on login (no administrator privileges needed, registry key `ost_watcher`)
 
-### Method 2: Standard Mode (DLL Hijacking)
-1. Copy `dwmapi.dll`, `xinput1_4.dll`, and `OpenSteamTool.dll` to the Steam root directory
-2. Create `config/lua/` in the Steam root directory and place your Lua scripts there
+### Method 2: Steam Root Dedicated Mode
+In `ost-manager.exe`, click "Install IFEO (Steam Root Mode)":
+- Automatically deploys `OpenSteamTool.dll` and the dedicated loader `ost-loader.exe` to Steam root
+- Binds IFEO so double-clicking official Steam directly triggers instant injection via the lightweight loader
+- Allows one-click clean uninstallation at any time
 
 ---
 
@@ -258,7 +260,9 @@ build.bat
 
 ### Output
 * **Core Components** (in `build/Release/` or `build/Debug/`):
-  - `OpenSteamTool.dll`, `dwmapi.dll`, `xinput1_4.dll`, `ost-Injector.exe`, and helper scripts
+  - `OpenSteamTool.dll`: Core interception and unlocking payload DLL
+  - `ost-manager.exe`: Graphical management and injection utility (IFEO deployment, background daemon, auto-start management)
+  - `ost-loader.exe`: Lightweight security loader dedicated for Steam root directory
 * **Standalone Tool** (in `build/tools/Release/` or `build/tools/Debug/`):
   - `extract_tickets.exe` (excluded from default release archive, explicitly built by `build.bat`)
 

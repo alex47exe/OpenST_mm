@@ -8,6 +8,7 @@
 #include "Enums.h"
 
 
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <cstring>
@@ -247,23 +248,53 @@ struct IKeyValuesSystem {
 };
 using KeyValuesSystemSteam_t = IKeyValuesSystem* (*)();
 
+namespace NetPacketLayout {
+	inline std::atomic<uint32> s_dataOffset{16};
+	inline std::atomic<uint32> s_sizeOffset{24};
+	inline std::atomic<bool>   s_resolved{false};
+
+	inline void Reset() noexcept {
+		s_dataOffset.store(16, std::memory_order_relaxed);
+		s_sizeOffset.store(24, std::memory_order_relaxed);
+		s_resolved.store(false, std::memory_order_release);
+	}
+}
+
 struct CNetPacket
 {
-	HCONNECTION m_hConnection;
-	uint8* m_pubData;
-	uint32 m_cubData;
-	int32 m_cRef;
-	uint8* m_pubNetworkBuffer;
-	CNetPacket* m_pNext;
+	// Dynamic offset-aware resilient safe accessors
+	[[nodiscard]] uint8* PubData() const noexcept {
+		return PubData(NetPacketLayout::s_dataOffset.load(std::memory_order_relaxed));
+	}
+	void SetPubData(uint8* data) noexcept {
+		SetPubData(data, NetPacketLayout::s_dataOffset.load(std::memory_order_relaxed));
+	}
+	[[nodiscard]] uint32 CubData() const noexcept {
+		return CubData(NetPacketLayout::s_sizeOffset.load(std::memory_order_relaxed));
+	}
+	void SetCubData(uint32 size) noexcept {
+		SetCubData(size, NetPacketLayout::s_sizeOffset.load(std::memory_order_relaxed));
+	}
+
+	[[nodiscard]] uint8* PubData(uint32 dataOff) const noexcept {
+		return *reinterpret_cast<uint8* const*>(reinterpret_cast<const uint8*>(this) + dataOff);
+	}
+	void SetPubData(uint8* data, uint32 dataOff) noexcept {
+		*reinterpret_cast<uint8**>(reinterpret_cast<uint8*>(this) + dataOff) = data;
+	}
+	[[nodiscard]] uint32 CubData(uint32 sizeOff) const noexcept {
+		return *reinterpret_cast<const uint32*>(reinterpret_cast<const uint8*>(this) + sizeOff);
+	}
+	void SetCubData(uint32 size, uint32 sizeOff) noexcept {
+		*reinterpret_cast<uint32*>(reinterpret_cast<uint8*>(this) + sizeOff) = size;
+	}
+
+	// Ergonomic aliases
+	[[nodiscard]] uint8* GetData() const noexcept { return PubData(); }
+	void SetData(uint8* data) noexcept { SetPubData(data); }
+	[[nodiscard]] uint32 GetSize() const noexcept { return CubData(); }
+	void SetSize(uint32 size) noexcept { SetCubData(size); }
 };
-static_assert(sizeof(CNetPacket) == 40, "CNetPacket size mismatch");
-static_assert(alignof(CNetPacket) == 8, "CNetPacket alignment mismatch");
-static_assert(offsetof(CNetPacket, m_pubData) == 0x08, "m_pubData offset mismatch");
-static_assert(offsetof(CNetPacket, m_cubData) == 0x10, "m_cubData offset mismatch");
-static_assert(offsetof(CNetPacket, m_cRef) == 0x14, "m_cRef offset mismatch");
-static_assert(offsetof(CNetPacket, m_pubNetworkBuffer) == 0x18, "m_pubNetworkBuffer offset mismatch");
-static_assert(offsetof(CNetPacket, m_pNext) == 0x20, "m_pNext offset mismatch");
-static_assert(std::is_standard_layout_v<CNetPacket>, "CNetPacket must be standard layout");
 
 #pragma pack(push, 1)
 struct MsgHdr

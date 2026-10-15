@@ -1,7 +1,6 @@
 #pragma once
 
 namespace HookManager {
-    void InstallEarlyUIHooks() noexcept;
     void InstallUIHooks() noexcept;
     void UninstallUIHooks() noexcept;
 
@@ -10,7 +9,6 @@ namespace HookManager {
 
     void DetachWorkerThreads() noexcept;
 
-    [[nodiscard]] bool AreEarlyUIHooksInstalled() noexcept;
     [[nodiscard]] bool AreUIHooksInstalled() noexcept;
     [[nodiscard]] bool AreClientHooksInstalled() noexcept;
 }

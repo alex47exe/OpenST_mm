@@ -4,6 +4,17 @@ setlocal EnableDelayedExpansion
 REM Always run from the script directory.
 cd /d "%~dp0"
 
+REM Ensure Visual Studio environment is initialized if running from normal shell
+if "%INCLUDE%"=="" (
+    for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+        set "VS_DIR=%%i"
+    )
+    if exist "!VS_DIR!\VC\Auxiliary\Build\vcvars64.bat" (
+        echo [INFO] Initializing Visual Studio environment from !VS_DIR!...
+        call "!VS_DIR!\VC\Auxiliary\Build\vcvars64.bat"
+    )
+)
+
 REM ---------------------------------------------------------------------------
 REM Configurable build options
 REM   GENERATOR  - CMake generator (default: auto-detect)
@@ -35,9 +46,8 @@ for %%C in (%CONFIGS%) do (
     cmake --build build --config %%C
     if errorlevel 1 goto :fail
 
-    REM ost-Injector and extract_tickets build steps
-    echo [INFO] Building tool ost-Injector for %%C
-    cmake --build build --config %%C --target ost-Injector
+    echo [INFO] Building tool ost-manager for %%C
+    cmake --build build --config %%C --target ost-manager
     if errorlevel 1 goto :fail
 
     REM extract_tickets is EXCLUDE_FROM_ALL, so build it explicitly. It lands in

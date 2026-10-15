@@ -91,17 +91,19 @@
 ## 使用方法
 
 ### 方式一：便携模式（推荐）
-无需向 Steam 目录复制任何 DLL，完全独立运行：
-1. 解压发布包（含 `ost-Injector.exe`、`OpenSteamTool.dll` 等）到任意独立目录（如 `D:\OpenSteamTool_Portable`）
+无需向 Steam 目录复制任何文件，完全绿色便携运行：
+1. 解压发布包到任意独立目录（如 `D:\OpenSteamTool_Portable`）
 2. 在该目录下创建 `config/lua/` 文件夹并放入 `.lua` 解锁脚本；若需自定义配置，可将 `opensteamtool.toml` 直接放在此目录下
-3. 启动方式：
-   - **手动启动**：直接运行 `ost-Injector.exe`，自动检测或拉起 Steam 并注入
-   - **开机自启**：直接运行 `CreateAutoInjectTask.bat`（无需管理员权限；卸载运行 `DeleteAutoInjectTask.bat`）
-   - **命令行**：支持 `-watch` / `--watch` / `-daemon`（后台常驻监听）、`-silent` / `--silent` / `-s`（单次静默注入）及 `-help` / `--help` / `-h`（命令行帮助）
+3. 运行 `ost-manager.exe`：
+   - **一键启动/注入**：点击主界面「单次注入」，或命令行执行 `ost-manager.exe /launch`
+   - **便携 IFEO 自动劫持**：点击「安装 IFEO (便携模式)」，直接启动官方 Steam 快捷方式即可自动无感注入
+   - **开机自动监听**：点击「启动监听守护」开启后台静默监听，自动在用户开机登录时捕获 Steam 启动并注入（无需管理员权限，键名 `ost_watcher`）
 
-### 方式二：标准模式（DLL 劫持）
-1. 将 `dwmapi.dll`、`xinput1_4.dll` 和 `OpenSteamTool.dll` 复制到 Steam 安装根目录
-2. 在 Steam 根目录下创建 `config/lua/` 目录并放入 Lua 脚本
+### 方式二：Steam 根目录专属模式
+在 `ost-manager.exe` 界面中点击「安装 IFEO (Steam 根目录模式)」：
+- 自动将 `OpenSteamTool.dll` 与专属加载器 `ost-loader.exe` 部署至 Steam 根目录
+- 自动绑定 IFEO 劫持，双击官方 Steam 即可由轻量级加载器实现毫秒级注入
+- 支持随时在管理器中一键卸载清理
 
 ---
 
@@ -258,7 +260,9 @@ build.bat
 
 ### 输出产物
 * **核心组件**（位于 `build/Release/` 或 `build/Debug/`）：
-  - `OpenSteamTool.dll`、`dwmapi.dll`、`xinput1_4.dll`、`ost-Injector.exe` 及辅助脚本
+  - `OpenSteamTool.dll`：核心劫持与解锁动态库
+  - `ost-manager.exe`：图形化管理与注入器（支持 IFEO 部署、后台监听、自启动管理）
+  - `ost-loader.exe`：Steam 根目录专属轻量安全加载器
 * **独立提取工具**（位于 `build/tools/Release/` 或 `build/tools/Debug/`）：
   - `extract_tickets.exe`（主发布包默认排除，由 `build.bat` 显式编译）
 

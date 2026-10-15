@@ -34,7 +34,6 @@ namespace {
 struct PatternEntry {
     std::string name;
     uintptr_t   rva = 0;   // 0 = not present in file
-    std::string sig;        // empty = not present in file
 };
 
 // key = Fnv1aHash(funcName)
@@ -66,130 +65,10 @@ static std::unordered_set<OSTPlatform::DynamicLibrary::ModuleHandle> g_failedMod
 // functions whose names were not found during FindPattern
 static std::unordered_set<std::string> g_missingFunctions;
 
-// ---- byte-pattern scanner ----
-
-static bool ParseSig(std::string_view str,
-                     std::vector<uint8_t>& bytes,
-                     std::vector<uint8_t>& mask)
-{
-    bytes.clear();
-    mask.clear();
-
-    auto nib = [](char c) noexcept -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
-    };
-
-    const size_t len = str.size();
-    size_t i = 0;
-    while (i < len) {
-        char c = str[i];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',') {
-            ++i;
-            continue;
-        }
-
-        if (c == '?') {
-            // Wildcard support: '?' or '??'
-            bytes.push_back(0);
-            mask.push_back(0);
-            ++i;
-            if (i < len && str[i] == '?') {
-                ++i; // consume second '?'
-            }
-            continue;
-        }
-
-        // Must have at least 2 chars for a byte
-        if (i + 1 >= len) {
-            return false;
-        }
-
-        int h = nib(str[i]);
-        int l = nib(str[i + 1]);
-        if (h < 0 || l < 0) {
-            return false;
-        }
-
-        bytes.push_back(static_cast<uint8_t>((h << 4) | l));
-        mask.push_back(1);
-        i += 2;
-    }
-
-    return !bytes.empty();
-}
-
-static void* ScanMemoryRange(const uint8_t* base, size_t size,
-                             const std::vector<uint8_t>& bytes,
-                             const std::vector<uint8_t>& mask)
-{
-    if (!base || size < bytes.size() || bytes.empty()) return nullptr;
-    const size_t patLen = bytes.size();
-    const size_t maxOffset = size - patLen;
-
-    // Find the first non-wildcard anchor byte for fast single-instruction test
-    size_t anchorIdx = 0;
-    while (anchorIdx < patLen && mask[anchorIdx] == 0) {
-        ++anchorIdx;
-    }
-
-    if (anchorIdx < patLen) {
-        const uint8_t anchor = bytes[anchorIdx];
-        for (size_t i = 0; i <= maxOffset; ++i) {
-            if (base[i + anchorIdx] != anchor) {
-                continue;
-            }
-
-            bool found = true;
-            for (size_t j = 0; j < patLen; ++j) {
-                if (mask[j] && base[i + j] != bytes[j]) {
-                    found = false;
-                    break;
-                }
-            }
-            if (found) {
-                return const_cast<uint8_t*>(base + i);
-            }
-        }
-    } else {
-        // All wildcard bytes (defensive)
-        return const_cast<uint8_t*>(base);
-    }
-
-    return nullptr;
-}
-
-static void* ScanModule(OSTPlatform::DynamicLibrary::ModuleHandle module,
-                        const std::vector<uint8_t>& bytes,
-                        const std::vector<uint8_t>& mask)
-{
-    if (!module || bytes.empty()) return nullptr;
-
-    // 1. Precise scope: search strictly within the executable .text section
-    if (const auto textSec = OSTPlatform::Memory::GetModuleSection(module, ".text")) {
-        if (void* addr = ScanMemoryRange(textSec->base, textSec->size, bytes, mask)) {
-            return addr;
-        }
-        // Section was found and scanned. Do NOT blindly fall back to the entire module
-        // to avoid doubling miss time and risking pseudo-matches in read-only / data sections.
-        return nullptr;
-    }
-
-    // 2. Fallback: only if the module lacks a distinct .text section (e.g. packed/custom PE),
-    // safely scan the full module image.
-    if (const auto image = OSTPlatform::Memory::GetModuleImage(module)) {
-        return ScanMemoryRange(image->base, image->size, bytes, mask);
-    }
-
-    return nullptr;
-}
-
 // ---- TOML pattern parser ----
 
 // Section keys are hex literals like "0x82428E37"; each section is a table
-// with optional `name`, `rva` (hex string or integer), and `sig` (IDA-style bytes).
+// with optional `name` and `rva` (hex string or integer).
 static PatternMap TableToPatternMap(const toml::table& tbl)
 {
     PatternMap map;
@@ -215,8 +94,6 @@ static PatternMap TableToPatternMap(const toml::table& tbl)
                 entry.rva = static_cast<uintptr_t>(*v);
             }
         }
-
-        if (auto v = sub["sig"].value<std::string>()) entry.sig = *v;
 
         map[hashKey] = std::move(entry);
     }
@@ -359,45 +236,21 @@ void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* 
         return nullptr;
     }
 
-    // Priority 1: RVA direct offset with module bounds validation
+    // Direct RVA offset with module bounds validation
     if (entry.rva != 0) {
-        bool rvaValid = true;
         if (const auto image = OSTPlatform::Memory::GetModuleImage(module)) {
             if (entry.rva >= image->size) {
-                LOG_WARN("PatternLoader: {} RVA 0x{:X} exceeds module image size 0x{:X}; falling back to signature",
+                LOG_WARN("PatternLoader: {} RVA 0x{:X} exceeds module image size 0x{:X}",
                          funcName, entry.rva, image->size);
-                rvaValid = false;
-            }
-        }
-
-        if (rvaValid) {
-            void* addr = reinterpret_cast<void*>(
-                reinterpret_cast<uintptr_t>(module) + entry.rva);
-            LOG_DEBUG("PatternLoader: {} resolved via RVA 0x{:X}", funcName, entry.rva);
-            return addr;
-        }
-    }
-
-    // Priority 2: byte-signature scan
-    if (!entry.sig.empty()) {
-        std::vector<uint8_t> bytes, mask;
-        if (ParseSig(entry.sig, bytes, mask)) {
-            void* addr = ScanModule(module, bytes, mask);
-            if (addr) {
-                uintptr_t rva = reinterpret_cast<uintptr_t>(addr) -
-                                reinterpret_cast<uintptr_t>(module);
-                LOG_DEBUG("PatternLoader: {} resolved via sig @ RVA 0x{:X}",
-                          funcName, rva);
+            } else {
+                void* addr = reinterpret_cast<void*>(
+                    reinterpret_cast<uintptr_t>(module) + entry.rva);
+                LOG_DEBUG("PatternLoader: {} resolved via RVA 0x{:X}", funcName, entry.rva);
                 return addr;
             }
-            LOG_WARN("PatternLoader: sig scan miss for '{}' (pattern parsed OK, "
-                     "no match in .text section)", funcName);
-        } else {
-            LOG_WARN("PatternLoader: malformed sig for '{}': '{}'",
-                     funcName, entry.sig);
         }
     } else {
-        LOG_WARN("PatternLoader: entry for '{}' has neither valid rva nor sig", funcName);
+        LOG_WARN("PatternLoader: entry for '{}' has no valid RVA", funcName);
     }
 
     {

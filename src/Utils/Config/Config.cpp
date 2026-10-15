@@ -163,8 +163,12 @@ namespace {
                     snapshot.manifestAutoSyncOnUpdate = *val;
             }
 
-            // [log]
-            if (auto log = tbl["log"].as_table()) {
+            // [log] or [logging]
+            auto log = tbl["log"].as_table();
+            if (!log) {
+                log = tbl["logging"].as_table();
+            }
+            if (log) {
                 if (auto val = (*log)["level"].value<std::string>()) {
                     if (*val == "trace")           snapshot.logLevel = LogLevel::Trace;
                     else if (*val == "debug")       snapshot.logLevel = LogLevel::Debug;
