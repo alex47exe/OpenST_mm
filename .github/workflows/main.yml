@@ -23,10 +23,14 @@ jobs:
         run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_VERSION="${{ github.event.inputs.version }}"
 
       - name: Build Release
-        run: cmake --build build --config Release
+        run: |
+          cmake --build build --config Release
+          cmake --build build --config Release --target ost-manager
 
       - name: Build Debug
-        run: cmake --build build --config Debug
+        run: |
+          cmake --build build --config Debug
+          cmake --build build --config Debug --target ost-manager
 
       - uses: actions/upload-artifact@v4
         with:
@@ -71,19 +75,27 @@ jobs:
 
             ## **extract_tickets Build / Release:** [OpenSteamTool Actions Workflow](https://github.com/mmxlyo/OpenSteamTool/actions/workflows/tools.yml)
 
-            ## Installation
+            ## Installation & Usage
 
-            Download `OpenSteamTool-${{ github.event.inputs.version }}-Release.zip` (or the `-Debug` variant if you need logging to `<steam>/opensteamtool directory`).
+            Download `OpenSteamTool-${{ github.event.inputs.version }}-Release.zip` (or the `-Debug` variant if you need verbose file logging).
 
-            ### Method 1: Portable Mode (Recommended, ost-Injector)
-            1. Extract the zip to any standalone folder outside the Steam directory.
+            ### Method 1: Portable Mode (Recommended)
+            No files copied to the Steam directory; runs completely green and portable:
+            1. Extract the release package to any standalone folder outside the Steam directory.
             2. Place your Lua unlock scripts in `config/lua/` inside that folder.
-            3. Run `ost-Injector.exe` to launch/inject into Steam, or run `CreateAutoInjectTask.bat` to set up background auto-injection on system startup.
-            *(No files are placed in or modify your Steam directory!)*
+            3. Run `ost-manager.exe`:
+               - **One-shot Launch / Inject**: Click "One-shot Inject" in the GUI or execute `ost-manager.exe /launch` via CLI.
+               - **Portable IFEO Interception**: Click "Install IFEO (Portable Mode)"; launching Steam normally will automatically trigger zero-window injection.
+               - **Auto-Start Watcher**: Click "Start Watcher Daemon" to start background monitoring on login (no administrator privileges needed, registry key `ost_watcher`).
 
-            ### Method 2: Standard Mode (DLL Hijacking)
-            1. Extract and copy `dwmapi.dll`, `xinput1_4.dll` and `OpenSteamTool.dll` directly to your Steam root directory (e.g. `C:\Program Files (x86)\Steam`).
-            2. Create a Lua config directory (`C:\Program Files (x86)\Steam\config\lua`) and place your Lua scripts there. **NOT** `config\stplug-in`!
+            ### Method 2: Steam Root Dedicated Mode
+            In `ost-manager.exe`, click "Install IFEO (Steam Root Mode)":
+            - Automatically deploys `OpenSteamTool.dll` and dedicated loader `ost-loader.exe` to Steam root.
+            - Binds IFEO so double-clicking official Steam directly triggers instant injection via the lightweight loader.
+            - Allows one-click clean uninstallation at any time.
+
+            ### Method 3: Standard DLL Proxy Mode (Root Drop-in)
+            In `ost-manager.exe`, click "Deploy Standard DLL" to install `dwmapi.dll` or `version.dll` and `OpenSteamTool.dll` directly into the Steam root directory.
           files: |
             OpenSteamTool-${{ github.event.inputs.version }}-Release.zip
             OpenSteamTool-${{ github.event.inputs.version }}-Debug.zip
