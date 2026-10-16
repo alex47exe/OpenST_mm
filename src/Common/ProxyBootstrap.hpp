@@ -88,13 +88,13 @@ public:
         }
 
         constexpr DWORD kPathBufCapacity = 1024;
-        wchar_t pathBuf[kPathBufCapacity];
-        const DWORD exeLen = ::GetModuleFileNameW(nullptr, pathBuf, kPathBufCapacity);
+        wchar_t exePathBuf[kPathBufCapacity];
+        const DWORD exeLen = ::GetModuleFileNameW(nullptr, exePathBuf, kPathBufCapacity);
         if (exeLen == 0 || exeLen >= kPathBufCapacity) {
             return TRUE;
         }
 
-        const std::wstring_view fullExePath(pathBuf, exeLen);
+        const std::wstring_view fullExePath(exePathBuf, exeLen);
         const auto lastSlash = fullExePath.find_last_of(L"\\/");
         const std::wstring_view exeName = (lastSlash != std::wstring_view::npos)
             ? fullExePath.substr(lastSlash + 1)
@@ -105,27 +105,62 @@ public:
             return TRUE;
         }
 
-        // Host is verified: prefer loading payload from the proxy DLL's own directory
-        // to avoid CWD drift or DLL search-order hijacking.
+        const size_t exeDirLen = (lastSlash != std::wstring_view::npos) ? (lastSlash + 1) : 0;
+
+        // Host is verified: inject payload DLL.
+        // 1. Idempotency Guard: Extract the base module name and check if it is already
+        // loaded in this process (e.g. injected by a coexisting proxy loader like version.dll
+        // or by ost-loader via IFEO). Return immediately to prevent redundant LoadLibrary
+        // and LoaderLock deadlocks!
+        const auto payloadSlash = payloadDll.find_last_of(L"\\/");
+        const std::wstring_view basePayloadName = (payloadSlash != std::wstring_view::npos)
+            ? payloadDll.substr(payloadSlash + 1)
+            : payloadDll;
+
+        wchar_t nullTerminatedBasePayload[MAX_PATH];
+        if (basePayloadName.size() >= MAX_PATH) {
+            return TRUE;
+        }
+        std::char_traits<wchar_t>::copy(nullTerminatedBasePayload, basePayloadName.data(), basePayloadName.size());
+        nullTerminatedBasePayload[basePayloadName.size()] = L'\0';
+
+        if (::GetModuleHandleW(nullTerminatedBasePayload) != nullptr) {
+            return TRUE;
+        }
+
+        // 2. Separate probe buffer: completely isolated from exePathBuf to prevent
+        // buffer aliasing and memory corruption.
         HMODULE hPayload = nullptr;
-        const DWORD modLen = ::GetModuleFileNameW(hModule, pathBuf, kPathBufCapacity);
+        wchar_t probeBuf[kPathBufCapacity];
+
+        // Prefer loading payload from the proxy DLL's own directory
+        // to avoid CWD drift or DLL search-order hijacking.
+        size_t proxyDirLen = 0;
+        const DWORD modLen = ::GetModuleFileNameW(hModule, probeBuf, kPathBufCapacity);
         if (modLen > 0 && modLen < kPathBufCapacity) {
-            const std::wstring_view fullModPath(pathBuf, modLen);
+            const std::wstring_view fullModPath(probeBuf, modLen);
             const auto modSlash = fullModPath.find_last_of(L"\\/");
             if (modSlash != std::wstring_view::npos) {
-                const size_t dirLen = modSlash + 1;
-                if (payloadDll.size() < kPathBufCapacity - dirLen) {
-                    std::char_traits<wchar_t>::copy(pathBuf + dirLen, payloadDll.data(), payloadDll.size());
-                    pathBuf[dirLen + payloadDll.size()] = L'\0';
-                    hPayload = ::LoadLibraryW(pathBuf);
+                proxyDirLen = modSlash + 1;
+                if (payloadDll.size() < kPathBufCapacity - proxyDirLen) {
+                    std::char_traits<wchar_t>::copy(probeBuf + proxyDirLen, payloadDll.data(), payloadDll.size());
+                    probeBuf[proxyDirLen + payloadDll.size()] = L'\0';
+                    hPayload = ::LoadLibraryW(probeBuf);
                 }
             }
         }
 
-        if (!hPayload && payloadDll.size() < kPathBufCapacity) {
-            std::char_traits<wchar_t>::copy(pathBuf, payloadDll.data(), payloadDll.size());
-            pathBuf[payloadDll.size()] = L'\0';
-            ::LoadLibraryW(pathBuf);
+        // 3. Fallback: if not found in proxy directory and proxy directory is different from host directory,
+        // resolve relative to host executable directory (essential when proxy DLL resides in a subdirectory
+        // like Steam\bin\ while payload is in Steam root).
+        const bool isSameDir = (proxyDirLen == exeDirLen) &&
+            EqualIgnoreCase(std::wstring_view(probeBuf, proxyDirLen), std::wstring_view(exePathBuf, exeDirLen));
+
+        if (!hPayload && !isSameDir && exeDirLen > 0 && payloadDll.size() < kPathBufCapacity - exeDirLen) {
+            std::char_traits<wchar_t>::copy(probeBuf, exePathBuf, exeDirLen);
+            std::char_traits<wchar_t>::copy(probeBuf + exeDirLen, payloadDll.data(), payloadDll.size());
+            probeBuf[exeDirLen + payloadDll.size()] = L'\0';
+            hPayload = ::LoadLibraryW(probeBuf);
         }
 
         return TRUE;
