@@ -70,10 +70,20 @@ endif()
 
 add_compile_definitions(NOMINMAX)
 if(MSVC)
+    # OpenSteamTool Release prioritizes minimal binary size (/O1) over raw speed (/O2).
+    # Clean CMake's baseline Release flags to prevent MSVC D9025 command line override warnings.
+    foreach(flag_var CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE)
+        if(${flag_var} MATCHES "/O2")
+            string(REPLACE "/O2" "/O1" _cleaned_flags "${${flag_var}}")
+            set(${flag_var} "${_cleaned_flags}" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        elseif(NOT ${flag_var} MATCHES "/O1")
+            set(${flag_var} "${${flag_var}} /O1" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        endif()
+    endforeach()
+
     add_compile_options(
         /utf-8
         /EHsc
-        $<$<CONFIG:Release>:/O1>
         $<$<CONFIG:Release>:/GL>
         $<$<CONFIG:Release>:/Gy>
         $<$<CONFIG:Release>:/Gw>

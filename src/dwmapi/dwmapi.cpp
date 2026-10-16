@@ -35,7 +35,7 @@ static DllCanUnloadNow_t g_pfnDllCanUnloadNow = nullptr;
 static DllGetClassObject_t g_pfnDllGetClassObject = nullptr;
 
 // ─── 3. Flat Dispatch Table for Undocumented Ordinals & Secondary Exports ───
-static FARPROC g_pfnOrdinals[200] = {};
+static FARPROC g_pfnOrdinals[256] = {};
 
 #define DECLARE_NAMED_POINTER(name) static FARPROC g_pfn_##name = nullptr;
 
@@ -132,15 +132,23 @@ static void LoadRealDwmapi() noexcept {
             BIND_NAMED(DwmpUpdateProxyWindowForCapture)
             #undef BIND_NAMED
 
-            // Ordinal Table (103 ~ 187)
+            // Ordinal Table (103 ~ 204)
             constexpr int kKnownOrdinals[] = {
-                103, 104, 105, 106, 107, 108, 109, 110, 112, 113, 114, 124, 132, 138, 139,
-                140, 141, 142, 144, 145, 146, 147, 148, 150, 151, 152, 153, 154, 155, 157,
-                158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
-                173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 184, 185, 186, 187
+                103, 104, 105, 106, 107, 108, 109, 110,
+                112, 113, 114,
+                124,
+                132,
+                138, 139, 140, 141, 142,
+                144, 145,
+                147, 148,
+                150, 151, 152, 153, 154, 155,
+                157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
+                173, 174, 175, 176, 177, 178, 179, 180, 181, 182,
+                184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197,
+                199, 200, 201, 202, 203, 204
             };
             for (int ord : kKnownOrdinals) {
-                if (ord < 200) {
+                if (ord < 256) {
                     g_pfnOrdinals[ord] = GetProcAddress(g_hRealDwmapi, MAKEINTRESOURCEA(ord));
                 }
             }
@@ -289,7 +297,6 @@ FORWARD_ORDINAL(DwmpOrdinal141, 141)
 FORWARD_ORDINAL(DwmpOrdinal142, 142)
 FORWARD_ORDINAL(DwmpOrdinal144, 144)
 FORWARD_ORDINAL(DwmpOrdinal145, 145)
-FORWARD_ORDINAL(DwmpOrdinal146, 146)
 FORWARD_ORDINAL(DwmpOrdinal147, 147)
 FORWARD_ORDINAL(DwmpOrdinal148, 148)
 FORWARD_ORDINAL(DwmpOrdinal150, 150)
@@ -328,6 +335,22 @@ FORWARD_ORDINAL(DwmpOrdinal184, 184)
 FORWARD_ORDINAL(DwmpOrdinal185, 185)
 FORWARD_ORDINAL(DwmpOrdinal186, 186)
 FORWARD_ORDINAL(DwmpOrdinal187, 187)
+FORWARD_ORDINAL(DwmpOrdinal188, 188)
+FORWARD_ORDINAL(DwmpOrdinal189, 189)
+FORWARD_ORDINAL(DwmpOrdinal190, 190)
+FORWARD_ORDINAL(DwmpOrdinal191, 191)
+FORWARD_ORDINAL(DwmpOrdinal192, 192)
+FORWARD_ORDINAL(DwmpOrdinal193, 193)
+FORWARD_ORDINAL(DwmpOrdinal194, 194)
+FORWARD_ORDINAL(DwmpOrdinal195, 195)
+FORWARD_ORDINAL(DwmpOrdinal196, 196)
+FORWARD_ORDINAL(DwmpOrdinal197, 197)
+FORWARD_ORDINAL(DwmpOrdinal199, 199)
+FORWARD_ORDINAL(DwmpOrdinal200, 200)
+FORWARD_ORDINAL(DwmpOrdinal201, 201)
+FORWARD_ORDINAL(DwmpOrdinal202, 202)
+FORWARD_ORDINAL(DwmpOrdinal203, 203)
+FORWARD_ORDINAL(DwmpOrdinal204, 204)
 
 } // extern "C"
 

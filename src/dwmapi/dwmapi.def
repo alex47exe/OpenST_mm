@@ -1,50 +1,10 @@
 ; dwmapi.dll Module Definition File
+; 100% Aligned with Windows SysWOW64 dwmapi.dll (118 exports total: 44 named, 74 noname)
 LIBRARY "dwmapi"
 EXPORTS
-    DllCanUnloadNow PRIVATE
-    DllGetClassObject PRIVATE
-    DwmAttachMilContent @116
-    DwmDefWindowProc @117
-    DwmDetachMilContent @118
-    DwmEnableBlurBehindWindow @119
-    DwmEnableComposition @102
-    DwmEnableMMCSS @120
-    DwmExtendFrameIntoClientArea @121
-    DwmFlush @122
-    DwmGetColorizationColor @123
-    DwmGetCompositionTimingInfo @125
-    DwmGetGraphicsStreamClient @126
-    DwmGetGraphicsStreamTransformHint @129
-    DwmGetTransportAttributes @130
-    DwmGetUnmetTabRequirements @133
-    DwmGetWindowAttribute @134
-    DwmInvalidateIconicBitmaps @149
-    DwmIsCompositionEnabled @188
-    DwmModifyPreviousDxFrameDuration @189
-    DwmQueryThumbnailSourceSize @190
-    DwmRegisterThumbnail @191
-    DwmRenderGesture @192
-    DwmSetDxFrameDuration @193
-    DwmSetIconicLivePreviewBitmap @194
-    DwmSetIconicThumbnail @195
-    DwmSetPresentParameters @196
-    DwmSetWindowAttribute @197
-    DwmShowContact @198
-    DwmTetherContact @199
-    DwmTetherTextContact @156
-    DwmTransitionOwnedWindow @200
-    DwmUnregisterThumbnail @201
-    DwmUpdateThumbnailProperties @202
-    DwmpAllocateSecurityDescriptor @136
     DwmpDxGetWindowSharedSurface @100
     DwmpDxUpdateWindowSharedSurface @101
-    DwmpDxgiIsThreadDesktopComposited @128
-    DwmpEnableDDASupport @143
-    DwmpFreeSecurityDescriptor @137
-    DwmpGetColorizationParameters @127
-    DwmpRenderFlick @135
-    DwmpSetColorizationParameters @131
-    DwmpUpdateProxyWindowForCapture @183
+    DwmEnableComposition @102
     DwmpOrdinal103=DwmpOrdinal103 @103 NONAME
     DwmpOrdinal104=DwmpOrdinal104 @104 NONAME
     DwmpOrdinal105=DwmpOrdinal105 @105 NONAME
@@ -53,27 +13,52 @@ EXPORTS
     DwmpOrdinal108=DwmpOrdinal108 @108 NONAME
     DwmpOrdinal109=DwmpOrdinal109 @109 NONAME
     DwmpOrdinal110=DwmpOrdinal110 @110 NONAME
+    DllCanUnloadNow @111
     DwmpOrdinal112=DwmpOrdinal112 @112 NONAME
     DwmpOrdinal113=DwmpOrdinal113 @113 NONAME
     DwmpOrdinal114=DwmpOrdinal114 @114 NONAME
+    DllGetClassObject @115
+    DwmAttachMilContent @116
+    DwmDefWindowProc @117
+    DwmDetachMilContent @118
+    DwmEnableBlurBehindWindow @119
+    DwmEnableMMCSS @120
+    DwmExtendFrameIntoClientArea @121
+    DwmFlush @122
+    DwmGetColorizationColor @123
     DwmpOrdinal124=DwmpOrdinal124 @124 NONAME
+    DwmGetCompositionTimingInfo @125
+    DwmGetGraphicsStreamClient @126
+    DwmpGetColorizationParameters @127
+    DwmpDxgiIsThreadDesktopComposited @128
+    DwmGetGraphicsStreamTransformHint @129
+    DwmGetTransportAttributes @130
+    DwmpSetColorizationParameters @131
     DwmpOrdinal132=DwmpOrdinal132 @132 NONAME
+    DwmGetUnmetTabRequirements @133
+    DwmGetWindowAttribute @134
+    DwmpRenderFlick @135
+    DwmpAllocateSecurityDescriptor @136
+    DwmpFreeSecurityDescriptor @137
     DwmpOrdinal138=DwmpOrdinal138 @138 NONAME
     DwmpOrdinal139=DwmpOrdinal139 @139 NONAME
     DwmpOrdinal140=DwmpOrdinal140 @140 NONAME
     DwmpOrdinal141=DwmpOrdinal141 @141 NONAME
     DwmpOrdinal142=DwmpOrdinal142 @142 NONAME
+    DwmpEnableDDASupport @143
     DwmpOrdinal144=DwmpOrdinal144 @144 NONAME
     DwmpOrdinal145=DwmpOrdinal145 @145 NONAME
-    DwmpOrdinal146=DwmpOrdinal146 @146 NONAME
+    DwmInvalidateIconicBitmaps @146
     DwmpOrdinal147=DwmpOrdinal147 @147 NONAME
     DwmpOrdinal148=DwmpOrdinal148 @148 NONAME
+    DwmIsCompositionEnabled @149
     DwmpOrdinal150=DwmpOrdinal150 @150 NONAME
     DwmpOrdinal151=DwmpOrdinal151 @151 NONAME
     DwmpOrdinal152=DwmpOrdinal152 @152 NONAME
     DwmpOrdinal153=DwmpOrdinal153 @153 NONAME
     DwmpOrdinal154=DwmpOrdinal154 @154 NONAME
     DwmpOrdinal155=DwmpOrdinal155 @155 NONAME
+    DwmTetherTextContact @156
     DwmpOrdinal157=DwmpOrdinal157 @157 NONAME
     DwmpOrdinal158=DwmpOrdinal158 @158 NONAME
     DwmpOrdinal159=DwmpOrdinal159 @159 NONAME
@@ -100,7 +85,38 @@ EXPORTS
     DwmpOrdinal180=DwmpOrdinal180 @180 NONAME
     DwmpOrdinal181=DwmpOrdinal181 @181 NONAME
     DwmpOrdinal182=DwmpOrdinal182 @182 NONAME
+    DwmpUpdateProxyWindowForCapture @183
     DwmpOrdinal184=DwmpOrdinal184 @184 NONAME
     DwmpOrdinal185=DwmpOrdinal185 @185 NONAME
     DwmpOrdinal186=DwmpOrdinal186 @186 NONAME
     DwmpOrdinal187=DwmpOrdinal187 @187 NONAME
+    DwmpOrdinal188=DwmpOrdinal188 @188 NONAME
+    DwmpOrdinal189=DwmpOrdinal189 @189 NONAME
+    DwmpOrdinal190=DwmpOrdinal190 @190 NONAME
+    DwmpOrdinal191=DwmpOrdinal191 @191 NONAME
+    DwmpOrdinal192=DwmpOrdinal192 @192 NONAME
+    DwmpOrdinal193=DwmpOrdinal193 @193 NONAME
+    DwmpOrdinal194=DwmpOrdinal194 @194 NONAME
+    DwmpOrdinal195=DwmpOrdinal195 @195 NONAME
+    DwmpOrdinal196=DwmpOrdinal196 @196 NONAME
+    DwmpOrdinal197=DwmpOrdinal197 @197 NONAME
+    DwmModifyPreviousDxFrameDuration @198
+    DwmpOrdinal199=DwmpOrdinal199 @199 NONAME
+    DwmpOrdinal200=DwmpOrdinal200 @200 NONAME
+    DwmpOrdinal201=DwmpOrdinal201 @201 NONAME
+    DwmpOrdinal202=DwmpOrdinal202 @202 NONAME
+    DwmpOrdinal203=DwmpOrdinal203 @203 NONAME
+    DwmpOrdinal204=DwmpOrdinal204 @204 NONAME
+    DwmQueryThumbnailSourceSize @205
+    DwmRegisterThumbnail @206
+    DwmRenderGesture @207
+    DwmSetDxFrameDuration @208
+    DwmSetIconicLivePreviewBitmap @209
+    DwmSetIconicThumbnail @210
+    DwmSetPresentParameters @211
+    DwmSetWindowAttribute @212
+    DwmShowContact @213
+    DwmTetherContact @214
+    DwmTransitionOwnedWindow @215
+    DwmUnregisterThumbnail @216
+    DwmUpdateThumbnailProperties @217

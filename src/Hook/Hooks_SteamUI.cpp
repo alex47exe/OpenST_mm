@@ -714,18 +714,21 @@ namespace
                                 parentsToNotify.insert(pApp->ParentAppID);
                             }
                         }
-                    }
 
-                    LOG_STEAMUI_TRACE("RunFrame: restoring added appId {}", appId);
-                    oMarkAppChange(g_pAppChangeSource, appId, EAppChangeFlags::AppInfoOrConfig);
+                        LOG_STEAMUI_TRACE("RunFrame: restoring added appId {}", appId);
+                        oMarkAppChange(g_pAppChangeSource, appId, EAppChangeFlags::AppInfoOrConfig);
+                    }
                 }
 
                 LOG_STEAMUI_DEBUG("RunFrame: restored {} pending Lua additions to SteamUI", drainingAdditions.size());
 
                 for (AppId_t parentId : parentsToNotify)
                 {
-                    LOG_STEAMUI_INFO("RunFrame: notifying parent appId {} of DLC addition", parentId);
-                    oMarkAppChange(g_pAppChangeSource, parentId, EAppChangeFlags::AppInfoOrConfig);
+                    if (oGetAppByID(g_pController, parentId, false))
+                    {
+                        LOG_STEAMUI_INFO("RunFrame: notifying parent appId {} of DLC addition", parentId);
+                        oMarkAppChange(g_pAppChangeSource, parentId, EAppChangeFlags::AppInfoOrConfig);
+                    }
                 }
             }
 
@@ -760,6 +763,9 @@ namespace
                                 parentsToNotify.insert(pApp->ParentAppID);
                             }
                         }
+
+                        LOG_STEAMUI_INFO("RunFrame: removing appId {}", appId);
+                        oMarkAppChange(g_pAppChangeSource, appId, EAppChangeFlags::AppInfoOrConfig);
                     }
 
                     {
@@ -767,15 +773,15 @@ namespace
                         g_removedAppIds->insert(appId);
                         g_hasRemovedAppIds.store(true, std::memory_order_release);
                     }
-
-                    LOG_STEAMUI_INFO("RunFrame: removing appId {}", appId);
-                    oMarkAppChange(g_pAppChangeSource, appId, EAppChangeFlags::AppInfoOrConfig);
                 }
 
                 for (AppId_t parentId : parentsToNotify)
                 {
-                    LOG_STEAMUI_INFO("RunFrame: notifying parent appId {} of DLC change", parentId);
-                    oMarkAppChange(g_pAppChangeSource, parentId, EAppChangeFlags::AppInfoOrConfig);
+                    if (oGetAppByID(g_pController, parentId, false))
+                    {
+                        LOG_STEAMUI_INFO("RunFrame: notifying parent appId {} of DLC change", parentId);
+                        oMarkAppChange(g_pAppChangeSource, parentId, EAppChangeFlags::AppInfoOrConfig);
+                    }
                 }
             }
 
