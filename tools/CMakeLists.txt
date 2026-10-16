@@ -5,6 +5,39 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
 
+if(MSVC)
+    foreach(flag_var CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE)
+        if(${flag_var} MATCHES "/O2")
+            string(REPLACE "/O2" "/O1" _cleaned_flags "${${flag_var}}")
+            set(${flag_var} "${_cleaned_flags}" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        elseif(NOT ${flag_var} MATCHES "/O1")
+            set(${flag_var} "${${flag_var}} /O1" CACHE STRING "Flags used by the compiler during Release builds" FORCE)
+        endif()
+    endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# ost_tinf — Lightweight standalone C decompression & CRC library (tinf)
+# Compiled as an OBJECT library with /W3 to avoid warning conflicts (/W4 vs /W3)
+# and eliminate redundant compilation across extract_tickets and ost-manager.
+# ---------------------------------------------------------------------------
+add_library(ost_tinf OBJECT
+    extract_tickets/tinflate.c
+    extract_tickets/tinfgzip.c
+    extract_tickets/crc32.c
+)
+target_include_directories(ost_tinf PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/extract_tickets"
+)
+set_target_properties(ost_tinf PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
+if(MSVC)
+    target_compile_options(ost_tinf PRIVATE /utf-8 /W3)
+else()
+    target_compile_options(ost_tinf PRIVATE -w)
+endif()
+
 add_executable(ipc_codegen
     ipc_codegen/ipc_codegen.cpp
 )
@@ -39,25 +72,17 @@ add_executable(extract_tickets
     extract_tickets/TuiEngine.cpp
     extract_tickets/I18n.cpp
     extract_tickets/I18n.h
-    extract_tickets/tinflate.c
-    extract_tickets/tinfgzip.c
-    extract_tickets/crc32.c
 )
 target_compile_features(extract_tickets PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(extract_tickets PRIVATE /utf-8 /Zc:preprocessor /W4 /permissive- /wd4189)
-    set_source_files_properties(
-        extract_tickets/tinflate.c
-        extract_tickets/tinfgzip.c
-        extract_tickets/crc32.c
-        PROPERTIES COMPILE_OPTIONS "/W3"
-    )
     set_source_files_properties(
         extract_tickets/LuaFallbackParser.cpp
         PROPERTIES COMPILE_OPTIONS "/wd4456"
     )
 endif()
 target_link_libraries(extract_tickets PRIVATE
+    ost_tinf
     advapi32
     winhttp
     crypt32
@@ -79,9 +104,6 @@ if(WIN32)
         ost-loader/ost-loader.manifest
     )
     target_compile_features(ost-loader PRIVATE cxx_std_20)
-    if(MSVC)
-        target_compile_options(ost-loader PRIVATE /utf-8 /W4 /permissive-)
-    endif()
     # Output ost-loader ONLY to an internal directory so it NEVER lands in shipped Release/Debug folders
     set_target_properties(ost-loader PROPERTIES
         OUTPUT_NAME "ost-loader"
@@ -98,7 +120,6 @@ if(WIN32)
     if(MSVC)
         target_compile_options(ost-loader PRIVATE
             /utf-8 /W4 /permissive-
-            $<$<CONFIG:Release>:/O1>
             $<$<CONFIG:Release>:/GL>
             $<$<CONFIG:Release>:/Gy>
             $<$<CONFIG:Release>:/Gw>
@@ -183,9 +204,6 @@ if(WIN32)
         ost-manager/I18n.h
         ost-manager/ost-manager.rc
         ost-manager/ost-manager.manifest
-        extract_tickets/tinflate.c
-        extract_tickets/tinfgzip.c
-        extract_tickets/crc32.c
         "${EMBEDDED_LOADER_HEADER}"
         "${EMBEDDED_VERSION_HEADER}"
         "${EMBEDDED_DWMAPI_HEADER}"
@@ -200,7 +218,6 @@ if(WIN32)
     if(MSVC)
         target_compile_options(ost-manager PRIVATE
             /utf-8 /W4 /permissive-
-            $<$<CONFIG:Release>:/O1>
             $<$<CONFIG:Release>:/GL>
             $<$<CONFIG:Release>:/Gy>
             $<$<CONFIG:Release>:/Gw>
@@ -217,12 +234,6 @@ if(WIN32)
             $<$<CONFIG:Release>:/OPT:ICF>
             $<$<CONFIG:Release>:/INCREMENTAL:NO>
         )
-        set_source_files_properties(
-            extract_tickets/tinflate.c
-            extract_tickets/tinfgzip.c
-            extract_tickets/crc32.c
-            PROPERTIES COMPILE_OPTIONS "/W3"
-        )
     endif()
     set_target_properties(ost-manager PROPERTIES
         OUTPUT_NAME "ost-manager"
@@ -233,6 +244,7 @@ if(WIN32)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
     )
     target_link_libraries(ost-manager PRIVATE
+        ost_tinf
         kernel32
         user32
         advapi32
