@@ -174,7 +174,9 @@ BOOL APIENTRY VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID * lplpBu
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID /*pvReserved*/) {
     if (dwReason == DLL_PROCESS_ATTACH) {
+        LoadRealVersion();
         return OST::Proxy::Bootstrap::OnAttach(hModule);
     }
     return TRUE;
 }
+
