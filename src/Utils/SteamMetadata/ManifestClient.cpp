@@ -71,14 +71,15 @@ namespace ManifestClient {
     // ── provider table ────────────────────────────────────────────
     struct Provider {
         std::string_view name;          // matches [manifest] url = "..."
-        const char*      urlTemplate;   // full literal with one %llu — for log & path
+        const char*      urlTemplate;   // one %llu for gid, or two for depotId and gid
         Parser           parse;
-        const wchar_t*   headers;
+        bool             needsDepot;
+        const wchar_t*   headers;        // optional request headers
     };
 
     consteval Provider Make(std::string_view name, const char* url, Parser parse,
-                            const wchar_t* headers = nullptr) {
-        return {name, url, parse, headers};
+                            bool needsDepot = false, const wchar_t* headers = nullptr) {
+        return {name, url, parse, needsDepot, headers};
     }
 
     static constexpr Provider kProviders[] = {
@@ -87,6 +88,8 @@ namespace ManifestClient {
         Make("opensteamtool", "https://manifest.opensteamtool.com/%llu",       ParsePlainUint),
         Make("wudrm",         "http://gmrc.wudrm.com/manifest/%llu",           ParsePlainUint),
         Make("steamrun",      "https://manifest.steam.run/api/manifest/%llu",  ParseSteamRunJson),
+        Make("20770407",      "https://20770407.xyz/manifest/%llu/%llu",       ParsePlainUint, true),
+        Make("SDM",           "https://steamapi.993499094.xyz/manifest/%llu/%llu", ParsePlainUint, true),
     };
 
     static std::atomic<const Provider*> g_active{&kProviders[0]};   // default: manifestdex
@@ -114,16 +117,21 @@ namespace ManifestClient {
 
     // ── fetch ─────────────────────────────────────────────────────
 
-    static bool FetchActive(uint64_t gid, uint64_t* outCode) {
-        if (!outCode) return false;
-
-        const auto* active = g_active.load(std::memory_order_acquire);
-        if (!active) return false;
-        const Provider& p = *active;
+    static bool FetchActive(uint64_t gid, uint64_t* outCode, AppId_t depotId) {
+        const Provider& p = *g_active;
         const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
 
-        char urlBuffer[512];
-        std::snprintf(urlBuffer, sizeof(urlBuffer), p.urlTemplate, gid);
+        if (p.needsDepot && !depotId) return false;
+
+        char urlLog[256];
+        if (p.needsDepot) {
+            std::snprintf(urlLog, sizeof(urlLog), p.urlTemplate,
+                          static_cast<unsigned long long>(depotId),
+                          static_cast<unsigned long long>(gid));
+        } else {
+            std::snprintf(urlLog, sizeof(urlLog), p.urlTemplate,
+                          static_cast<unsigned long long>(gid));
+        }
 
         auto r = OSTPlatform::Http::Execute(
             L"GET",
@@ -136,7 +144,7 @@ namespace ManifestClient {
             timeouts.send,
             timeouts.recv);
 
-        LOG_MANIFEST_INFO("Manifest {} status={} gid={}", p.name, r.status, gid);
+        LOG_MANIFEST_INFO("Manifest {} status={} depot={} gid={}", p.name, r.status, depotId, gid);
 
         if (!r.ok || r.status != 200) return false;
         return p.parse(r.body, outCode);
@@ -165,6 +173,6 @@ namespace ManifestClient {
             LOG_MANIFEST_WARN("Manifest gid={} lua returned nil, falling back to config", manifestGid);
         }
 
-        return FetchActive(manifestGid, outRequestCode);
+        return FetchActive(manifestGid, outRequestCode, depotId);
     }
 }
