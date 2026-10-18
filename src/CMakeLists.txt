@@ -203,6 +203,7 @@ add_library(OpenSteamTool SHARED
     Utils/Tickets/EticketClient.cpp
     Utils/Config/Config.cpp
     Utils/Config/ConfigFileWatcher.cpp
+    Utils/Config/IgnoreList.cpp
     Utils/Config/LuaConfig.cpp
     Utils/Config/LuaFileWatcher.cpp
     Utils/CloudRedirect/CloudRedirectHost.cpp

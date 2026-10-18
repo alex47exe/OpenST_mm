@@ -5,6 +5,7 @@
 #include "Utils/HookSupport/VehCommon.h"
 #include "Utils/Config/Config.h"
 #include "Utils/Config/LuaConfig.h"
+#include "Utils/Config/IgnoreList.h"
 #include "Hook/Hooks_Package.h"
 #include "Hook/Hooks_Misc.h"
 #include "Pipe/PipeManager.h"
@@ -715,6 +716,23 @@ namespace
                     LOG_STEAMUI_DEBUG("FillInAppOverview: appId={} Q4(Removed)", appId);
                 }
                 break;
+            }
+
+            // If this app is listed in ignore.txt, strip the update-required and
+            // update-queued state bits before Steam's UI layer reads them.
+            // This is what actually prevents the "Update" button from appearing —
+            // AppStateFlags is what Steam's library UI reads, not AppOwnership.
+            if (IgnoreList::IsIgnored(pApp->nAppID))
+            {
+                constexpr uint32_t kUpdateMask =
+                    k_EAppStateUpdateRequired |  // 0x00000002
+                    k_EAppStateUpdateQueued;     // 0x00000008
+                if (pApp->AppStateFlags & kUpdateMask)
+                {
+                    pApp->AppStateFlags = static_cast<EAppState>(
+                        pApp->AppStateFlags & ~kUpdateMask);
+                    LOG_STEAMUI_DEBUG("FillInAppOverview: cleared update flags for ignored appId={}", pApp->nAppID);
+                }
             }
         }
 

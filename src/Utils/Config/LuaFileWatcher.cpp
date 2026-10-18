@@ -1,5 +1,6 @@
 #include "Utils/Config/LuaFileWatcher.h"
 #include "Utils/Config/LuaConfig.h"
+#include "Utils/Config/IgnoreList.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
 #include "Utils/Logging/Log.h"
 #include "OSTPlatform/include/DirectoryWatch.h"
@@ -45,6 +46,16 @@ bool IsLuaFile(const std::string& path) {
 bool IsManifestFile(const std::string& path) {
     if (path.size() < 9) return false;
     return std::equal(path.end() - 9, path.end(), ".manifest", [](char lhs, char rhs) {
+        return std::tolower(static_cast<unsigned char>(lhs)) == std::tolower(static_cast<unsigned char>(rhs));
+    });
+}
+
+bool IsIgnoreFile(const std::string& path) {
+    using OSTPlatform::Encoding::PathFromUtf8;
+    using OSTPlatform::Encoding::PathToUtf8;
+    std::string filename = PathToUtf8(PathFromUtf8(path).filename());
+    if (filename.size() != 10) return false;
+    return std::equal(filename.begin(), filename.end(), "_ignore.txt", [](char lhs, char rhs) {
         return std::tolower(static_cast<unsigned char>(lhs)) == std::tolower(static_cast<unsigned char>(rhs));
     });
 }
@@ -122,6 +133,16 @@ void ProcessChanges(const std::vector<FileChange>& changes) {
                 if (change.action == ChangeAction::Added || change.action == ChangeAction::Modified) {
                     LOG_PACKAGE_TRACE("Manifest file {}: {}", ToString(change.action), change.path);
                     LuaConfig::CopyManifestToDepotcache(change.path);
+                }
+                continue;
+            }
+
+            if (IsIgnoreFile(change.path)) {
+                LOG_PACKAGE_TRACE("_ignore.txt {}: {}", ToString(change.action), change.path);
+                if (change.action == ChangeAction::Removed) {
+                    IgnoreList::UnloadFile(change.path);
+                } else {
+                    IgnoreList::ReloadFile(change.path);
                 }
                 continue;
             }
@@ -293,6 +314,11 @@ void Start(const std::vector<std::string>& directories) {
     }
 
     g_watchDirs = std::move(uniqueDirs);
+
+    // Load _ignore.txt from every watched directory before the watcher thread
+    // starts, so the suppression set is populated before any hook fires.
+    IgnoreList::Reload(g_watchDirs);
+
     g_watcherThread = std::thread(WatcherThread);
 }
 
