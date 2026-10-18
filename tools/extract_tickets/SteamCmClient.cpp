@@ -860,74 +860,104 @@ std::unordered_map<uint32_t, uint64_t> SteamCmClient::RequestAppTokens(const std
     return tokens;
 }
 
-std::optional<ParsedAppInfoData> SteamCmClient::RequestPicsProductInfo(uint32_t appId, uint64_t accessToken) {
-    if (!EnsureConnected()) return std::nullopt;
+std::vector<ParsedAppInfoData> SteamCmClient::RequestPicsProductInfoBatch(
+    const std::vector<uint32_t>& appIds,
+    const std::unordered_map<uint32_t, uint64_t>& appTokens) {
 
-    LOG_DEBUG("SteamCM", MsgKey::LogCmReqPicsProductInfo, appId, MaskPicsToken(accessToken));
+    std::vector<ParsedAppInfoData> results;
+    if (appIds.empty() || !EnsureConnected()) return results;
 
-    ProtoWriter appInfoWriter;
-    appInfoWriter.WriteUInt32(1, appId); // appid = 1
-    if (accessToken != 0) {
-        appInfoWriter.WriteUInt64(2, accessToken); // access_token = 2
-    }
-    appInfoWriter.WriteBool(3, false); // only_public = 3
+    constexpr size_t kBatchSize = 25;
+    for (size_t i = 0; i < appIds.size(); i += kBatchSize) {
+        const size_t chunkEnd = std::min(i + kBatchSize, appIds.size());
 
-    ProtoWriter body;
-    body.WriteBytes(2, appInfoWriter.Data()); // apps = 2
-    body.WriteBool(3, false); // meta_data_only = 3
+        ProtoWriter body;
+        for (size_t j = i; j < chunkEnd; ++j) {
+            const uint32_t curAppId = appIds[j];
+            uint64_t curToken = 0;
+            if (auto it = appTokens.find(curAppId); it != appTokens.end()) {
+                curToken = it->second;
+            }
 
-    std::vector<uint8_t> respBody;
-    ScopedBufferWiper respWiper{respBody};
-    uint64_t jobId = 0;
-    if (!SendAndReceiveWithRetry(
-            ESteamMsg::ClientPICSProductInfoRequest,
-            body,
-            static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse),
-            respBody,
-            8000,
-            nullptr,
-            {},
-            &jobId)) {
-        return std::nullopt;
-    }
+            ProtoWriter appInfoWriter;
+            appInfoWriter.WriteUInt32(1, curAppId); // appid = 1
+            if (curToken != 0) {
+                appInfoWriter.WriteUInt64(2, curToken); // access_token = 2
+            }
+            appInfoWriter.WriteBool(3, false); // only_public = 3
+            body.WriteBytes(2, appInfoWriter.Data()); // apps = 2
+        }
+        body.WriteBool(3, false); // meta_data_only = 3
 
-    for (int chunkIdx = 0; chunkIdx < 16; ++chunkIdx) {
-        if (chunkIdx > 0) {
-            if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse), respBody, 2000, nullptr, jobId)) {
+        std::vector<uint8_t> respBody;
+        ScopedBufferWiper respWiper{respBody};
+        uint64_t jobId = 0;
+        if (!SendAndReceiveWithRetry(
+                ESteamMsg::ClientPICSProductInfoRequest,
+                body,
+                static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse),
+                respBody,
+                8000,
+                nullptr,
+                {},
+                &jobId)) {
+            continue;
+        }
+
+        for (int chunkIdx = 0; chunkIdx < 16; ++chunkIdx) {
+            if (chunkIdx > 0) {
+                if (!ReadMatchingMsg(static_cast<uint32_t>(ESteamMsg::ClientPICSProductInfoResponse), respBody, 2000, nullptr, jobId)) {
+                    break;
+                }
+            }
+
+            bool responsePending = false;
+            ProtoReader reader(respBody);
+            ProtoField field;
+            while (reader.ReadNext(field)) {
+                if (field.fieldNumber == 1 && !field.bytesVal.empty()) { // apps (repeated AppInfo)
+                    ProtoReader appReader(field.bytesVal);
+                    ProtoField appField;
+                    uint32_t rAppId = 0;
+                    std::span<const uint8_t> buffer;
+                    while (appReader.ReadNext(appField)) {
+                        if (appField.fieldNumber == 1) { // appid
+                            rAppId = static_cast<uint32_t>(appField.varintVal);
+                        } else if (appField.fieldNumber == 5) { // buffer
+                            buffer = appField.bytesVal;
+                        }
+                    }
+                    if (rAppId != 0 && !buffer.empty()) {
+                        LOG_DEBUG("SteamCM", MsgKey::LogCmRecvPicsAppInfo, buffer.size());
+                        auto parsed = ParseBinaryVdfAppInfo(buffer, rAppId);
+                        if (parsed) {
+                            results.push_back(std::move(*parsed));
+                        }
+                    }
+                } else if (field.fieldNumber == 6) { // response_pending
+                    responsePending = (field.varintVal != 0);
+                }
+            }
+
+            if (!responsePending) {
                 break;
             }
         }
-
-        bool responsePending = false;
-        ProtoReader reader(respBody);
-        ProtoField field;
-        while (reader.ReadNext(field)) {
-            if (field.fieldNumber == 1 && !field.bytesVal.empty()) { // apps (repeated AppInfo)
-                ProtoReader appReader(field.bytesVal);
-                ProtoField appField;
-                uint32_t rAppId = 0;
-                std::span<const uint8_t> buffer;
-                while (appReader.ReadNext(appField)) {
-                    if (appField.fieldNumber == 1) { // appid
-                        rAppId = static_cast<uint32_t>(appField.varintVal);
-                    } else if (appField.fieldNumber == 5) { // buffer
-                        buffer = appField.bytesVal;
-                    }
-                }
-                if (rAppId == appId && !buffer.empty()) {
-                    LOG_DEBUG("SteamCM", MsgKey::LogCmRecvPicsAppInfo, buffer.size());
-                    return ParseBinaryVdfAppInfo(buffer, appId);
-                }
-            } else if (field.fieldNumber == 6) { // response_pending
-                responsePending = (field.varintVal != 0);
-            }
-        }
-
-        if (!responsePending) {
-            break;
-        }
     }
 
+    return results;
+}
+
+std::optional<ParsedAppInfoData> SteamCmClient::RequestPicsProductInfo(uint32_t appId, uint64_t accessToken) {
+    std::unordered_map<uint32_t, uint64_t> tokens;
+    if (accessToken != 0) {
+        tokens[appId] = accessToken;
+    }
+    LOG_DEBUG("SteamCM", MsgKey::LogCmReqPicsProductInfo, appId, MaskPicsToken(accessToken));
+    auto batch = RequestPicsProductInfoBatch({appId}, tokens);
+    if (!batch.empty()) {
+        return std::move(batch.front());
+    }
     return std::nullopt;
 }
 
@@ -1462,7 +1492,59 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             }
         }
 
-        // 4.3 纯官方云端向 Steam CM 查询真实物理 Depot 解密密钥 (先验授权鉴定，杜绝后续清单盲目撞门)
+        // 4.3 批量拉取全部 DLC 与原声音乐的 PICS 产品元数据（彻底解析 DLC 内部专属 Depot 与清单）
+        std::vector<uint32_t> dlcsToQuery;
+        for (uint32_t dlcId : appInfoData->dlcAppIds) {
+            if (dlcId != appId) {
+                dlcsToQuery.push_back(dlcId);
+            }
+        }
+
+        if (!dlcsToQuery.empty()) {
+            LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryPicsToken, dlcsToQuery.size());
+            auto dlcTokens = RequestAppTokens(dlcsToQuery);
+            for (const auto& [tId, tVal] : dlcTokens) {
+                if (tVal != 0) {
+                    creds.appTokens[tId] = tVal;
+                }
+            }
+
+            auto dlcAppInfos = RequestPicsProductInfoBatch(dlcsToQuery, dlcTokens);
+            for (auto& dlcParsed : dlcAppInfos) {
+                // 回填官方名称
+                const std::string& dName = !dlcParsed.localizedName.empty() ? dlcParsed.localizedName : dlcParsed.name;
+                if (!dName.empty()) {
+                    auto it = std::find_if(creds.dlcs.begin(), creds.dlcs.end(),
+                                           [&](const DlcInfo& d) { return d.dlcId == dlcParsed.appId; });
+                    if (it != creds.dlcs.end() && it->name.empty()) {
+                        it->name = dName;
+                    }
+                }
+
+                // 提取 DLC 专属物理 Depot 与清单 GID（强制继承 DLC 归属）
+                for (const auto& dInfo : dlcParsed.depots) {
+                    const uint32_t assocDlc = (dInfo.dlcId > 0) ? dInfo.dlcId : dlcParsed.appId;
+                    auto it = std::find_if(depotKeys.begin(), depotKeys.end(),
+                                           [&](const DepotKeyInfo& k) { return k.depotId == dInfo.depotId; });
+                    if (it != depotKeys.end()) {
+                        if (it->manifestId.empty() && !dInfo.manifestId.empty()) {
+                            it->manifestId = dInfo.manifestId;
+                        }
+                        if (it->dlcId == 0) {
+                            it->dlcId = assocDlc;
+                        }
+                    } else {
+                        DepotKeyInfo newDk;
+                        newDk.depotId = dInfo.depotId;
+                        newDk.manifestId = dInfo.manifestId;
+                        newDk.dlcId = assocDlc;
+                        depotKeys.push_back(std::move(newDk));
+                    }
+                }
+            }
+        }
+
+        // 4.4 纯官方云端向 Steam CM 查询真实物理 Depot 解密密钥 (先验授权鉴定，杜绝后续清单盲目撞门)
         std::vector<uint32_t> queryDepotList;
         for (const auto& dk : depotKeys) {
             // 严格剔除无独立 Depot 的纯逻辑 DLC 容器 (dlcId == depotId 或属于已知 DLC AppID 且无清单)
