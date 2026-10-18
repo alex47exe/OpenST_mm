@@ -1187,8 +1187,9 @@ namespace Hooks_NetPacket_Manifest {
         }
         if (!req.has_depot_id() || !req.has_manifest_id()) return false;
 
-        const uint32 depotId     = req.depot_id();
-        const uint64 manifestGid = req.manifest_id();
+        const uint32 depotId = req.depot_id();
+        const uint64 reqManifestGid = req.manifest_id();
+        uint64 manifestGid = reqManifestGid;
         if (depotId == 0 || manifestGid == 0) return false;
         if (!LuaConfig::HasDepot(depotId) || Hooks_Package::HasValidLicense(depotId)) return false;
 
