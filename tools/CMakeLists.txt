@@ -195,6 +195,10 @@ if(WIN32)
         VERBATIM
     )
 
+    set_source_files_properties(ost-manager/IfeoEngine.cpp PROPERTIES
+        OBJECT_DEPENDS "${EMBEDDED_LOADER_HEADER};${EMBEDDED_VERSION_HEADER};${EMBEDDED_DWMAPI_HEADER};${EMBEDDED_OPENSTEAMTOOL_HEADER}"
+    )
+
     add_executable(ost-manager
         ost-manager/main.cpp
         ost-manager/IfeoEngine.cpp
