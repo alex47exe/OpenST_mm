@@ -283,9 +283,6 @@ if(OST_ETICKET_URL)
 endif()
 
 
-if(TARGET extract_tickets)
-    add_dependencies(OpenSteamTool extract_tickets)
-endif()
 if(TARGET ost-manager)
     add_dependencies(ost-manager OpenSteamTool)
     add_custom_target(ost-manager-all ALL DEPENDS ost-manager)

@@ -23,14 +23,10 @@ jobs:
         run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_VERSION="${{ github.event.inputs.version }}"
 
       - name: Build Release
-        run: |
-          cmake --build build --config Release
-          cmake --build build --config Release --target ost-manager
+        run: cmake --build build --config Release
 
       - name: Build Debug
-        run: |
-          cmake --build build --config Debug
-          cmake --build build --config Debug --target ost-manager
+        run: cmake --build build --config Debug
 
       - uses: actions/upload-artifact@v4
         with:
