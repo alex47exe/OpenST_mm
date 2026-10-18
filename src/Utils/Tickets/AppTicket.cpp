@@ -9,14 +9,13 @@
 
 namespace AppTicket {
     namespace {
-        constexpr AppId_t kLocalAppTicketSourceAppId = 7;
-
         struct AppTicketEntry {
             std::vector<uint8_t> appTicket;
             std::vector<uint8_t> eTicket;
         };
 
         std::atomic<SourceTicketProvider> g_sourceTicketProvider{nullptr};
+        std::atomic<BaselineTicketProvider> g_baselineTicketProvider{nullptr};
         std::shared_mutex g_ticketMutex;
         std::unordered_map<AppId_t, AppTicketEntry> g_tickets;
     } // namespace
@@ -25,10 +24,21 @@ namespace AppTicket {
         g_sourceTicketProvider.store(provider, std::memory_order_release);
     }
 
+    void SetBaselineTicketProvider(BaselineTicketProvider provider) noexcept {
+        g_baselineTicketProvider.store(provider, std::memory_order_release);
+    }
+
     std::vector<uint8_t> GetSteamConfigStoreTicket(AppId_t appId) {
         if (appId == 0) return {};
         if (auto provider = g_sourceTicketProvider.load(std::memory_order_acquire)) {
             return provider(appId);
+        }
+        return {};
+    }
+
+    std::vector<uint8_t> GetReliableBaselineTicket() {
+        if (auto provider = g_baselineTicketProvider.load(std::memory_order_acquire)) {
+            return provider();
         }
         return {};
     }
@@ -47,25 +57,26 @@ namespace AppTicket {
     }
 
     // Exploit steamdrmp's off-by-four ticket parsing vulnerability:
-    static std::vector<uint8_t> ForgeLocalAppOwnershipTicket(AppId_t appId) {
-        if (appId == 0) return {};
-        std::vector<uint8_t> source = GetSteamConfigStoreTicket(kLocalAppTicketSourceAppId);
-        if (source.size() <= kAppTicketSignatureSize) {
-            LOG_DEBUG("ForgeLocalAppOwnershipTicket for AppId {}: no source appticket", appId);
+    std::vector<uint8_t> ForgeTicketFromSource(AppId_t targetAppId, std::span<const uint8_t> source) noexcept {
+        if (targetAppId == 0 || source.size() <= kAppTicketSignatureSize) {
             return {};
         }
 
         const size_t signedSize = source.size() - kAppTicketSignatureSize;
+        if (signedSize < kAppTicketMinimumValidSize) {
+            return {};
+        }
+
         std::vector<uint8_t> ticket;
-        ticket.reserve(source.size() + sizeof(AppId_t));
-        ticket.insert(ticket.end(), source.begin(), source.begin() + signedSize);
+        ticket.resize(source.size() + sizeof(AppId_t));
 
-        const uint8_t* appIdBytes = reinterpret_cast<const uint8_t*>(&appId);
-        ticket.insert(ticket.end(), appIdBytes, appIdBytes + sizeof(AppId_t));
-        ticket.insert(ticket.end(), source.begin() + signedSize, source.end());
+        auto* dst = ticket.data();
+        std::memcpy(dst, source.data(), signedSize);
+        std::memcpy(dst + signedSize, &targetAppId, sizeof(AppId_t));
+        std::memcpy(dst + signedSize + sizeof(AppId_t), source.data() + signedSize, kAppTicketSignatureSize);
 
-        LOG_INFO("Forged App Ownership Ticket, AppId: {}, SourceAppId: {}, Physical Size: {}, Total Size: {}",
-                 appId, kLocalAppTicketSourceAppId, ticket.size(), source.size());
+        LOG_INFO("Forged App Ownership Ticket, AppId: {}, Physical Size: {}, Total Size: {}",
+                 targetAppId, ticket.size(), source.size());
         return ticket;
     }
 
@@ -94,7 +105,13 @@ namespace AppTicket {
 
         if (source == AppTicketSource::MemoryOnly) return false;
 
-        ticket.data = ForgeLocalAppOwnershipTicket(appId);
+        const std::vector<uint8_t> baseline = GetReliableBaselineTicket();
+        if (baseline.empty()) {
+            LOG_DEBUG("ForgeLocalAppOwnershipTicket for AppId {}: no baseline source appticket", appId);
+            return false;
+        }
+
+        ticket.data = ForgeTicketFromSource(appId, baseline);
         if (ticket.data.empty()) return false;
 
         ticket.totalSize = static_cast<uint32>(ticket.data.size() - sizeof(AppId_t));

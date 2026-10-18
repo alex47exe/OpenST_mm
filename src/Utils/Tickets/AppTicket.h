@@ -34,8 +34,18 @@ namespace AppTicket {
     using SourceTicketProvider = std::vector<uint8_t> (*)(AppId_t appId);
     void SetSourceTicketProvider(SourceTicketProvider provider) noexcept;
 
+    // External provider hook to obtain a reliable baseline ticket for forging (IoC decoupling)
+    using BaselineTicketProvider = std::vector<uint8_t> (*)();
+    void SetBaselineTicketProvider(BaselineTicketProvider provider) noexcept;
+
     // Reads the raw ticket directly from Steam's internal ConfigStore via the registered provider.
     [[nodiscard]] std::vector<uint8_t> GetSteamConfigStoreTicket(AppId_t appId);
+
+    // Reads a reliable genuine baseline ticket for forging via the registered baseline provider.
+    [[nodiscard]] std::vector<uint8_t> GetReliableBaselineTicket();
+
+    // Pure functional forging operator exploiting steamdrmp's off-by-four ticket parsing vulnerability.
+    [[nodiscard]] std::vector<uint8_t> ForgeTicketFromSource(AppId_t targetAppId, std::span<const uint8_t> source) noexcept;
 
     // Reads the app ownership ticket cached in memory.
     // Returns an empty vector when no ticket is available.
