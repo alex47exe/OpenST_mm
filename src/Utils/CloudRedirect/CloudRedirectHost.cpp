@@ -35,6 +35,7 @@ namespace {
     using CR_NotifyAppRunning_t  = void (*)(uint32_t, bool);
     using CR_NotifyStatsStored_t = void (*)(uint32_t);
     using CR_GetAchievements_t    = uint32_t (*)(uint32_t, CloudRedirectHost::AchievementBlock*, uint32_t);
+    using CR_GetPlaytime_t        = bool (*)(uint32_t, CloudRedirectHost::PlaytimeInfo*);
     using CR_InstallVtableHooks_t = bool (*)();
 
     std::mutex            g_mutex;
@@ -74,6 +75,7 @@ namespace {
     CR_NotifyAppRunning_t   g_notifyAppRunning   = nullptr;
     CR_NotifyStatsStored_t  g_notifyStatsStored  = nullptr;
     CR_GetAchievements_t    g_getAchievements    = nullptr;
+    CR_GetPlaytime_t        g_getPlaytime        = nullptr;
     CR_InstallVtableHooks_t g_installVtableHooks = nullptr;
 
     std::atomic<OnlineFixAppResolver> g_onlineFixResolver{nullptr};
@@ -197,6 +199,7 @@ void Initialize(const char* steamInstallPath) {
     ResolveSymbol(g_module, "CR_NotifyAppRunning",   g_notifyAppRunning);
     ResolveSymbol(g_module, "CR_NotifyStatsStored",  g_notifyStatsStored);
     ResolveSymbol(g_module, "CR_GetAchievements",    g_getAchievements);
+    ResolveSymbol(g_module, "CR_GetPlaytime",        g_getPlaytime);
     ResolveSymbol(g_module, "CR_InstallVtableHooks", g_installVtableHooks);
 
     try {
@@ -438,6 +441,28 @@ uint32_t GetAchievements(uint32_t appId, std::span<AchievementBlock> outBlocks) 
     return GetAchievements(appId, outBlocks.data(), static_cast<uint32_t>(outBlocks.size()));
 }
 
+bool GetPlaytime(uint32_t appId, PlaytimeInfo* out) {
+    if (appId == 0 || !out) return false;
+    if (IsAppLicensed(appId)) return false;
+
+    InFlightGuard guard;
+    if (!guard || !g_getPlaytime) return false;
+
+    try {
+        return g_getPlaytime(appId, out);
+    } catch (const std::exception& e) {
+        LOG_ERROR("CloudRedirect: CR_GetPlaytime({}) failed: {}", appId, e.what());
+        return false;
+    } catch (...) {
+        LOG_ERROR("CloudRedirect: CR_GetPlaytime({}) failed with unknown exception", appId);
+        return false;
+    }
+}
+
+std::vector<uint32_t> GetRedirectedAppIds() {
+    return CollectRedirectedAppIds();
+}
+
 void Shutdown() {
     std::lock_guard lock(g_mutex);
     if (!g_active.exchange(false, std::memory_order_acq_rel)) return;
@@ -474,6 +499,7 @@ void Shutdown() {
     g_notifyAppRunning   = nullptr;
     g_notifyStatsStored  = nullptr;
     g_getAchievements    = nullptr;
+    g_getPlaytime        = nullptr;
     g_installVtableHooks = nullptr;
     LOG_INFO("CloudRedirect: shut down");
 }
