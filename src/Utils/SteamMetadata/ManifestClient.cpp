@@ -118,37 +118,54 @@ namespace ManifestClient {
     // ── fetch ─────────────────────────────────────────────────────
 
     static bool FetchActive(uint64_t gid, uint64_t* outCode, AppId_t depotId) {
-        const Provider& p = *g_active;
-        const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
+    const Provider& p = *g_active.load(std::memory_order_acquire);
+    const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
 
-        if (p.needsDepot && !depotId) return false;
+    if (p.needsDepot && !depotId) return false;
 
-        char urlLog[256];
-        if (p.needsDepot) {
-            std::snprintf(urlLog, sizeof(urlLog), p.urlTemplate,
-                          static_cast<unsigned long long>(depotId),
-                          static_cast<unsigned long long>(gid));
-        } else {
-            std::snprintf(urlLog, sizeof(urlLog), p.urlTemplate,
-                          static_cast<unsigned long long>(gid));
-        }
-
-        auto r = OSTPlatform::Http::Execute(
-            L"GET",
+    char urlBuffer[512];
+    if (p.needsDepot) {
+        const int written = std::snprintf(
             urlBuffer,
-            nullptr,
-            0,
-            p.headers,
-            timeouts.resolve,
-            timeouts.connect,
-            timeouts.send,
-            timeouts.recv);
-
-        LOG_MANIFEST_INFO("Manifest {} status={} depot={} gid={}", p.name, r.status, depotId, gid);
-
-        if (!r.ok || r.status != 200) return false;
-        return p.parse(r.body, outCode);
+            sizeof(urlBuffer),
+            p.urlTemplate,
+            static_cast<unsigned long long>(depotId),
+            static_cast<unsigned long long>(gid));
+        if (written < 0 || static_cast<size_t>(written) >= sizeof(urlBuffer)) {
+            return false;
+        }
+    } else {
+        const int written = std::snprintf(
+            urlBuffer,
+            sizeof(urlBuffer),
+            p.urlTemplate,
+            static_cast<unsigned long long>(gid));
+        if (written < 0 || static_cast<size_t>(written) >= sizeof(urlBuffer)) {
+            return false;
+        }
     }
+
+    auto r = OSTPlatform::Http::Execute(
+        L"GET",
+        urlBuffer,
+        nullptr,
+        0,
+        p.headers,
+        timeouts.resolve,
+        timeouts.connect,
+        timeouts.send,
+        timeouts.recv);
+
+    LOG_MANIFEST_INFO(
+        "Manifest {} status={} depot={} gid={}",
+        std::string(p.name),
+        static_cast<unsigned long long>(r.status),
+        static_cast<unsigned long long>(depotId),
+        static_cast<unsigned long long>(gid));
+
+    if (!r.ok || r.status != 200) return false;
+    return p.parse(r.body, outCode);
+}
 
     // ── public ────────────────────────────────────────────────────
 
