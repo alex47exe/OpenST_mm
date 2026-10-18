@@ -10,7 +10,6 @@
 #include "Pipe/PipeManager.h"
 #include "Pipe/Features/DenuvoAuth/DenuvoSync.h"
 #include "OSTPlatform/include/Thread.h"
-#include "OSTPlatform/include/Memory.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -631,8 +630,6 @@ namespace
 
         return AppOwnershipCategory::Other;
     }
-
-
 
     HOOK_FUNC(FillInAppOverview, void *, void *pThis, void *pAppOverview, CSteamApp *pApp)
     {

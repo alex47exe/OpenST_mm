@@ -52,6 +52,11 @@ public:
     // Requests PICS AppInfo product metadata (eMsg 8903)
     [[nodiscard]] std::optional<ParsedAppInfoData> RequestPicsProductInfo(uint32_t appId, uint64_t accessToken = 0);
 
+    // Batch requests PICS AppInfo product metadata (eMsg 8903)
+    [[nodiscard]] std::vector<ParsedAppInfoData> RequestPicsProductInfoBatch(
+        const std::vector<uint32_t>& appIds,
+        const std::unordered_map<uint32_t, uint64_t>& appTokens = {});
+
     // Fast batch resolution of official app/DLC names via Steam CM PICS (eMsg 8903)
     [[nodiscard]] std::unordered_map<uint32_t, std::string> RequestPicsAppNames(
         const std::vector<uint32_t>& appIds, bool* outSuccess = nullptr);

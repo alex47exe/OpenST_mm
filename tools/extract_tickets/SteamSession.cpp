@@ -390,13 +390,20 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
     if (!steamPath.empty()) {
         auto appInfoOpt = ParseAppInfoDepots(steamPath, appId);
         if (appInfoOpt) {
-            for (uint32_t dlcId : appInfoOpt->dlcAppIds) {
-                if (dlcId != appId && !knownDlcIds.contains(dlcId)) {
-                    knownDlcIds.insert(dlcId);
-                    depotToDlc.try_emplace(dlcId, dlcId);
-                    DlcInfo& d = dlcMap[dlcId];
-                    d.dlcId = dlcId;
-                    knownDepotManifests.try_emplace(dlcId, "");
+            // 仅对本体及已确认拥有的 DLC 补充官方清单 GID，严禁将全量商店公共商品目录 (listofdlc) 倒灌入已拥有列表
+            for (const auto& dInfo : appInfoOpt->depots) {
+                const bool isBaseGameDepot = (dInfo.dlcId == 0 || dInfo.dlcId == appId);
+                const bool isOwnedDlcDepot = (dInfo.dlcId > 0 && knownDlcIds.contains(dInfo.dlcId));
+                if (isBaseGameDepot || isOwnedDlcDepot) {
+                    if (!dInfo.manifestId.empty()) {
+                        auto it = knownDepotManifests.find(dInfo.depotId);
+                        if (it == knownDepotManifests.end() || it->second.empty()) {
+                            knownDepotManifests[dInfo.depotId] = dInfo.manifestId;
+                        }
+                    }
+                    if (isOwnedDlcDepot) {
+                        depotToDlc.try_emplace(dInfo.depotId, dInfo.dlcId);
+                    }
                 }
             }
         }
