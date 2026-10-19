@@ -59,7 +59,6 @@ add_executable(extract_tickets
     extract_tickets/AppInfoParser.cpp
     extract_tickets/SteamSession.cpp
     extract_tickets/OutputWriter.cpp
-    extract_tickets/LuaFallbackParser.cpp
     extract_tickets/Log.cpp
     extract_tickets/Crypto.cpp
     extract_tickets/TokenStorage.cpp
@@ -76,10 +75,6 @@ add_executable(extract_tickets
 target_compile_features(extract_tickets PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(extract_tickets PRIVATE /utf-8 /Zc:preprocessor /W4 /permissive- /wd4189)
-    set_source_files_properties(
-        extract_tickets/LuaFallbackParser.cpp
-        PROPERTIES COMPILE_OPTIONS "/wd4456"
-    )
 endif()
 target_link_libraries(extract_tickets PRIVATE
     ost_tinf

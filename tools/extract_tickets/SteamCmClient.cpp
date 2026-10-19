@@ -105,7 +105,6 @@ void SteamCmClient::Disconnect() {
     }
     m_msgQueue.clear();
     m_clientSessionId = 0;
-    m_playingAppId = 0;
     m_isLoggedOn = false;
 }
 
@@ -757,45 +756,66 @@ std::optional<std::vector<uint8_t>> SteamCmClient::RequestEncryptedAppTicket(uin
     }
 }
 
-std::vector<DepotKeyInfo> SteamCmClient::RequestDepotKeys(uint32_t appId, const std::vector<uint32_t>& depotIds) {
+std::vector<DepotKeyInfo> SteamCmClient::RequestDepotKeys(
+    const std::vector<DepotKeyQuery>& queries, uint32_t fallbackAppId) {
     std::vector<DepotKeyInfo> keys;
     if (!EnsureConnected()) return keys;
 
-    for (uint32_t depotId : depotIds) {
-        LOG_DEBUG("SteamCM", MsgKey::LogCmReqDepotKey, depotId, appId);
+    for (const auto& query : queries) {
+        const uint32_t depotId = query.depotId;
+        const uint32_t primaryAppId = (query.appId > 0) ? query.appId : fallbackAppId;
 
-        ProtoWriter body;
-        body.WriteUInt32(1, depotId); // depot_id
-        body.WriteUInt32(2, appId);   // app_id
+        auto tryQueryDepot = [&](uint32_t targetAppId, int32_t& outEresult, std::vector<uint8_t>& outKeyBytes) -> bool {
+            LOG_DEBUG("SteamCM", MsgKey::LogCmReqDepotKey, depotId, targetAppId);
 
-        std::vector<uint8_t> respBody;
-        ScopedBufferWiper respWiper{respBody};
-        if (!SendAndReceiveWithRetry(
-                ESteamMsg::ClientGetDepotDecryptionKey,
-                body,
-                static_cast<uint32_t>(ESteamMsg::ClientGetDepotDecryptionKeyResponse),
-                respBody,
-                6000)) {
-            continue;
-        }
+            ProtoWriter body;
+            body.WriteUInt32(1, depotId);     // depot_id
+            body.WriteUInt32(2, targetAppId); // app_id
 
-        ProtoReader reader(respBody);
-        ProtoField field;
+            std::vector<uint8_t> respBody;
+            ScopedBufferWiper respWiper{respBody};
+            if (!SendAndReceiveWithRetry(
+                    ESteamMsg::ClientGetDepotDecryptionKey,
+                    body,
+                    static_cast<uint32_t>(ESteamMsg::ClientGetDepotDecryptionKeyResponse),
+                    respBody,
+                    6000)) {
+                outEresult = -1;
+                return false;
+            }
+
+            ProtoReader reader(respBody);
+            ProtoField field;
+            outEresult = 2;
+            outKeyBytes.clear();
+
+            while (reader.ReadNext(field)) {
+                if (field.fieldNumber == 1) { // eresult
+                    outEresult = static_cast<int32_t>(field.varintVal);
+                } else if (field.fieldNumber == 3) { // depot_encryption_key
+                    outKeyBytes.assign(field.bytesVal.begin(), field.bytesVal.end());
+                }
+            }
+            return true;
+        };
+
         int32_t eresult = 2;
         std::vector<uint8_t> keyBytes;
         ScopedBufferWiper keyWiper{keyBytes};
 
-        while (reader.ReadNext(field)) {
-            if (field.fieldNumber == 1) { // eresult
-                eresult = static_cast<int32_t>(field.varintVal);
-            } else if (field.fieldNumber == 3) { // depot_encryption_key
-                keyBytes.assign(field.bytesVal.begin(), field.bytesVal.end());
-            }
+        bool ok = tryQueryDepot(primaryAppId, eresult, keyBytes);
+
+        // Anti-fragile two-tier fallback: if eresult == 9 (k_EResultFileNotFound), retry with fallbackAppId
+        if (eresult == 9 && fallbackAppId > 0 && primaryAppId != fallbackAppId) {
+            LOG_DEBUG("SteamCM", "Depot {} returned eresult=9 for AppID {}, retrying with fallback AppID {}",
+                      depotId, primaryAppId, fallbackAppId);
+            ok = tryQueryDepot(fallbackAppId, eresult, keyBytes);
         }
 
-        if (eresult == 1) {
+        if (ok && eresult == 1) {
             DepotKeyInfo info;
             info.depotId = depotId;
+            info.dlcId = (primaryAppId != fallbackAppId) ? primaryAppId : 0;
             if (!keyBytes.empty()) {
                 info.hexKey = ToHexString(keyBytes);
                 LOG_INFO("SteamCM", MsgKey::LogCmGotDepotKey, depotId, MaskKeyHex(info.hexKey));
@@ -812,6 +832,15 @@ std::vector<DepotKeyInfo> SteamCmClient::RequestDepotKeys(uint32_t appId, const 
     }
 
     return keys;
+}
+
+std::vector<DepotKeyInfo> SteamCmClient::RequestDepotKeys(uint32_t appId, const std::vector<uint32_t>& depotIds) {
+    std::vector<DepotKeyQuery> queries;
+    queries.reserve(depotIds.size());
+    for (uint32_t depotId : depotIds) {
+        queries.push_back({depotId, appId});
+    }
+    return RequestDepotKeys(queries, appId);
 }
 
 std::unordered_map<uint32_t, uint64_t> SteamCmClient::RequestAppTokens(const std::vector<uint32_t>& appIds) {
@@ -1043,30 +1072,6 @@ std::unordered_map<uint32_t, std::string> SteamCmClient::RequestPicsAppNames(
     return outNames;
 }
 
-bool SteamCmClient::SetGamePlayed(uint32_t appId) {
-    if (!EnsureConnected()) return false;
-    // CMsgClientGamesPlayed (eMsg 742):
-    //   repeated GamePlayed games_played = 1;
-    //     optional fixed64 game_id = 2;
-    //     optional uint32 process_id = 9;
-    //   optional uint32 client_os_type = 2;
-    ProtoWriter body;
-    if (appId > 0) {
-        ProtoWriter gamePlayed;
-        gamePlayed.WriteFixed64(2, static_cast<uint64_t>(appId)); // game_id = 2 (fixed64)
-        gamePlayed.WriteUInt32(9, GetCurrentProcessId());          // process_id = 9 (uint32)
-        body.WriteSubMessage(1, gamePlayed);                       // games_played = 1
-    }
-    body.WriteUInt32(2, 16); // client_os_type = 2 (Windows 10/11)
-
-    LOG_DEBUG("SteamCM", MsgKey::LogCmSendGamesPlayed, appId, GetCurrentProcessId());
-    if (SendProtoMsg(ESteamMsg::ClientGamesPlayed, body, 0)) {
-        m_playingAppId = appId;
-        return true;
-    }
-    return false;
-}
-
 std::string SteamCmClient::FetchManifestRequestCode(
     uint32_t appId, uint32_t depotId, const std::string& manifestId, bool* outAccessDenied) {
     if (outAccessDenied) *outAccessDenied = false;
@@ -1089,7 +1094,8 @@ std::string SteamCmClient::FetchManifestRequestCode(
     innerReq.WriteUInt32(2, depotId); // depot_id
     innerReq.WriteUInt64(3, manifestGid); // manifest_id
     innerReq.WriteString(4, "public"); // app_branch
-    innerReq.WriteString(5, ""); // branch_password
+    // Note: Do not serialize field 5 (branch_password_hash) when branch is "public",
+    // matching official steamclient64.dll assembly logic (0x13869e6e4 - 0x13869e81c).
 
     int32_t rpcResult = 0;
     bool gotReply = false;
@@ -1545,7 +1551,8 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         }
 
         // 4.4 纯官方云端向 Steam CM 查询真实物理 Depot 解密密钥 (先验授权鉴定，杜绝后续清单盲目撞门)
-        std::vector<uint32_t> queryDepotList;
+        std::vector<DepotKeyQuery> depotQueries;
+        std::unordered_set<uint32_t> queriedDepotIds;
         for (const auto& dk : depotKeys) {
             // 严格剔除无独立 Depot 的纯逻辑 DLC 容器 (dlcId == depotId 或属于已知 DLC AppID 且无清单)
             if (dk.manifestId.empty() && (dk.depotId == dk.dlcId || knownDlcSet.contains(dk.depotId))) {
@@ -1555,15 +1562,16 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             if (dk.manifestId.empty() && dk.depotId != appId) {
                 continue;
             }
-            queryDepotList.push_back(dk.depotId);
+            if (queriedDepotIds.insert(dk.depotId).second) {
+                const uint32_t qAppId = (dk.dlcId > 0) ? dk.dlcId : appId;
+                depotQueries.push_back({dk.depotId, qAppId});
+            }
         }
-        if (std::find(queryDepotList.begin(), queryDepotList.end(), appId) == queryDepotList.end()) {
-            queryDepotList.push_back(appId);
+        if (queriedDepotIds.insert(appId).second) {
+            depotQueries.push_back({appId, appId});
         }
-        std::sort(queryDepotList.begin(), queryDepotList.end());
-        queryDepotList.erase(std::unique(queryDepotList.begin(), queryDepotList.end()), queryDepotList.end());
 
-        LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryingDepotKeys, appId, queryDepotList.size());
+        LOG_DEBUG("SteamCM", MsgKey::LogCmFullQueryingDepotKeys, appId, depotQueries.size());
         if (!TuiEngine::IsActive()) {
             std::cout << TR(MsgKey::CliExtractQueryDepots) << "\n";
         }
@@ -1571,7 +1579,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         if (onProgress) {
             onProgress("keys", 0, 0, 0);
         }
-        std::vector<DepotKeyInfo> cmKeys = RequestDepotKeys(appId, queryDepotList);
+        std::vector<DepotKeyInfo> cmKeys = RequestDepotKeys(depotQueries, appId);
         std::unordered_set<uint32_t> authorizedDepots;
         std::unordered_map<uint32_t, std::string> cmKeyMap;
 
@@ -1599,7 +1607,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         }
 
         // 4.4 针对已授权物理 Depot 拉取官方清单文件 (免撞门两阶段流水线: CM 请求码收集 + 异步并发 CDN 下载)
-        LOG_INFO("SteamCM", MsgKey::LogCmFullPullingManifests, authorizedDepots.size(), queryDepotList.size());
+        LOG_INFO("SteamCM", MsgKey::LogCmFullPullingManifests, authorizedDepots.size(), depotQueries.size());
         if (!TuiEngine::IsActive()) {
             std::cout << TR(MsgKey::CliExtractPullManifests) << "\n";
         }
@@ -1625,7 +1633,8 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 }
 
                 bool accessDenied = false;
-                std::string reqCode = FetchManifestRequestCode(appId, dk.depotId, dk.manifestId, &accessDenied);
+                const uint32_t qAppId = (dk.dlcId > 0) ? dk.dlcId : appId;
+                std::string reqCode = FetchManifestRequestCode(qAppId, dk.depotId, dk.manifestId, &accessDenied);
                 if (!reqCode.empty() && reqCode != "0") {
                     downloadTasks.push_back({dk.depotId, dk.manifestId, std::move(reqCode)});
                 }

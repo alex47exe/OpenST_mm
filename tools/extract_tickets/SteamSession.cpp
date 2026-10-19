@@ -2,7 +2,6 @@
 #include "AppInfoParser.h"
 #include "I18n.h"
 #include "Log.h"
-#include "LuaFallbackParser.h"
 #include "RaiiGuards.h"
 #include "TuiEngine.h"
 #include "Utils.h"
@@ -353,40 +352,6 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
 
     auto allDepotKeys = !steamPath.empty() ? ParseConfigVdfDepotKeys(steamPath) : std::unordered_map<uint32_t, std::string>{};
 
-    const LuaFallbackData luaFallback = ParseLuaFallbackData(steamPath, appId);
-    if (!luaFallback.Empty()) {
-        for (uint32_t dlcId : luaFallback.dlcIds) {
-            if (dlcId != appId && !knownDlcIds.contains(dlcId)) {
-                knownDlcIds.insert(dlcId);
-                depotToDlc.try_emplace(dlcId, dlcId);
-                DlcInfo& d = dlcMap[dlcId];
-                d.dlcId = dlcId;
-                auto itN = luaFallback.dlcNames.find(dlcId);
-                if (itN != luaFallback.dlcNames.end() && !itN->second.empty()) {
-                    d.name = itN->second;
-                }
-                knownDepotManifests.try_emplace(dlcId, "");
-            }
-        }
-
-        for (const auto& [dId, dlcId] : luaFallback.depotToDlc) {
-            depotToDlc.try_emplace(dId, dlcId);
-        }
-
-        for (const auto& [dId, man] : luaFallback.depotManifests) {
-            if (!knownDepotManifests.contains(dId) || knownDepotManifests[dId].empty()) {
-                knownDepotManifests[dId] = man;
-            }
-        }
-
-        for (const auto& [dId, key] : luaFallback.depotKeys) {
-            if (!allDepotKeys.contains(dId) || allDepotKeys[dId].empty()) {
-                allDepotKeys[dId] = key;
-            }
-        }
-
-    }
-
     if (!steamPath.empty()) {
         auto appInfoOpt = ParseAppInfoDepots(steamPath, appId);
         if (appInfoOpt) {
@@ -513,17 +478,6 @@ std::vector<DepotKeyInfo> ExtractDepotDecryptionKeys(
         auto depotcacheDirs = GetDepotcacheDirs(steamPath, libraries);
         for (auto& dk : result) {
             dk.manifestFilePath = FindDepotManifestFile(depotcacheDirs, dk.depotId, dk.manifestId);
-        }
-    }
-
-    if (!luaFallback.Empty()) {
-        for (auto& dk : result) {
-            if (dk.manifestFilePath.empty()) {
-                auto itMf = luaFallback.manifestFiles.find(dk.depotId);
-                if (itMf != luaFallback.manifestFiles.end()) {
-                    dk.manifestFilePath = itMf->second;
-                }
-            }
         }
     }
 
