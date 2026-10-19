@@ -259,6 +259,7 @@ namespace {
                          std::string_view inputAppId,
                          std::string_view accountName,
                          uint64_t steamId,
+                         bool extractTools = false,
                          bool fullClear = false) {
         if (!TuiEngine::EnsureMinTerminalSize(76, 18)) {
             return;
@@ -353,7 +354,8 @@ namespace {
 
         DrawLevel3QuickInputLine(top, left, boxW, boxH, inputAppId);
 
-        TuiEngine::DrawFooter(TR(MsgKey::L3Footer));
+        std::string footerText = TR_FMT(MsgKey::L3Footer, extractTools ? TR(MsgKey::L3ToolsSwitchOn) : TR(MsgKey::L3ToolsSwitchOff));
+        TuiEngine::DrawFooter(footerText);
         TuiEngine::EndFrame();
     }
 } // namespace
@@ -784,12 +786,13 @@ void OnlineSession::RunInSessionExtraction(
     std::string inputAppId;
     bool needFullClear = true;
     bool needRender = true;
+    bool extractTools = false;
 
     TuiEngine::FlushInputBuffer();
 
     while (true) {
         if (needRender) {
-            RenderLevel3Tui(gameMgr, selectedRow, inputAppId, curAccountName, curSteamId, needFullClear);
+            RenderLevel3Tui(gameMgr, selectedRow, inputAppId, curAccountName, curSteamId, extractTools, needFullClear);
             needFullClear = false;
             needRender = false;
         }
@@ -909,7 +912,7 @@ void OnlineSession::RunInSessionExtraction(
                     ++progress;
                     TuiEngine::DrawProgressBar(bTop + 3, bLeft + 4, bModalW - 8, progress, total, game.name);
 
-                    auto creds = cmClient.ExtractFullCredentials(game.appId);
+                    auto creds = cmClient.ExtractFullCredentials(game.appId, false, extractTools);
                     if (WriteOutputs(game.appId, creds.appOwnershipTicket, creds.encryptedAppTicket,
                                      creds.depotKeys, creds.dlcs, creds.appTokens, true)) {
                         ++succeeded;
@@ -942,6 +945,15 @@ void OnlineSession::RunInSessionExtraction(
                 needRender = true;
             }
             continue;
+        }
+
+        // 't' / 'T' -> Toggle companion tools extraction
+        if (ev.code == KeyCode::Char && (ev.ch == 't' || ev.ch == 'T')) {
+            if (inputAppId.empty()) {
+                extractTools = !extractTools;
+                needRender = true;
+                continue;
+            }
         }
 
         // Digits 0-9 -> Add to AppID input box
@@ -1035,7 +1047,7 @@ void OnlineSession::RunInSessionExtraction(
                     }
                 };
 
-                auto creds = cmClient.ExtractFullCredentials(targetAppId, forceEticket, progressCallback);
+                auto creds = cmClient.ExtractFullCredentials(targetAppId, forceEticket, extractTools, progressCallback);
                 bool ok = WriteOutputs(targetAppId, creds.appOwnershipTicket, creds.encryptedAppTicket,
                                        creds.depotKeys, creds.dlcs, creds.appTokens, true);
                 TuiEngine::ClearScreen();
@@ -1076,7 +1088,7 @@ void OnlineSession::RunInSessionExtraction(
     }
 }
 
-int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, bool forceEticket) {
+int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, bool forceEticket, bool extractTools) {
     if (appId == 0) {
         std::cerr << TR(MsgKey::InvalidAppId) << "\n";
         return 1;
@@ -1203,7 +1215,7 @@ int OnlineSession::RunSilent(uint32_t appId, const std::string& accountName, boo
                 TokenStorage::UpsertAccount(updated);
             }
 
-            auto curCreds = cmClient.ExtractFullCredentials(appId, forceEticket);
+            auto curCreds = cmClient.ExtractFullCredentials(appId, forceEticket, extractTools);
 
             const bool hasTicket = curCreds.appOwnershipTicket.has_value() || curCreds.encryptedAppTicket.has_value();
             const bool hasKeys = std::any_of(curCreds.depotKeys.begin(), curCreds.depotKeys.end(),

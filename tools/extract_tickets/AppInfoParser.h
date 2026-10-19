@@ -20,6 +20,8 @@ struct ParsedAppInfoData {
     uint32_t appId{0};
     std::string name;
     std::string localizedName;
+    std::string type;
+    uint32_t parentAppId{0};
     std::vector<AppDepotManifest> depots;
     std::vector<uint32_t> dlcAppIds;
     bool requiresDenuvo{false};

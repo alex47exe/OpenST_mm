@@ -344,6 +344,14 @@ void ParseVdfRecurse(VdfReader& reader,
                     outData.name = std::string(val);
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedAppName, outData.name);
                 }
+            } else if (EqualIgnoreCase(key, "type") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
+                if (outData.type.empty()) {
+                    outData.type = std::string(val);
+                }
+            } else if (EqualIgnoreCase(key, "parent") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
+                if (auto pId = ParseAppId(val)) {
+                    outData.parentAppId = *pId;
+                }
             } else if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack.back(), "name_localized") &&
                        EqualIgnoreCase(pathStack[pathStack.size() - 2], "common")) {
                 if (EqualIgnoreCase(key, I18n::GetSteamLanguageCode())) {
@@ -361,6 +369,8 @@ void ParseVdfRecurse(VdfReader& reader,
 
             if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0) {
                 recordDlcId(static_cast<uint32_t>(val));
+            } else if (EqualIgnoreCase(key, "parent") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common") && val > 0) {
+                outData.parentAppId = static_cast<uint32_t>(val);
             } else if (!pathStack.empty() && EqualIgnoreCase(pathStack.back(), "extended") &&
                        EqualIgnoreCase(key, "gamerequiresdenuvo") && val != 0) {
                 outData.requiresDenuvo = true;
@@ -384,6 +394,9 @@ void ParseVdfRecurse(VdfReader& reader,
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0 &&
                        val <= (std::numeric_limits<uint32_t>::max)()) {
                 recordDlcId(static_cast<uint32_t>(val));
+            } else if (EqualIgnoreCase(key, "parent") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common") && val > 0 &&
+                       val <= (std::numeric_limits<uint32_t>::max)()) {
+                outData.parentAppId = static_cast<uint32_t>(val);
             }
         } else if (type == 0x09) { // CompiledInt
             if (!reader.SkipBytes(4)) return;
@@ -396,6 +409,9 @@ void ParseVdfRecurse(VdfReader& reader,
             } else if (EqualIgnoreCase(key, "dlcappid") && currentDepotId > 0 && val > 0 &&
                        static_cast<uint64_t>(val) <= (std::numeric_limits<uint32_t>::max)()) {
                 recordDlcId(static_cast<uint32_t>(val));
+            } else if (EqualIgnoreCase(key, "parent") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common") && val > 0 &&
+                       static_cast<uint64_t>(val) <= (std::numeric_limits<uint32_t>::max)()) {
+                outData.parentAppId = static_cast<uint32_t>(val);
             }
         } else {
             // Unknown or unsupported type encountered: binary VDF is not self-describing in length.
@@ -648,6 +664,14 @@ void ParseTextVdfRecurse(
                 if (outData.name.empty()) {
                     outData.name = val;
                     LOG_DEBUG("AppInfoParser", MsgKey::LogVdfParsedAppName, outData.name);
+                }
+            } else if (EqualIgnoreCase(key, "type") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
+                if (outData.type.empty()) {
+                    outData.type = val;
+                }
+            } else if (EqualIgnoreCase(key, "parent") && !pathStack.empty() && EqualIgnoreCase(pathStack.back(), "common")) {
+                if (auto pId = ParseAppId(val)) {
+                    outData.parentAppId = *pId;
                 }
             } else if (pathStack.size() >= 2 && EqualIgnoreCase(pathStack.back(), "name_localized") &&
                        EqualIgnoreCase(pathStack[pathStack.size() - 2], "common")) {
