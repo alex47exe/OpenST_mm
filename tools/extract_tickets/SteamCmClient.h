@@ -97,6 +97,7 @@ public:
     [[nodiscard]] ExtractedAppCredentials ExtractFullCredentials(
         uint32_t appId,
         bool forceEticket = false,
+        bool extractTools = false,
         ProgressCallback onProgress = nullptr);
 
     void SetAccessToken(std::string_view token);

@@ -37,6 +37,45 @@ private:
     std::unordered_set<uint32_t> m_emittedTokens;
 };
 
+// Maps companion item type string into normalized category tag
+[[nodiscard]] inline std::string_view GetDlcCategoryTag(std::string_view type) noexcept {
+    if (EqualIgnoreCase(type, "config")) return "[Config]";
+    if (EqualIgnoreCase(type, "music")) return "[Music]";
+    if (EqualIgnoreCase(type, "tool")) return "[Tool]";
+    if (EqualIgnoreCase(type, "demo")) return "[Demo]";
+    if (EqualIgnoreCase(type, "beta")) return "[Beta]";
+    if (EqualIgnoreCase(type, "application")) return "[App]";
+    return "[DLC]";
+}
+
+// Determines grouping and sort order for companion categories
+[[nodiscard]] inline int GetCategoryOrder(std::string_view type) noexcept {
+    if (EqualIgnoreCase(type, "config")) return 0;
+    if (EqualIgnoreCase(type, "dlc") || type.empty()) return 1;
+    if (EqualIgnoreCase(type, "music")) return 2;
+    if (EqualIgnoreCase(type, "tool")) return 3;
+    return 4;
+}
+
+// Appends a level-1 major section banner (40-character divider)
+inline void AppendMajorSection(std::string& out, std::string_view title, bool leadingNewline = true) {
+    constexpr std::string_view kDivider = "----------------------------------------\n";
+    if (leadingNewline) {
+        if (!out.empty() && out.back() != '\n') {
+            out += '\n';
+        }
+        out += '\n';
+    }
+    out += kDivider;
+    std::format_to(std::back_inserter(out), "{}\n", title);
+    out += kDivider;
+}
+
+// Appends a level-2 companion category sub-header
+inline void AppendCategoryHeader(std::string& out, std::string_view categoryTag) {
+    std::format_to(std::back_inserter(out), "\n-- {}\n", categoryTag);
+}
+
 } // namespace
 
 bool WriteOutputs(uint32_t appId,
@@ -159,7 +198,7 @@ bool WriteOutputs(uint32_t appId,
     // Generate ready-to-use Lua script
     std::string luaText;
     luaText.reserve(8192);
-    std::format_to(std::back_inserter(luaText), "{}{}\n\n", TR(MsgKey::LuaHeader), appId);
+    AppendMajorSection(luaText, std::format("{}{}", TR(MsgKey::LuaHeader), appId), false);
 
     std::unordered_set<uint32_t> ownedDlcIdSet;
     for (const auto& dlc : dlcs) {
@@ -178,7 +217,7 @@ bool WriteOutputs(uint32_t appId,
     EmitTracker emitTracker;
 
     // 1. Base Game Unlocks (AppID and base game depots)
-    std::format_to(std::back_inserter(luaText), "{}\n", TR(MsgKey::LuaBaseGame));
+    AppendMajorSection(luaText, TR(MsgKey::LuaBaseGame));
     const DepotKeyInfo* baseAppDk = nullptr;
     for (const auto& dk : depotKeys) {
         if (dk.depotId == appId) {
@@ -228,7 +267,7 @@ bool WriteOutputs(uint32_t appId,
     }
 
     if (hasBaseManifests) {
-        std::format_to(std::back_inserter(luaText), "\n{}\n", TR(MsgKey::LuaBaseManifests));
+        AppendMajorSection(luaText, TR(MsgKey::LuaBaseManifests));
         if (baseAppDk && IsValidManifestId(baseAppDk->manifestId) && emitTracker.TryEmitManifest(appId)) {
             if (hasManifestOnDisk(appId, baseAppDk->manifestId)) {
                 std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", appId, baseAppDk->manifestId);
@@ -313,7 +352,7 @@ bool WriteOutputs(uint32_t appId,
             if (hasPhysicalDepot) {
                 physicalDlcIndices.push_back(i);
             } else {
-                // 纵深防御：对于既无物理实体又无公开名称的孤立空项直接跳过
+                // Ignore orphan ghost DLCs without physical depots or public metadata
                 if (dlc.name.empty()) {
                     LOG_DEBUG("OutputWriter", MsgKey::LogOutDroppedOrphanGhostDlc, dlc.dlcId);
                     continue;
@@ -322,12 +361,33 @@ bool WriteOutputs(uint32_t appId,
             }
         }
 
-        // 3. Owned Physical DLCs Unlocks
+        // Sort both physical and logical indices by companion category, then by AppID
+        auto sortByCompanionCategory = [&](std::vector<size_t>& indices) {
+            std::stable_sort(indices.begin(), indices.end(),
+                             [&](size_t a, size_t b) {
+                                 int catA = GetCategoryOrder(dlcs[a].type);
+                                 int catB = GetCategoryOrder(dlcs[b].type);
+                                 if (catA != catB) return catA < catB;
+                                 return dlcs[a].dlcId < dlcs[b].dlcId;
+                             });
+        };
+        sortByCompanionCategory(physicalDlcIndices);
+        sortByCompanionCategory(logicalDlcIndices);
+
+        // 3. Owned Physical DLCs & Companions Unlocks
         if (!physicalDlcIndices.empty()) {
-            std::format_to(std::back_inserter(luaText), "\n{}\n", TR(MsgKey::LuaOwnedDlcs));
+            AppendMajorSection(luaText, TR(MsgKey::LuaOwnedDlcs));
+            std::string_view currentCategory;
+
             for (size_t idx : physicalDlcIndices) {
                 const auto& dlc = dlcs[idx];
                 const auto& data = dlcDepotList[idx];
+                const auto categoryTag = GetDlcCategoryTag(dlc.type);
+
+                if (categoryTag != currentCategory) {
+                    currentCategory = categoryTag;
+                    AppendCategoryHeader(luaText, categoryTag);
+                }
 
                 bool missingKey = false;
                 for (const auto* dk : data.associatedDepots) {
@@ -364,25 +424,52 @@ bool WriteOutputs(uint32_t appId,
                 for (const auto* subDk : data.subDepots) {
                     if (!subDk->hexKey.empty()) {
                         if (emitTracker.TryEmitAppId(subDk->depotId)) {
-                            std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\"){}\n", prefix, subDk->depotId, subDk->hexKey, reasonSuffix);
+                            std::format_to(std::back_inserter(luaText), "{}addappid({}, 1, \"{}\")", prefix, subDk->depotId, subDk->hexKey);
+                            if (!dlc.name.empty()) {
+                                luaText += " -- " + SanitizeComment(dlc.name);
+                            }
+                            luaText += reasonSuffix + "\n";
                         } else {
                             LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedAppId, subDk->depotId);
                         }
                     } else if (missingKey) {
                         if (emitTracker.TryEmitAppId(subDk->depotId)) {
-                            std::format_to(std::back_inserter(luaText), "-- addappid({}, 1){}\n", subDk->depotId, reasonSuffix);
+                            std::format_to(std::back_inserter(luaText), "-- addappid({}, 1)", subDk->depotId);
+                            if (!dlc.name.empty()) {
+                                luaText += " -- " + SanitizeComment(dlc.name);
+                            }
+                            luaText += reasonSuffix + "\n";
                         }
                     }
                 }
             }
         }
 
-        // 4. DLC Manifests (placed right under DLC unlocks)
+        // 4. DLC & Companion Manifests (placed right under DLC unlocks)
         if (hasDlcManifests && !physicalDlcIndices.empty()) {
-            std::format_to(std::back_inserter(luaText), "\n{}\n", TR(MsgKey::LuaDlcManifests));
+            AppendMajorSection(luaText, TR(MsgKey::LuaDlcManifests));
+            std::string_view currentCategory;
+
             for (size_t idx : physicalDlcIndices) {
                 const auto& dlc = dlcs[idx];
                 const auto& data = dlcDepotList[idx];
+                const auto categoryTag = GetDlcCategoryTag(dlc.type);
+
+                bool hasAnyManifest = (data.dlcDk && IsValidManifestId(data.dlcDk->manifestId));
+                if (!hasAnyManifest) {
+                    for (const auto* subDk : data.subDepots) {
+                        if (IsValidManifestId(subDk->manifestId)) {
+                            hasAnyManifest = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasAnyManifest) continue;
+
+                if (categoryTag != currentCategory) {
+                    currentCategory = categoryTag;
+                    AppendCategoryHeader(luaText, categoryTag);
+                }
 
                 // DLC itself manifest
                 if (data.dlcDk && IsValidManifestId(data.dlcDk->manifestId)) {
@@ -412,12 +499,16 @@ bool WriteOutputs(uint32_t appId,
                             const bool hasKey = !subDk->hexKey.empty();
                             const bool onDisk = hasManifestOnDisk(subDk->depotId, subDk->manifestId);
                             if (hasKey && onDisk) {
-                                std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")\n", subDk->depotId, subDk->manifestId);
+                                std::format_to(std::back_inserter(luaText), "setManifestid({}, \"{}\")", subDk->depotId, subDk->manifestId);
                             } else if (!hasKey) {
-                                std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}\n", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaDepotKeyMissing));
+                                std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaDepotKeyMissing));
                             } else {
-                                std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}\n", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaManifestMissing));
+                                std::format_to(std::back_inserter(luaText), "-- setManifestid({}, \"{}\") -- {}", subDk->depotId, subDk->manifestId, TR(MsgKey::LuaManifestMissing));
                             }
+                            if (!dlc.name.empty()) {
+                                luaText += " -- " + SanitizeComment(dlc.name);
+                            }
+                            luaText += "\n";
                         } else {
                             LOG_DEBUG("OutputWriter", MsgKey::LogOutDeduplicatedManifest, subDk->depotId);
                         }
@@ -426,11 +517,20 @@ bool WriteOutputs(uint32_t appId,
             }
         }
 
-        // 5. Manifest-free Logical DLCs (pure logic unlocks with zero physical files)
+        // 5. Manifest-free Logical DLCs & Companions (pure logic unlocks with zero physical files)
         if (!logicalDlcIndices.empty()) {
-            std::format_to(std::back_inserter(luaText), "\n{}\n", TR(MsgKey::LuaLogicalDlcs));
+            AppendMajorSection(luaText, TR(MsgKey::LuaLogicalDlcs));
+            std::string_view currentCategory;
+
             for (size_t idx : logicalDlcIndices) {
                 const auto& dlc = dlcs[idx];
+                const auto categoryTag = GetDlcCategoryTag(dlc.type);
+
+                if (categoryTag != currentCategory) {
+                    currentCategory = categoryTag;
+                    AppendCategoryHeader(luaText, categoryTag);
+                }
+
                 if (emitTracker.TryEmitAppId(dlc.dlcId)) {
                     std::format_to(std::back_inserter(luaText), "addappid({}, 1)", dlc.dlcId);
                     if (!dlc.name.empty()) {
@@ -449,21 +549,20 @@ bool WriteOutputs(uint32_t appId,
         }
     }
 
-    // 5. App Tickets (at the very end of the file)
-    luaText += "\n";
+    // 6. App Tickets (at the very end of the file)
     const bool hasOwnership = (ownership && !ownership->empty());
     const bool hasEncrypted = (encrypted && !encrypted->empty());
 
-    std::format_to(std::back_inserter(luaText), "{}\n", TR(MsgKey::LuaAppTicket));
+    AppendMajorSection(luaText, TR(MsgKey::LuaAppTicket));
     if (hasOwnership) {
-        std::format_to(std::back_inserter(luaText), "setAppTicket({}, \"{}\")\n\n",
+        std::format_to(std::back_inserter(luaText), "setAppTicket({}, \"{}\")\n",
                        appId,
                        ToHexString(*ownership));
     } else {
-        std::format_to(std::back_inserter(luaText), "-- setAppTicket({}, \"null\") -- {}\n\n", appId, TR(MsgKey::LuaAppTicketMissing));
+        std::format_to(std::back_inserter(luaText), "-- setAppTicket({}, \"null\") -- {}\n", appId, TR(MsgKey::LuaAppTicketMissing));
     }
 
-    std::format_to(std::back_inserter(luaText), "{}\n", TR(MsgKey::LuaETicket));
+    AppendMajorSection(luaText, TR(MsgKey::LuaETicket));
     if (hasEncrypted) {
         std::format_to(std::back_inserter(luaText), "setETicket({}, \"{}\")\n", appId, ToHexString(*encrypted));
     } else {

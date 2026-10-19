@@ -343,4 +343,43 @@ inline uint64_t ExtractHeaderTargetJobId(std::span<const uint8_t> hdrBytes) {
     return ParseSteamMsgHeader(hdrBytes).targetJobId;
 }
 
+// ============================================================================
+// GCRCTicket (AppOwnershipTicket) Entitlements Parser
+// ============================================================================
+
+// Parses DLC/Entitlement AppIDs embedded inside an AppOwnershipTicket binary payload (GCRCTicket format).
+// Strictly bounds-checked, zero-allocation per item, safe against corrupt/truncated payloads.
+// Note: Each DLC entry occupies 6 bytes: struct GCRCTicketDlcEntry { uint32_t appId; uint16_t flags; };
+[[nodiscard]] inline std::vector<uint32_t> ParseTicketEntitlements(std::span<const uint8_t> ticket) noexcept {
+    std::vector<uint32_t> results;
+    if (ticket.size() < 44) return results;
+
+    uint32_t signedLen = 0;
+    std::memcpy(&signedLen, ticket.data(), sizeof(uint32_t));
+    if (signedLen < 44 || signedLen > ticket.size()) return results;
+
+    uint16_t numLicenses = 0;
+    std::memcpy(&numLicenses, ticket.data() + 40, sizeof(uint16_t));
+    size_t offset = 42 + static_cast<size_t>(numLicenses) * 4;
+    if (offset + 2 > signedLen) return results;
+
+    uint16_t numDlcs = 0;
+    std::memcpy(&numDlcs, ticket.data() + offset, sizeof(uint16_t));
+    offset += 2;
+
+    constexpr size_t kDlcEntrySize = 6;
+    if (offset + static_cast<size_t>(numDlcs) * kDlcEntrySize > signedLen) return results;
+
+    results.reserve(numDlcs);
+    for (uint16_t i = 0; i < numDlcs; ++i) {
+        uint32_t dlcId = 0;
+        std::memcpy(&dlcId, ticket.data() + offset, sizeof(uint32_t));
+        offset += kDlcEntrySize;
+        if (dlcId > 0) {
+            results.push_back(dlcId);
+        }
+    }
+    return results;
+}
+
 } // namespace OST::ExtractTickets

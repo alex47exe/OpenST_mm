@@ -1376,7 +1376,7 @@ std::optional<std::string> SteamCmClient::DownloadManifestOnline(
     return DownloadManifestPayload(appId, depotId, manifestId, reqCode, destDir, cdnServers, sharedHttp);
 }
 
-ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bool forceEticket, ProgressCallback onProgress) {
+ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bool forceEticket, bool extractTools, ProgressCallback onProgress) {
     (void)forceEticket;
     if (onProgress) {
         onProgress("tickets", 0, 0, 0);
@@ -1461,7 +1461,20 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
         LOG_INFO("SteamCM", MsgKey::LogCmFullGotAppInfoSummary,
                  appInfoData->depots.size(), appInfoData->dlcAppIds.size());
 
-        // 4.1 识别所有 DLC（包含无独立 Depot 的逻辑 DLC，例如季票、豪华版升级包、皮肤包、原声音乐等）
+        // 4.0 Parse entitlements embedded in official ownership ticket (covers Config and companion apps not in listofdlc)
+        if (creds.appOwnershipTicket && !creds.appOwnershipTicket->empty()) {
+            auto ticketDlcs = ParseTicketEntitlements(*creds.appOwnershipTicket);
+            for (uint32_t tDlc : ticketDlcs) {
+                if (tDlc != appId && !knownDlcSet.contains(tDlc)) {
+                    knownDlcSet.insert(tDlc);
+                    DlcInfo dInfo;
+                    dInfo.dlcId = tDlc;
+                    creds.dlcs.push_back(std::move(dInfo));
+                }
+            }
+        }
+
+        // 4.1 Identify all DLCs (including logical DLCs without physical depots like season passes, soundtracks, etc.)
         for (uint32_t dlcId : appInfoData->dlcAppIds) {
             if (dlcId != appId && !knownDlcSet.contains(dlcId)) {
                 knownDlcSet.insert(dlcId);
@@ -1471,7 +1484,7 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             }
         }
 
-        // 4.2 提取官方 Depot 与关联清单 ID (GID)
+        // 4.2 Extract official depots and associated manifest GIDs
         for (const auto& dInfo : appInfoData->depots) {
             if (dInfo.dlcId > 0 && dInfo.dlcId != appId && !knownDlcSet.contains(dInfo.dlcId)) {
                 knownDlcSet.insert(dInfo.dlcId);
@@ -1498,11 +1511,11 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
             }
         }
 
-        // 4.3 批量拉取全部 DLC 与原声音乐的 PICS 产品元数据（彻底解析 DLC 内部专属 Depot 与清单）
+        // 4.3 Batch query PICS product metadata for all DLCs, Config, and Music
         std::vector<uint32_t> dlcsToQuery;
-        for (uint32_t dlcId : appInfoData->dlcAppIds) {
-            if (dlcId != appId) {
-                dlcsToQuery.push_back(dlcId);
+        for (const auto& dlc : creds.dlcs) {
+            if (dlc.dlcId != appId) {
+                dlcsToQuery.push_back(dlc.dlcId);
             }
         }
 
@@ -1515,29 +1528,44 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 }
             }
 
+            std::unordered_set<uint32_t> excludedAppIds;
             auto dlcAppInfos = RequestPicsProductInfoBatch(dlcsToQuery, dlcTokens);
             for (auto& dlcParsed : dlcAppInfos) {
-                // 回填官方名称
+                // Filter companion tools if user toggle is disabled
+                if (!extractTools && EqualIgnoreCase(dlcParsed.type, "Tool")) {
+                    excludedAppIds.insert(dlcParsed.appId);
+                    continue;
+                }
+                // Topological sanity check: ignore items explicitly parented to a different application
+                if (dlcParsed.parentAppId != 0 && dlcParsed.parentAppId != appId) {
+                    excludedAppIds.insert(dlcParsed.appId);
+                    continue;
+                }
+
+                // Populate official localized name and companion item type
                 const std::string& dName = !dlcParsed.localizedName.empty() ? dlcParsed.localizedName : dlcParsed.name;
-                if (!dName.empty()) {
-                    auto it = std::find_if(creds.dlcs.begin(), creds.dlcs.end(),
-                                           [&](const DlcInfo& d) { return d.dlcId == dlcParsed.appId; });
-                    if (it != creds.dlcs.end() && it->name.empty()) {
-                        it->name = dName;
+                auto dlcIt = std::find_if(creds.dlcs.begin(), creds.dlcs.end(),
+                                          [&](const DlcInfo& d) { return d.dlcId == dlcParsed.appId; });
+                if (dlcIt != creds.dlcs.end()) {
+                    if (dlcIt->name.empty() && !dName.empty()) {
+                        dlcIt->name = dName;
+                    }
+                    if (!dlcParsed.type.empty()) {
+                        dlcIt->type = dlcParsed.type;
                     }
                 }
 
-                // 提取 DLC 专属物理 Depot 与清单 GID（强制继承 DLC 归属）
+                // Extract DLC specific physical depots and manifest GIDs
                 for (const auto& dInfo : dlcParsed.depots) {
                     const uint32_t assocDlc = (dInfo.dlcId > 0) ? dInfo.dlcId : dlcParsed.appId;
-                    auto it = std::find_if(depotKeys.begin(), depotKeys.end(),
-                                           [&](const DepotKeyInfo& k) { return k.depotId == dInfo.depotId; });
-                    if (it != depotKeys.end()) {
-                        if (it->manifestId.empty() && !dInfo.manifestId.empty()) {
-                            it->manifestId = dInfo.manifestId;
+                    auto dkIt = std::find_if(depotKeys.begin(), depotKeys.end(),
+                                             [&](const DepotKeyInfo& k) { return k.depotId == dInfo.depotId; });
+                    if (dkIt != depotKeys.end()) {
+                        if (dkIt->manifestId.empty() && !dInfo.manifestId.empty()) {
+                            dkIt->manifestId = dInfo.manifestId;
                         }
-                        if (it->dlcId == 0) {
-                            it->dlcId = assocDlc;
+                        if (dkIt->dlcId == 0) {
+                            dkIt->dlcId = assocDlc;
                         }
                     } else {
                         DepotKeyInfo newDk;
@@ -1546,6 +1574,15 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                         newDk.dlcId = assocDlc;
                         depotKeys.push_back(std::move(newDk));
                     }
+                }
+            }
+
+            if (!excludedAppIds.empty()) {
+                std::erase_if(creds.dlcs, [&](const DlcInfo& d) {
+                    return excludedAppIds.contains(d.dlcId);
+                });
+                for (uint32_t exId : excludedAppIds) {
+                    creds.appTokens.erase(exId);
                 }
             }
         }
@@ -1635,6 +1672,10 @@ ExtractedAppCredentials SteamCmClient::ExtractFullCredentials(uint32_t appId, bo
                 bool accessDenied = false;
                 const uint32_t qAppId = (dk.dlcId > 0) ? dk.dlcId : appId;
                 std::string reqCode = FetchManifestRequestCode(qAppId, dk.depotId, dk.manifestId, &accessDenied);
+                // Two-tier fallback: if DLC AppID returned empty, retry with base game appId
+                if (reqCode.empty() && qAppId != appId) {
+                    reqCode = FetchManifestRequestCode(appId, dk.depotId, dk.manifestId, &accessDenied);
+                }
                 if (!reqCode.empty() && reqCode != "0") {
                     downloadTasks.push_back({dk.depotId, dk.manifestId, std::move(reqCode)});
                 }

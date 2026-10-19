@@ -18,6 +18,7 @@ namespace OST::ExtractTickets {
 struct DlcInfo {
     uint32_t dlcId{0};
     std::string name;
+    std::string type; // Companion item type: "dlc", "config", "music", "tool", etc.
 };
 
 [[nodiscard]] HMODULE LoadSteamClient64(const std::string& steamPath, std::string& loadedPath);

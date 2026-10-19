@@ -310,6 +310,7 @@ namespace {
                   << TR(MsgKey::CliHelpOptAccount) << "\n"
                   << TR(MsgKey::CliHelpOptOnline) << "\n"
                   << TR(MsgKey::CliHelpOptForce) << "\n"
+                  << TR(MsgKey::CliHelpOptTools) << "\n"
                   << TR(MsgKey::CliHelpOptLang) << "\n"
                   << TR(MsgKey::CliHelpOptHelp) << "\n\n"
                   << "\x1b[1;33m" << TR(MsgKey::CliHelpNavTitle) << "\x1b[0m\n"
@@ -359,11 +360,14 @@ int Run(int argc, char** argv) {
     bool forceEticket{false};
     bool onlineMode{false};
     bool workerMode{false};
+    bool extractTools{false};
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg{argv[i]};
         if (arg == "--online" || arg == "-o" || arg == "-O") {
             onlineMode = true;
+        } else if (arg == "--tools" || arg == "-t") {
+            extractTools = true;
         } else if (arg == "--lang" || arg == "-l") {
             if (i + 1 < argc) {
                 ++i;
@@ -430,7 +434,7 @@ int Run(int argc, char** argv) {
 
     if (onlineMode) {
         if (cliAppId) {
-            return OnlineSession::RunSilent(*cliAppId, cliAccount, forceEticket);
+            return OnlineSession::RunSilent(*cliAppId, cliAccount, forceEticket, extractTools);
         }
         TuiSessionGuard tuiGuard(_isatty(_fileno(stdin)) != 0);
         return OnlineSession::RunInteractive();
