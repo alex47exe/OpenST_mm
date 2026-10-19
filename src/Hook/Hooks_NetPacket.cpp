@@ -534,15 +534,15 @@ namespace Hooks_NetPacket_UserStats {
             req.set_appid(appId);
         }
 
-        // Truly owned and family shared games must pass through to official servers untouched
-        if (Hooks_Package::HasValidLicense(appId)) {
-            return isOnlineFix ? CommitSendPacket(pkt, req, outFrame) : false;
-        }
-
         // Only manage apps that are in LuaConfig depot or CloudRedirect
         if (!LuaConfig::HasDepot(appId) && !CloudRedirectHost::IsApp(appId)) {
             LOG_ACHIEVEMENT_WARN("Player::GetUserStats request: appid={} is not managed", appId);
             return false;
+        }
+
+        // Truly owned and family shared games must pass through to official servers untouched
+        if (Hooks_Package::HasValidLicense(appId)) {
+            return isOnlineFix ? CommitSendPacket(pkt, req, outFrame) : false;
         }
 
         const bool hasShaSchema = req.has_sha_schema() && !req.sha_schema().empty();
@@ -620,8 +620,9 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // Truly owned / family shared games and unmanaged games must pass untouched
-        if (!hasPending || Hooks_Package::HasValidLicense(pending.appId) ||
-            (!LuaConfig::HasDepot(pending.appId) && !CloudRedirectHost::IsApp(pending.appId))) {
+        if (!hasPending ||
+            (!LuaConfig::HasDepot(pending.appId) && !CloudRedirectHost::IsApp(pending.appId)) ||
+            Hooks_Package::HasValidLicense(pending.appId)) {
             LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: unmanaged appid {} (or no match), skip", pending.appId);
             return;
         }
@@ -709,12 +710,13 @@ namespace Hooks_NetPacket_UserStats {
             gid.SetAppID(appId);
             req.set_game_id(gid.m_ulGameID);
         }
-        if (Hooks_Package::HasValidLicense(appId)) {
-            return isOnlineFix ? CommitSendPacket(pkt, req, outFrame) : false;
-        }
+        // Only manage apps that are in LuaConfig depot or CloudRedirect
         if (!LuaConfig::HasDepot(appId) && !CloudRedirectHost::IsApp(appId)) {
             LOG_ACHIEVEMENT_WARN("ClientGetUserStats request: appid={} is not managed", appId);
             return false;
+        }
+        if (Hooks_Package::HasValidLicense(appId)) {
+            return isOnlineFix ? CommitSendPacket(pkt, req, outFrame) : false;
         }
         if (req.schema_local_version() != -1) {
             req.set_schema_local_version(-1);
@@ -751,11 +753,11 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         const AppId_t appId = ResolveOnlineFixAppId(ExtractSteamAppId(resp.game_id()));
-        if (Hooks_Package::HasValidLicense(appId)) {
-            return;
-        }
         if (!LuaConfig::HasDepot(appId) && !CloudRedirectHost::IsApp(appId)) {
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats response: appid={} not managed, skip", appId);
+            return;
+        }
+        if (Hooks_Package::HasValidLicense(appId)) {
             return;
         }
 
@@ -807,51 +809,62 @@ namespace Hooks_NetPacket_UserStats {
     void HandleRecv_ClientStoreUserStatsResponse(CNetPacket* pPacket,
                                                  const UnpackedPacket& pkt)
     {
-        if (pkt.body.empty()) return;
+        try {
+            if (pkt.body.empty()) return;
 
-        CMsgClientStoreUserStatsResponse resp;
-        if (!resp.ParseFromArray(pkt.body.data(), static_cast<int>(pkt.body.size())))
-            return;
-        LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: original body:\n{}", resp.DebugString());
-        if (!resp.has_game_id())
-            return;
+            CMsgClientStoreUserStatsResponse resp;
+            if (!resp.ParseFromArray(pkt.body.data(), static_cast<int>(pkt.body.size())))
+                return;
+            LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: original body:\n{}", resp.DebugString());
 
-        const AppId_t appId = ResolveOnlineFixAppId(ExtractSteamAppId(resp.game_id()));
-        if (Hooks_Package::HasValidLicense(appId)) {
-            return;
-        }
-        if (!LuaConfig::HasDepot(appId) && !CloudRedirectHost::IsApp(appId)) {
-            return;
-        }
+            if (!resp.has_game_id())
+                return;
 
-        CMsgProtoBufHeader hdrMsg;
-        bool hdrChanged = false;
-        if (!pkt.hdr.empty() &&
-            hdrMsg.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
-            hdrMsg.has_eresult() && hdrMsg.eresult() != k_EResultOK)
-        {
-            hdrMsg.set_eresult(k_EResultOK);
-            if (hdrMsg.has_error_message()) {
-                hdrMsg.clear_error_message();
+            const AppId_t appId = ResolveOnlineFixAppId(ExtractSteamAppId(resp.game_id()));
+
+            if (!LuaConfig::HasDepot(appId) && !CloudRedirectHost::IsApp(appId)) {
+                return;
             }
-            hdrChanged = true;
-            LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: patched header eresult to OK for app {}", appId);
-        }
-
-        bool bodyChanged = false;
-        if (resp.eresult() != k_EResultOK) {
-            resp.set_eresult(k_EResultOK);
-            bodyChanged = true;
-        }
-        if (resp.has_stats_failed_validation()) {
-            resp.clear_stats_failed_validation();
-            bodyChanged = true;
-        }
-
-        if (hdrChanged || bodyChanged) {
-            if (CommitRecvPacket(pPacket, pkt, hdrChanged ? &hdrMsg : nullptr, bodyChanged ? &resp : nullptr)) {
-                LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: committed patched response for app {}", appId);
+            if (Hooks_Package::HasValidLicense(appId)) {
+                return;
             }
+
+            CMsgProtoBufHeader hdrMsg;
+            bool hdrChanged = false;
+            if (!pkt.hdr.empty() &&
+                hdrMsg.ParseFromArray(pkt.hdr.data(), static_cast<int>(pkt.hdr.size())) &&
+                hdrMsg.has_eresult() && hdrMsg.eresult() != k_EResultOK)
+            {
+                hdrMsg.set_eresult(k_EResultOK);
+                if (hdrMsg.has_error_message()) {
+                    hdrMsg.clear_error_message();
+                }
+                hdrChanged = true;
+                LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: patched header eresult to OK for app {}", appId);
+            }
+
+            bool bodyChanged = false;
+            if (resp.eresult() != k_EResultOK) {
+                resp.set_eresult(k_EResultOK);
+                bodyChanged = true;
+            }
+            if (resp.has_stats_failed_validation()) {
+                resp.clear_stats_failed_validation();
+                bodyChanged = true;
+            }
+
+            if (hdrChanged || bodyChanged) {
+                if (CommitRecvPacket(pPacket, pkt, hdrChanged ? &hdrMsg : nullptr, bodyChanged ? &resp : nullptr)) {
+                    LOG_ACHIEVEMENT_DEBUG("ClientStoreUserStats response: committed patched response for app {}", appId);
+                }
+            }
+
+            // Dual-stage notification: confirm stats store off-thread (coalesces with 820 send)
+            CloudRedirectHost::NotifyStatsStored(appId);
+        } catch (const std::exception& e) {
+            LOG_ACHIEVEMENT_ERROR("ClientStoreUserStats response caught exception: {}", e.what());
+        } catch (...) {
+            LOG_ACHIEVEMENT_ERROR("ClientStoreUserStats response caught unknown exception");
         }
     }
 
@@ -2483,12 +2496,11 @@ namespace {
                     }
                 }
             }
-            if (appId == 0) {
-                appId = Hooks_NetPacket_RichPresence::g_PlayingAppId.load(std::memory_order_relaxed);
-            }
+            if (appId == 0) return;
+
             appId = ResolveOnlineFixAppId(appId);
-            if (appId != 0 && !Hooks_Package::HasValidLicense(appId) &&
-                (LuaConfig::HasDepot(appId) || CloudRedirectHost::IsApp(appId))) {
+            if ((LuaConfig::HasDepot(appId) || CloudRedirectHost::IsApp(appId)) &&
+                !Hooks_Package::HasValidLicense(appId)) {
                 CloudRedirectHost::NotifyStatsStored(appId);
             }
             return;

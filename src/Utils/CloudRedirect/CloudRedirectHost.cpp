@@ -3,6 +3,7 @@
 
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Encoding.h"
+#include "OSTPlatform/include/Thread.h"
 #include "Utils/Config/Config.h"
 #include "Utils/Config/LuaConfig.h"
 #include "Utils/Logging/Log.h"
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace CloudRedirectHost {
@@ -43,6 +45,10 @@ namespace {
     std::atomic<uint32_t> g_cachedAccountId{0};
     std::atomic<uint32_t> g_inFlightCalls{0};
     OSTPlatform::DynamicLibrary::ModuleHandle g_module = nullptr;
+
+    std::mutex                   g_syncMutex;
+    std::unordered_set<uint32_t> g_inFlightSyncs;
+    std::unordered_set<uint32_t> g_pendingResyncs;
 
     struct InFlightGuard {
         bool active = false;
@@ -305,10 +311,12 @@ bool IsActive() noexcept {
 }
 
 bool IsApp(uint32_t appId) {
-    if (IsAppLicensed(appId)) return false;
+    if (appId == 0) return false;
     if (!g_active.load(std::memory_order_acquire)) return false;
+
+    bool isCrApp = false;
     try {
-        if (g_isApp && g_isApp(appId)) return true;
+        if (g_isApp && g_isApp(appId)) isCrApp = true;
     } catch (const std::exception& e) {
         LOG_ERROR("CloudRedirect: CR_IsApp({}) failed: {}", appId, e.what());
         return false;
@@ -316,10 +324,14 @@ bool IsApp(uint32_t appId) {
         LOG_ERROR("CloudRedirect: CR_IsApp({}) failed with unknown exception", appId);
         return false;
     }
-    const auto resolver = g_onlineFixResolver.load(std::memory_order_relaxed);
-    const uint32_t fixAppId = resolver ? resolver() : 0;
-    if (fixAppId != 0 && appId == fixAppId) return true;
-    return false;
+    if (!isCrApp) {
+        const auto resolver = g_onlineFixResolver.load(std::memory_order_relaxed);
+        const uint32_t fixAppId = resolver ? resolver() : 0;
+        if (fixAppId != 0 && appId == fixAppId) isCrApp = true;
+    }
+    if (!isCrApp) return false;
+
+    return !IsAppLicensed(appId);
 }
 
 void AddApp(uint32_t appId) {
@@ -407,14 +419,60 @@ void NotifyAppRunning(uint32_t appId, bool running) {
 }
 
 void NotifyStatsStored(uint32_t appId) {
-    if (IsAppLicensed(appId)) return;
+    if (appId == 0) return;
     if (!g_active.load(std::memory_order_acquire) || !g_notifyStatsStored) return;
-    try {
-        g_notifyStatsStored(appId);
-    } catch (const std::exception& e) {
-        LOG_ERROR("CloudRedirect: CR_NotifyStatsStored({}) failed: {}", appId, e.what());
-    } catch (...) {
-        LOG_ERROR("CloudRedirect: CR_NotifyStatsStored({}) failed with unknown exception", appId);
+    if (IsAppLicensed(appId)) return;
+
+    bool shouldSpawn = false;
+    {
+        std::lock_guard<std::mutex> lock(g_syncMutex);
+        if (g_inFlightSyncs.contains(appId)) {
+            g_pendingResyncs.insert(appId);
+            return;
+        }
+        g_inFlightSyncs.insert(appId);
+        shouldSpawn = true;
+    }
+
+    if (shouldSpawn) {
+        const bool started = OSTPlatform::Thread::StartDetached([appId]() -> uint32_t {
+            while (true) {
+                if (!g_active.load(std::memory_order_acquire)) {
+                    std::lock_guard<std::mutex> lock(g_syncMutex);
+                    g_inFlightSyncs.erase(appId);
+                    g_pendingResyncs.erase(appId);
+                    return 0;
+                }
+
+                {
+                    InFlightGuard guard;
+                    if (guard && g_notifyStatsStored) {
+                        try {
+                            g_notifyStatsStored(appId);
+                        } catch (const std::exception& e) {
+                            LOG_ERROR("CloudRedirect: CR_NotifyStatsStored({}) failed: {}", appId, e.what());
+                        } catch (...) {
+                            LOG_ERROR("CloudRedirect: CR_NotifyStatsStored({}) failed with unknown exception", appId);
+                        }
+                    }
+                }
+
+                std::lock_guard<std::mutex> lock(g_syncMutex);
+                if (g_pendingResyncs.erase(appId) > 0 && g_active.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                g_inFlightSyncs.erase(appId);
+                break;
+            }
+            return 0;
+        });
+
+        if (!started) {
+            std::lock_guard<std::mutex> lock(g_syncMutex);
+            g_inFlightSyncs.erase(appId);
+            g_pendingResyncs.erase(appId);
+            LOG_ERROR("CloudRedirect: failed to spawn worker for NotifyStatsStored({})", appId);
+        }
     }
 }
 
@@ -470,6 +528,12 @@ void Shutdown() {
     // Bounded wait (up to 50ms) for in-flight calls to exit, preventing Loader Lock deadlock.
     for (int i = 0; i < 50 && g_inFlightCalls.load(std::memory_order_acquire) > 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    {
+        std::lock_guard<std::mutex> syncLock(g_syncMutex);
+        g_inFlightSyncs.clear();
+        g_pendingResyncs.clear();
     }
 
     g_cachedAccountId.store(0, std::memory_order_release);
