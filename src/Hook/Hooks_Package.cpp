@@ -93,7 +93,8 @@ namespace {
         return true;
     }
 
-    bool CUtlMemoryGrowWrap(CUtlVector<AppId_t>* pVec, uint32 numToAdd) {
+    template<typename T>
+    bool CUtlMemoryGrowWrap(CUtlVector<T>* pVec, uint32 numToAdd) {
         if (!pVec || numToAdd == 0) {
             return false;
         }
@@ -125,7 +126,7 @@ namespace {
         }
 
         const int growDelta = static_cast<int>(requiredCapacity - currentAlloc);
-        fnGrow(pVec, growDelta);
+        fnGrow(reinterpret_cast<CUtlVector<AppId_t>*>(pVec), growDelta);
         return pVec->m_Memory.m_pMemory != nullptr &&
                pVec->m_Memory.m_nAllocationCount >= requiredCapacity;
     }
@@ -180,6 +181,55 @@ namespace {
         return true;
     }
 
+    [[nodiscard]] bool AppendUniqueDepotIdsToPackage(PackageInfo* pPkg,
+                                                     std::span<const DepotId_t> candidateIds,
+                                                     uint32_t* outAddedCount = nullptr) {
+        if (outAddedCount) {
+            *outAddedCount = 0;
+        }
+        if (!pPkg || candidateIds.empty()) {
+            return true;
+        }
+
+        const DepotId_t* existingData = pPkg->DepotIdVec.m_Memory.m_pMemory;
+        const uint32 existingSize = existingData ? pPkg->DepotIdVec.m_Size : 0u;
+        const std::span<const DepotId_t> existingSpan(existingData, existingSize);
+
+        std::vector<DepotId_t> toAdd;
+        toAdd.reserve(candidateIds.size());
+        for (DepotId_t id : candidateIds) {
+            if (id == 0 || id == k_uAppIdInvalid) {
+                continue;
+            }
+            if (LuaConfig::IsOwned(id)) {
+                continue;
+            }
+            if (std::ranges::find(existingSpan, id) == existingSpan.end() &&
+                std::ranges::find(toAdd, id) == toAdd.end()) {
+                toAdd.push_back(id);
+            }
+        }
+
+        if (toAdd.empty()) {
+            return true;
+        }
+
+        const uint32 oldSize = existingSize;
+        const uint32 numToAdd = static_cast<uint32>(toAdd.size());
+        if (!CUtlMemoryGrowWrap(&pPkg->DepotIdVec, numToAdd)) {
+            return false;
+        }
+
+        for (uint32 i = 0; i < numToAdd; ++i) {
+            pPkg->DepotIdVec.m_Memory.m_pMemory[oldSize + i] = toAdd[i];
+        }
+        pPkg->DepotIdVec.m_Size = oldSize + numToAdd;
+        if (outAddedCount) {
+            *outAddedCount = numToAdd;
+        }
+        return true;
+    }
+
     bool InitFakeLicenseOnce(PackageInfo* pPkg) {
         if (!pPkg) {
             return false;
@@ -197,17 +247,27 @@ namespace {
                 return false;
             }
 
-            // Inject all depots from config into the fake license. 
+            // Inject all configured apps and depots from config into the fake license.
             const std::vector<AppId_t> appIds = LuaConfig::GetAllDepotIds();
             if (!appIds.empty()) {
-                const uint32 oldSize = pPkg->AppIdVec.m_Memory.m_pMemory ? pPkg->AppIdVec.m_Size : 0u;
-                uint32 addedCount = 0;
-                if (!AppendUniqueAppIdsToPackage(pPkg, appIds, &addedCount)) {
+                const uint32 oldAppSize = pPkg->AppIdVec.m_Memory.m_pMemory ? pPkg->AppIdVec.m_Size : 0u;
+                uint32 addedAppCount = 0;
+                if (!AppendUniqueAppIdsToPackage(pPkg, appIds, &addedAppCount)) {
                     LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow AppId vector", kInjectedPackageId);
                     return false;
                 }
-                if (addedCount > 0) {
-                    LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} apps, oldSize={}", kInjectedPackageId, addedCount, oldSize);
+                if (addedAppCount > 0) {
+                    LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} apps, oldAppSize={}", kInjectedPackageId, addedAppCount, oldAppSize);
+                }
+
+                const uint32 oldDepotSize = pPkg->DepotIdVec.m_Memory.m_pMemory ? pPkg->DepotIdVec.m_Size : 0u;
+                uint32 addedDepotCount = 0;
+                if (!AppendUniqueDepotIdsToPackage(pPkg, appIds, &addedDepotCount)) {
+                    LOG_PACKAGE_WARN("InitFakeLicense(PackageId={}): failed to grow DepotId vector", kInjectedPackageId);
+                    return false;
+                }
+                if (addedDepotCount > 0) {
+                    LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): added {} depots, oldDepotSize={}", kInjectedPackageId, addedDepotCount, oldDepotSize);
                 }
             }
 
@@ -310,9 +370,14 @@ namespace {
             // Notice: executed outside of g_sharedLicensesMutex to prevent AB-BA lock inversion with g_packageInfoMutex.
             if (inserted) {
                 PackageInfo* pPkg = g_pInjectedPackageInfo.load(std::memory_order_acquire);
-                if (pPkg && pPkg->AppIdVec.m_Memory.m_pMemory) {
+                if (pPkg) {
                     std::lock_guard lock(g_packageInfoMutex);
-                    pPkg->AppIdVec.FindAndFastRemove(appId);
+                    if (pPkg->AppIdVec.m_Memory.m_pMemory) {
+                        pPkg->AppIdVec.FindAndFastRemove(appId);
+                    }
+                    if (pPkg->DepotIdVec.m_Memory.m_pMemory) {
+                        pPkg->DepotIdVec.FindAndFastRemove(appId);
+                    }
                 }
             }
         } else {
@@ -496,6 +561,13 @@ namespace Hooks_Package {
                     }
                 }
             }
+            if (pPkg->DepotIdVec.m_Memory.m_pMemory) {
+                for (AppId_t id : netRemovals) {
+                    while (pPkg->DepotIdVec.FindAndFastRemove(id)) {
+                        LOG_PACKAGE_DEBUG("NotifyLicenseChanged: removed DepotId {}", id);
+                    }
+                }
+            }
 
             // ── Add depots that are newly loaded ──
             LOG_PACKAGE_DEBUG("NotifyLicenseChanged: processing {} additions", uniqueAdditions.size());
@@ -503,6 +575,10 @@ namespace Hooks_Package {
                 uint32 addedToPkgCount = 0;
                 if (!AppendUniqueAppIdsToPackage(pPkg, uniqueAdditions, &addedToPkgCount)) {
                     LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow AppId vector for additions");
+                }
+                uint32 addedDepotCount = 0;
+                if (!AppendUniqueDepotIdsToPackage(pPkg, uniqueAdditions, &addedDepotCount)) {
+                    LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow DepotId vector for additions");
                 }
             }
         }
